@@ -16,10 +16,27 @@
       "architecture": { "value": "x64", "strategy": "external" }
     },
     { "name": "debug",   "inherits": "msvc-x64", "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" } },
-    { "name": "release", "inherits": "msvc-x64", "cacheVariables": { "CMAKE_BUILD_TYPE": "RelWithDebInfo" } }
+    { "name": "release", "inherits": "msvc-x64", "cacheVariables": { "CMAKE_BUILD_TYPE": "RelWithDebInfo" } },
+    {
+      "name": "debug-vs2026",
+      "displayName": "Debug - VS 2026 (MSVC 14.51 x64) + Qt 6.12.0 msvc2022_64",
+      "description": "Reutiliza as bibliotecas ja instaladas em vcpkg_installed; nao executa vcpkg install. Requer CMake >= 4.2 (ex.: o CMake do VS 2026).",
+      "generator": "Visual Studio 18 2026",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "toolchainFile": "D:/CAD_Projetos/vcpkg/scripts/buildsystems/vcpkg.cmake",
+      "architecture": { "value": "x64", "strategy": "set" },
+      "toolset": { "value": "v145,host=x64,version=14.51.36231", "strategy": "set" },
+      "cacheVariables": {
+        "VCPKG_TARGET_TRIPLET": "x64-windows",
+        "VCPKG_INSTALLED_DIR": "D:/CAD_Projetos/CadMecanico/vcpkg_installed",
+        "VCPKG_MANIFEST_INSTALL": "OFF",
+        "CMAKE_PREFIX_PATH": "C:/Qt/6.12.0/msvc2022_64"
+      }
+    }
   ],
   "buildPresets": [
     { "name": "debug",   "configurePreset": "debug" },
-    { "name": "release", "configurePreset": "release" }
+    { "name": "release", "configurePreset": "release" },
+    { "name": "debug-vs2026", "configurePreset": "debug-vs2026", "configuration": "Debug" }
   ]
 }
