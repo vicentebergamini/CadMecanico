@@ -2,24 +2,19 @@
 #include <QApplication>
 #include <QLabel>
 
-#include <BRepAlgoAPI_Cut.hxx>
-#include <BRepPrimAPI_MakeBox.hxx>
-#include <BRepPrimAPI_MakeCylinder.hxx>
-#include <STEPControl_Writer.hxx>
 #include <Standard_Version.hxx>
-#include <gp_Ax2.hxx>
+
+#include "io/StepExporter.h"
+#include "modeling/TestPart.h"
 
 int main(int argc, char* argv[])
 {
     QApplication app(argc, argv);
 
-    TopoDS_Shape bloco = BRepPrimAPI_MakeBox(100.0, 60.0, 20.0).Shape();
-    TopoDS_Shape furo  = BRepPrimAPI_MakeCylinder(gp_Ax2(gp_Pnt(50, 30, -1), gp::DZ()), 10.0, 22.0).Shape();
-    TopoDS_Shape peca  = BRepAlgoAPI_Cut(bloco, furo).Shape();
+    const TopoDS_Shape peca = cad::modeling::buildTestPart();
 
-    STEPControl_Writer writer;
-    writer.Transfer(peca, STEPControl_AsIs);
-    const bool ok = writer.Write("teste_peca.step") == IFSelect_RetDone;
+    // Gravado no diretório de trabalho, como na versão inicial.
+    const bool ok = cad::io::StepExporter().write(peca, "teste_peca.step").ok;
 
     QLabel label(QString("Qt %1 + OCCT %2\nExportacao STEP: %3")
                      .arg(qVersion(), OCC_VERSION_COMPLETE, ok ? "OK" : "FALHOU"));

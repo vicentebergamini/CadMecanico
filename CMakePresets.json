@@ -38,5 +38,13 @@
     { "name": "debug",   "configurePreset": "debug" },
     { "name": "release", "configurePreset": "release" },
     { "name": "debug-vs2026", "configurePreset": "debug-vs2026", "configuration": "Debug" }
+  ],
+  "testPresets": [
+    {
+      "name": "debug-vs2026",
+      "configurePreset": "debug-vs2026",
+      "configuration": "Debug",
+      "output": { "outputOnFailure": true }
+    }
   ]
 }
