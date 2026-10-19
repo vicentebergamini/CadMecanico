@@ -1,0 +1,15 @@
+{
+  "name": "cad-mecanico",
+  "version-string": "0.1.0",
+  "builtin-baseline": "20ceb8adbf0504d4b0d5e4058a32f9d4fc896391",
+  "dependencies": [
+    {
+      "name": "opencascade",
+      "default-features": false,
+      "features": [ "freetype", "tbb" ]
+    }
+  ],
+  "overrides": [
+    { "name": "opencascade", "version": "8.0.1" }
+  ]
+}

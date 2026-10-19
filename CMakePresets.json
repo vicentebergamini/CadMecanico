@@ -1,0 +1,25 @@
+{
+  "version": 6,
+  "configurePresets": [
+    {
+      "name": "msvc-x64",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "toolchainFile": "D:/CAD_Projetos/vcpkg/scripts/buildsystems/vcpkg.cmake",
+      "cacheVariables": {
+        "VCPKG_TARGET_TRIPLET": "x64-windows",
+        "VCPKG_INSTALL_OPTIONS": "--x-buildtrees-root=D:/vb",
+        "CMAKE_PREFIX_PATH": "C:/Qt/6.12.0/msvc2022_64",
+        "CMAKE_MAKE_PROGRAM": "C:/Qt/Tools/Ninja/ninja.exe"
+      },
+      "architecture": { "value": "x64", "strategy": "external" }
+    },
+    { "name": "debug",   "inherits": "msvc-x64", "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" } },
+    { "name": "release", "inherits": "msvc-x64", "cacheVariables": { "CMAKE_BUILD_TYPE": "RelWithDebInfo" } }
+  ],
+  "buildPresets": [
+    { "name": "debug",   "configurePreset": "debug" },
+    { "name": "release", "configurePreset": "release" }
+  ]
+}
