@@ -23,3 +23,32 @@ set_tests_properties(mainwindow PROPERTIES
     ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${QT6_INSTALL_PREFIX}/${QT6_INSTALL_PLUGINS}"
     ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${QT6_INSTALL_PREFIX}/${QT6_INSTALL_BINS}"
 )
+
+# Testes do visualizador 3D: exigem contexto OpenGL real (plataforma windows, sessão
+# gráfica interativa). "viewer" usa a escala do Windows; "viewer_escala" repete os testes
+# multiplicando-a por 1,25 (125% numa tela a 100%).
+qt_add_executable(test_viewer test_viewer.cpp ViewerTestUtils.h)
+set_target_properties(test_viewer PROPERTIES AUTOMOC ON WIN32_EXECUTABLE OFF)
+target_link_libraries(test_viewer PRIVATE cad_viewer cad_modeling Qt6::Test)
+
+qt_add_executable(test_app_viewer test_app_viewer.cpp ViewerTestUtils.h)
+set_target_properties(test_app_viewer PROPERTIES AUTOMOC ON WIN32_EXECUTABLE OFF)
+target_link_libraries(test_app_viewer PRIVATE cad_app cad_viewer cad_io cad_modeling Qt6::Test)
+
+add_test(NAME viewer COMMAND test_viewer)
+add_test(NAME viewer_escala COMMAND test_viewer)
+add_test(NAME app_viewer COMMAND test_app_viewer)
+
+set(_cad_gl_env "QT_QPA_PLATFORM=windows;QT_PLUGIN_PATH=${QT6_INSTALL_PREFIX}/${QT6_INSTALL_PLUGINS}")
+set_tests_properties(viewer app_viewer PROPERTIES
+    LABELS "gui;opengl"
+    TIMEOUT 300
+    ENVIRONMENT "${_cad_gl_env}"
+    ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${QT6_INSTALL_PREFIX}/${QT6_INSTALL_BINS}"
+)
+set_tests_properties(viewer_escala PROPERTIES
+    LABELS "gui;opengl"
+    TIMEOUT 300
+    ENVIRONMENT "${_cad_gl_env};QT_SCALE_FACTOR=1.25"
+    ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${QT6_INSTALL_PREFIX}/${QT6_INSTALL_BINS}"
+)

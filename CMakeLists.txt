@@ -20,6 +20,9 @@ endif()
 add_subdirectory(src/modeling)
 add_subdirectory(src/io)
 
+# Visualizador 3D (Qt + OCCT)
+add_subdirectory(src/viewer)
+
 # Interface gráfica
 add_subdirectory(src/app)
 

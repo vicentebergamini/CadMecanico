@@ -2,6 +2,7 @@
 
 #include "io/StepExporter.h"
 #include "modeling/TestPart.h"
+#include "viewer/OcctViewerWidget.h"
 
 #include <QAction>
 #include <QApplication>
@@ -9,7 +10,6 @@
 #include <QDockWidget>
 #include <QFileDialog>
 #include <QFileInfo>
-#include <QLabel>
 #include <QMenu>
 #include <QMenuBar>
 #include <QMessageBox>
@@ -82,22 +82,22 @@ void MainWindow::createActions()
     m_actRedo->setShortcut(QKeySequence::Redo);
     m_actRedo->setEnabled(false);
 
-    // Visualizar (habilitados com o visualizador 3D na E3)
+    // Visualizar (conectados ao visualizador 3D em createCentralArea())
     m_actFitAll = new QAction(tr("&Ajustar à janela"), this);
     m_actFitAll->setObjectName("actionAjustarJanela");
     m_actFitAll->setShortcut(QKeySequence(Qt::Key_F));
-    m_actFitAll->setEnabled(false);
+    m_actFitAll->setStatusTip(tr("Enquadra a peça inteira na janela (F)"));
 
-    auto makeViewAction = [this](const QString& text, const char* name) {
+    auto makeViewAction = [this](const QString& text, const char* name, const QString& tip) {
         auto* act = new QAction(text, this);
         act->setObjectName(name);
-        act->setEnabled(false);
+        act->setStatusTip(tip);
         return act;
     };
-    m_actViewFront = makeViewAction(tr("&Frente"), "actionVistaFrente");
-    m_actViewTop   = makeViewAction(tr("&Superior"), "actionVistaSuperior");
-    m_actViewRight = makeViewAction(tr("&Direita"), "actionVistaDireita");
-    m_actViewIso   = makeViewAction(tr("&Isométrica"), "actionVistaIsometrica");
+    m_actViewFront = makeViewAction(tr("&Frente"), "actionVistaFrente", tr("Vista frontal (ortográfica)"));
+    m_actViewTop   = makeViewAction(tr("&Superior"), "actionVistaSuperior", tr("Vista superior (ortográfica)"));
+    m_actViewRight = makeViewAction(tr("&Direita"), "actionVistaDireita", tr("Vista lateral direita (ortográfica)"));
+    m_actViewIso   = makeViewAction(tr("&Isométrica"), "actionVistaIsometrica", tr("Vista isométrica"));
 
     // Ajuda
     m_actAbout = new QAction(tr("&Sobre o CAD Mecânico"), this);
@@ -130,7 +130,6 @@ void MainWindow::createMenus()
     m_menuStandardViews->addAction(m_actViewTop);
     m_menuStandardViews->addAction(m_actViewRight);
     m_menuStandardViews->addAction(m_actViewIso);
-    m_menuStandardViews->setEnabled(false);
     menuView->addSeparator();
     // A ação de mostrar/ocultar o painel é adicionada em createDocks().
 
@@ -149,6 +148,15 @@ void MainWindow::createToolBars()
     // Reservada para as ferramentas de modelagem (esboço, extrusão, furo...).
     m_toolBarModeling = addToolBar(tr("Modelagem"));
     m_toolBarModeling->setObjectName("toolBarModelagem");
+
+    m_toolBarView = addToolBar(tr("Visualizar"));
+    m_toolBarView->setObjectName("toolBarVisualizar");
+    m_toolBarView->addAction(m_actFitAll);
+    m_toolBarView->addSeparator();
+    m_toolBarView->addAction(m_actViewFront);
+    m_toolBarView->addAction(m_actViewTop);
+    m_toolBarView->addAction(m_actViewRight);
+    m_toolBarView->addAction(m_actViewIso);
 }
 
 void MainWindow::createDocks()
@@ -174,12 +182,18 @@ void MainWindow::createDocks()
 
 void MainWindow::createCentralArea()
 {
-    auto* placeholder = new QLabel(tr("Visualizador 3D\n\nSerá implementado na etapa E3."));
-    placeholder->setObjectName("areaCentral");
-    placeholder->setAlignment(Qt::AlignCenter);
-    placeholder->setFrameShape(QFrame::StyledPanel);
-    placeholder->setMinimumSize(400, 300);
-    setCentralWidget(placeholder);
+    m_viewer = new cad::viewer::OcctViewerWidget;
+    m_viewer->setShape(m_part);
+    setCentralWidget(m_viewer);
+
+    connect(m_actFitAll, &QAction::triggered, m_viewer, &cad::viewer::OcctViewerWidget::fitAll);
+    connect(m_actViewFront, &QAction::triggered, m_viewer, &cad::viewer::OcctViewerWidget::viewFront);
+    connect(m_actViewTop, &QAction::triggered, m_viewer, &cad::viewer::OcctViewerWidget::viewTop);
+    connect(m_actViewRight, &QAction::triggered, m_viewer, &cad::viewer::OcctViewerWidget::viewRight);
+    connect(m_actViewIso, &QAction::triggered, m_viewer, &cad::viewer::OcctViewerWidget::viewIsometric);
+    connect(m_viewer, &cad::viewer::OcctViewerWidget::initializationFailed, this, [this](const QString& message) {
+        statusBar()->showMessage(message);
+    });
 }
 
 void MainWindow::exportStep()

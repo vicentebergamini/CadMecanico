@@ -7,4 +7,5 @@ target_link_libraries(cad_app PUBLIC
     Qt6::Widgets
     cad_modeling
     cad_io
+    cad_viewer
 )

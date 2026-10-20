@@ -12,6 +12,10 @@ class QMenu;
 class QToolBar;
 class QTreeWidget;
 
+namespace cad::viewer {
+class OcctViewerWidget;
+}
+
 namespace cad::app {
 
 class MainWindow : public QMainWindow
@@ -27,6 +31,8 @@ public:
     bool exportStepTo(const QString& filePath);
 
     const TopoDS_Shape& part() const { return m_part; }
+
+    cad::viewer::OcctViewerWidget* viewer() const { return m_viewer; }
 
 public slots:
     void exportStep();
@@ -65,8 +71,10 @@ private:
     QMenu* m_menuStandardViews = nullptr;
     QToolBar* m_toolBarFile = nullptr;
     QToolBar* m_toolBarModeling = nullptr;
+    QToolBar* m_toolBarView = nullptr;
     QDockWidget* m_dockOperations = nullptr;
     QTreeWidget* m_operationsTree = nullptr;
+    cad::viewer::OcctViewerWidget* m_viewer = nullptr;
 };
 
 } // namespace cad::app

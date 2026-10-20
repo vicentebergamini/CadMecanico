@@ -2,6 +2,7 @@
 #include "app/MainWindow.h"
 #include "io/StepImporter.h"
 #include "modeling/ShapeInspector.h"
+#include "viewer/OcctViewerWidget.h"
 
 #include <QAction>
 #include <QApplication>
@@ -165,13 +166,13 @@ void TestMainWindow::menus()
     auto* view = m_window->findChild<QMenu*>("menuVisualizar");
     QVERIFY(view);
     QCOMPARE(actionTexts(view).mid(0, 2), QStringList({"Ajustar à janela", "Vistas padrão"}));
-    QVERIFY(!action("actionAjustarJanela")->isEnabled());
+    QVERIFY(action("actionAjustarJanela")->isEnabled());
     auto* views = m_window->findChild<QMenu*>("menuVistasPadrao");
     QVERIFY(views);
-    QVERIFY(!views->isEnabled());
+    QVERIFY(views->isEnabled());
     QCOMPARE(actionTexts(views), QStringList({"Frente", "Superior", "Direita", "Isométrica"}));
     for (QAction* a : views->actions())
-        QVERIFY(!a->isEnabled());
+        QVERIFY(a->isEnabled());
 
     auto* help = m_window->findChild<QMenu*>("menuAjuda");
     QVERIFY(help);
@@ -189,6 +190,11 @@ void TestMainWindow::barrasDeFerramentas()
     auto* modeling = m_window->findChild<QToolBar*>("toolBarModelagem");
     QVERIFY(modeling);
     QVERIFY(modeling->actions().isEmpty());
+
+    auto* view = m_window->findChild<QToolBar*>("toolBarVisualizar");
+    QVERIFY(view);
+    QVERIFY(view->actions().contains(action("actionAjustarJanela")));
+    QVERIFY(view->actions().contains(action("actionVistaIsometrica")));
 }
 
 void TestMainWindow::painelArvoreOperacoes()
@@ -207,9 +213,14 @@ void TestMainWindow::painelArvoreOperacoes()
 
 void TestMainWindow::areaCentral()
 {
-    auto* label = qobject_cast<QLabel*>(m_window->centralWidget());
-    QVERIFY(label);
-    QVERIFY(label->text().contains("E3"));
+    // Visualizador 3D (a renderização com OpenGL real é testada em test_viewer/test_app_viewer;
+    // aqui a plataforma offscreen não oferece contexto OpenGL).
+    auto* viewer = qobject_cast<cad::viewer::OcctViewerWidget*>(m_window->centralWidget());
+    QVERIFY(viewer);
+    QCOMPARE(viewer, m_window->viewer());
+    QCOMPARE(viewer->objectName(), QStringLiteral("visualizador3D"));
+    QVERIFY(viewer->shape().IsSame(m_window->part()));
+    QVERIFY(!m_window->findChild<QLabel*>("areaCentral"));
 }
 
 void TestMainWindow::exportarPeloMenu()
