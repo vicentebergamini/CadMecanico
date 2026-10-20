@@ -5,6 +5,9 @@
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepPrimAPI_MakeCylinder.hxx>
+#include <BRepPrimAPI_MakePrism.hxx>
+#include <TopExp_Explorer.hxx>
+#include <TopoDS.hxx>
 #include <Standard_Failure.hxx>
 #include <gp_Ax2.hxx>
 
@@ -83,6 +86,64 @@ FeatureResult cutThroughHole(const TopoDS_Shape& base, double centerX, double ce
     r.ok = ShapeInspector::isValid(r.shape);
     if (!r.ok)
         r.message = "Sólido resultante do furo inválido";
+    return r;
+}
+
+FeatureResult extrudeFace(const TopoDS_Face& face, const gp_Vec& direction)
+{
+    FeatureResult r;
+    if (face.IsNull())
+    {
+        r.message = "Perfil sem face";
+        return r;
+    }
+    if (direction.Magnitude() <= 0.0)
+    {
+        r.message = "Profundidade de extrusão nula";
+        return r;
+    }
+    try
+    {
+        BRepPrimAPI_MakePrism prism(face, direction, true /*copia a face*/, true);
+        prism.Build();
+        if (!prism.IsDone())
+        {
+            r.message = "Falha na extrusão (BRepPrimAPI_MakePrism)";
+            return r;
+        }
+        r.shape = prism.Shape();
+    }
+    catch (const Standard_Failure& e)
+    {
+        r.message = std::string("Falha na extrusão: ") + e.what();
+        return r;
+    }
+
+    // Um único sólido.
+    int solids = 0;
+    TopoDS_Shape solid;
+    for (TopExp_Explorer ex(r.shape, TopAbs_SOLID); ex.More(); ex.Next())
+    {
+        ++solids;
+        solid = ex.Current();
+    }
+    if (solids != 1)
+    {
+        r.message = "A extrusão não produziu exatamente um sólido";
+        return r;
+    }
+    r.shape = solid;
+    // Volume positivo: se o sólido estiver com orientação invertida, inverte-o.
+    if (ShapeInspector::volume(r.shape) < 0.0)
+        r.shape.Reverse();
+    if (ShapeInspector::volume(r.shape) <= 0.0)
+    {
+        r.message = "Sólido extrudado com volume nulo";
+        return r;
+    }
+    r.ok = ShapeInspector::isValid(r.shape);
+    if (!r.ok)
+        r.message = "Sólido extrudado inválido (BRepCheck)";
     return r;
 }
 

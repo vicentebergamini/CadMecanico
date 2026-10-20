@@ -20,7 +20,15 @@ add_executable(test_esboco test_esboco.cpp TestCheck.h ExpectedTestPart.h)
 target_link_libraries(test_esboco PRIVATE cad_document cad_sketch)
 add_test(NAME esboco COMMAND test_esboco)
 
-set_tests_properties(geometria step_roundtrip selecao_info documento esboco PROPERTIES LABELS "core")
+add_executable(test_extrusao test_extrusao.cpp TestCheck.h)
+target_link_libraries(test_extrusao PRIVATE cad_document cad_io)
+add_test(NAME extrusao COMMAND test_extrusao)
+
+add_executable(test_stl test_stl.cpp TestCheck.h StlTestUtils.h)
+target_link_libraries(test_stl PRIVATE cad_document cad_io TKDESTL)
+add_test(NAME stl COMMAND test_stl)
+
+set_tests_properties(geometria step_roundtrip selecao_info documento esboco extrusao stl PROPERTIES LABELS "core")
 
 # Formato .cadmec (QtCore, sem interface gráfica).
 qt_add_executable(test_arquivo_cadmec test_arquivo_cadmec.cpp)
@@ -76,6 +84,10 @@ set_target_properties(test_documento_vazio PROPERTIES AUTOMOC ON WIN32_EXECUTABL
 target_link_libraries(test_documento_vazio PRIVATE cad_app cad_viewer cad_document_io cad_io cad_modeling Qt6::Test)
 target_compile_definitions(test_documento_vazio PRIVATE CADMEC_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/dados")
 
+qt_add_executable(test_extrusao_ui test_extrusao_ui.cpp ViewerTestUtils.h StlTestUtils.h)
+set_target_properties(test_extrusao_ui PROPERTIES AUTOMOC ON WIN32_EXECUTABLE OFF)
+target_link_libraries(test_extrusao_ui PRIVATE cad_app cad_viewer cad_document_io cad_io cad_modeling Qt6::Test)
+
 add_test(NAME viewer COMMAND test_viewer)
 add_test(NAME viewer_escala COMMAND test_viewer)
 add_test(NAME app_viewer COMMAND test_app_viewer)
@@ -84,9 +96,10 @@ add_test(NAME interacao_escala COMMAND test_interacao)
 add_test(NAME esboco_ui COMMAND test_esboco_ui)
 add_test(NAME esboco_ui_escala COMMAND test_esboco_ui)
 add_test(NAME documento_vazio COMMAND test_documento_vazio)
+add_test(NAME extrusao_ui COMMAND test_extrusao_ui)
 
 set(_cad_gl_env "QT_QPA_PLATFORM=windows;QT_PLUGIN_PATH=${QT6_INSTALL_PREFIX}/${QT6_INSTALL_PLUGINS}")
-set_tests_properties(viewer app_viewer interacao esboco_ui documento_vazio PROPERTIES
+set_tests_properties(viewer app_viewer interacao esboco_ui documento_vazio extrusao_ui PROPERTIES
     LABELS "gui;opengl"
     TIMEOUT 300
     ENVIRONMENT "${_cad_gl_env}"

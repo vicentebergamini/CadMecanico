@@ -1,7 +1,11 @@
 #include "app/MainWindow.h"
 
+#include "app/ExtrusionDialog.h"
 #include "app/ParametersDialog.h"
 #include "app/SketchEntityDialog.h"
+#include "app/StlExportDialog.h"
+#include "modeling/ShapeInspector.h"
+#include "sketch/SketchProfile.h"
 #include "document/DocumentFile.h"
 #include "io/StepExporter.h"
 #include "modeling/SubShapeInfo.h"
@@ -105,6 +109,7 @@ QString parameterLabel(const std::string& key)
     if (key == "width")  return MainWindow::tr("Largura");
     if (key == "height") return MainWindow::tr("Altura");
     if (key == "radius") return MainWindow::tr("Raio");
+    if (key == "depth")  return MainWindow::tr("Profundidade");
     return QString::fromStdString(key);
 }
 
@@ -114,6 +119,7 @@ QString operationTypeName(OperationType type)
     {
     case OperationType::Block:       return MainWindow::tr("Bloco");
     case OperationType::ThroughHole: return MainWindow::tr("Furo passante");
+    case OperationType::Extrude:     return MainWindow::tr("Extrusão");
     }
     return QString();
 }
@@ -179,11 +185,26 @@ void MainWindow::createActions()
     m_actSaveAs->setStatusTip(tr("Salva o documento em outro arquivo"));
     connect(m_actSaveAs, &QAction::triggered, this, &MainWindow::saveDocumentAs);
 
-    m_actExportStep = new QAction(st->standardIcon(QStyle::SP_DialogSaveButton), tr("&Exportar STEP..."), this);
+    m_actExportStep = new QAction(st->standardIcon(QStyle::SP_DialogSaveButton), tr("&STEP (*.step)..."), this);
     m_actExportStep->setObjectName("actionExportarStep");
     m_actExportStep->setShortcut(QKeySequence(tr("Ctrl+E")));
     m_actExportStep->setStatusTip(tr("Exporta a peça atual em formato STEP"));
     connect(m_actExportStep, &QAction::triggered, this, &MainWindow::exportStep);
+
+    m_actExportStl = new QAction(st->standardIcon(QStyle::SP_DriveFDIcon), tr("S&TL (*.stl)..."), this);
+    m_actExportStl->setObjectName("actionExportarStl");
+    m_actExportStl->setStatusTip(tr("Exporta a geometria sólida atual em STL (malha triangular, mm)"));
+    connect(m_actExportStl, &QAction::triggered, this, &MainWindow::exportStl);
+
+    // Operações
+    m_actExtrude = new QAction(st->standardIcon(QStyle::SP_ArrowUp), tr("&Extrusão..."), this);
+    m_actExtrude->setObjectName("actionExtrusao");
+    connect(m_actExtrude, &QAction::triggered, this, &MainWindow::extrude);
+
+    m_actEditOperation = new QAction(tr("Editar &operação..."), this);
+    m_actEditOperation->setObjectName("actionEditarOperacao");
+    m_actEditOperation->setStatusTip(tr("Edita os parâmetros da operação selecionada na árvore"));
+    connect(m_actEditOperation, &QAction::triggered, this, &MainWindow::editOperation);
 
     m_actQuit = new QAction(st->standardIcon(QStyle::SP_DialogCloseButton), tr("&Sair"), this);
     m_actQuit->setObjectName("actionSair");
@@ -298,7 +319,10 @@ void MainWindow::createMenus()
     menuFile->addAction(m_actSave);
     menuFile->addAction(m_actSaveAs);
     menuFile->addSeparator();
-    menuFile->addAction(m_actExportStep);
+    QMenu* menuExport = menuFile->addMenu(tr("Ex&portar"));
+    menuExport->setObjectName("menuExportar");
+    menuExport->addAction(m_actExportStep);
+    menuExport->addAction(m_actExportStl);
     menuFile->addSeparator();
     menuFile->addAction(m_actQuit);
 
@@ -308,6 +332,11 @@ void MainWindow::createMenus()
     menuEdit->addAction(m_actRedo);
     menuEdit->addSeparator();
     menuEdit->addAction(m_actEditParameters);
+
+    QMenu* menuOperations = menuBar()->addMenu(tr("&Operações"));
+    menuOperations->setObjectName("menuOperacoes");
+    menuOperations->addAction(m_actExtrude);
+    menuOperations->addAction(m_actEditOperation);
 
     QMenu* menuSketch = menuBar()->addMenu(tr("E&sboço"));
     menuSketch->setObjectName("menuEsboco");
@@ -349,6 +378,7 @@ void MainWindow::createToolBars()
     m_toolBarFile->addAction(m_actNew);
     m_toolBarFile->addAction(m_actOpen);
     m_toolBarFile->addAction(m_actExportStep);
+    m_toolBarFile->addAction(m_actExportStl);
     m_toolBarFile->addAction(m_actQuit);
 
     // Ferramentas de modelagem (esboço, extrusão, furo... nas próximas etapas).
@@ -356,6 +386,7 @@ void MainWindow::createToolBars()
     m_toolBarModeling->setObjectName("toolBarModelagem");
     m_toolBarModeling->addAction(m_actEditParameters);
     m_toolBarModeling->addAction(m_actNewSketch);
+    m_toolBarModeling->addAction(m_actExtrude);
 
     m_toolBarSketch = addToolBar(tr("Esboço"));
     m_toolBarSketch->setObjectName("toolBarEsboco");
@@ -391,6 +422,7 @@ void MainWindow::createDocks()
     connect(m_operationsTree, &QTreeWidget::itemDoubleClicked, this, [this](QTreeWidgetItem* item, int) {
         if (!item)
             return;
+        m_operationsTree->setCurrentItem(item); // a ação atua sobre o item clicado
         const QString kind = item->data(0, kItemKindRole).toString();
         if (kind == QLatin1String("esboco") && !isEditingSketch())
             editSketch(item->data(0, kItemIdRole).toString());
@@ -398,7 +430,7 @@ void MainWindow::createDocks()
             editEntityDimensions();
         else if (!item->data(0, kItemIdRole).toString().isEmpty() && kind != QLatin1String("esboco")
                  && kind != QLatin1String("entidade") && !isEditingSketch())
-            editParameters();
+            editOperation();
     });
 
     m_dockOperations = new QDockWidget(tr("Árvore de Operações"), this);
@@ -471,6 +503,14 @@ void MainWindow::updateActionStates()
     const bool editing = isEditingSketch();
     m_actEditParameters->setEnabled(!editing && m_document.hasPart());
     m_actExportStep->setEnabled(!m_document.shape().IsNull());
+    m_actExportStl->setEnabled(!m_document.shape().IsNull());
+    // Extrusão: somente com um esboço concluído selecionado na árvore.
+    const bool sketchSelected = !editing && !selectedSketchId().isEmpty();
+    m_actExtrude->setEnabled(sketchSelected);
+    m_actExtrude->setStatusTip(sketchSelected ? tr("Extruda o esboço selecionado (perfil fechado)")
+                                              : tr("Selecione na árvore um esboço concluído para extrudar"));
+    m_actExtrude->setToolTip(m_actExtrude->statusTip());
+    m_actEditOperation->setEnabled(!editing && !selectedOperationId().isEmpty());
 }
 
 std::vector<Sketch> MainWindow::displayedSketches(bool includeEditing) const
@@ -531,6 +571,8 @@ void MainWindow::rebuildTree()
 
     for (const Operation& op : m_document.operations())
     {
+        if (op.type == OperationType::Extrude)
+            continue; // listadas depois dos esboços de que dependem
         const QString id = QString::fromStdString(op.id);
         auto* item = new QTreeWidgetItem(root);
         item->setText(0, QString::fromStdString(op.name));
@@ -586,6 +628,45 @@ void MainWindow::rebuildTree()
             toSelect = item;
     }
 
+    // Extrusões (dependem dos esboços): esboço de origem, profundidade, sentido e estado.
+    for (const Operation& op : m_document.operations())
+    {
+        if (op.type != OperationType::Extrude)
+            continue;
+        const QString id = QString::fromStdString(op.id);
+        const Sketch* sketch = m_document.findSketch(op.sketchId);
+        auto* item = new QTreeWidgetItem(root);
+        item->setText(0, QString::fromStdString(op.name));
+        item->setIcon(0, st->standardIcon(op.status == OperationStatus::Valid ? QStyle::SP_ArrowUp
+                                                                              : QStyle::SP_MessageBoxWarning));
+        item->setData(0, kItemKindRole, QStringLiteral("operacao"));
+        item->setData(0, kItemIdRole, id);
+        item->setToolTip(0, tr("%1 (%2) — %3").arg(QString::fromStdString(op.name), id, statusName(op.status)));
+        auto addChild = [&](const QString& text, const char* kind) {
+            auto* child = new QTreeWidgetItem(item);
+            child->setText(0, text);
+            child->setData(0, kItemKindRole, QString::fromLatin1(kind));
+            child->setData(0, kItemIdRole, id);
+        };
+        addChild(tr("Esboço de origem: %1 (%2)")
+                     .arg(sketch ? QString::fromStdString(sketch->name()) : tr("inexistente"),
+                          QString::fromStdString(op.sketchId)),
+                 "referencia");
+        addChild(tr("Profundidade: %1").arg(mm(op.parameter("depth"))), "parametro");
+        QString direction;
+        if (sketch)
+        {
+            const gp_Dir n = op.reversed ? sketch->plane().normal().Reversed() : sketch->plane().normal();
+            direction = vectorText(n);
+        }
+        addChild(tr("Sentido: %1 %2").arg(op.reversed ? tr("oposto à normal") : tr("normal do plano"), direction),
+                 "parametro");
+        addChild(tr("Estado: %1").arg(statusName(op.status)), "estado");
+        if (!toSelect && id == selectedId)
+            toSelect = item;
+        item->setExpanded(true);
+    }
+
     root->setExpanded(true);
     m_operationsTree->setCurrentItem(toSelect ? toSelect : root);
     m_updatingTree = false;
@@ -595,6 +676,8 @@ void MainWindow::rebuildTree()
 void MainWindow::onTreeItemChanged(QTreeWidgetItem* item)
 {
     showItemProperties(item);
+    if (!m_updatingTree)
+        updateActionStates();
     if (m_updatingTree || !item || !isEditingSketch())
         return;
     // Selecionar uma entidade do esboço em edição na árvore seleciona-a no visualizador.
@@ -668,6 +751,15 @@ void MainWindow::showItemProperties(QTreeWidgetItem* item)
             html += tr("<br>Mensagem: %1").arg(QString::fromStdString(op->statusMessage).toHtmlEscaped());
         for (const auto& p : op->parameters)
             html += tr("<br>%1: %2").arg(parameterLabel(p.key), mm(p.value));
+        if (op->type == OperationType::Extrude)
+        {
+            const Sketch* sketch = m_document.findSketch(op->sketchId);
+            html += tr("<br>Esboço de origem: %1 (%2)<br>Sentido: %3<br>Volume: %4 mm³")
+                        .arg(sketch ? QString::fromStdString(sketch->name()).toHtmlEscaped() : tr("inexistente"),
+                             QString::fromStdString(op->sketchId),
+                             op->reversed ? tr("oposto à normal do plano") : tr("normal do plano"),
+                             num(cad::modeling::ShapeInspector::volume(op->result)));
+        }
         if (op->type == OperationType::ThroughHole)
         {
             const PartParameters pp = m_document.parameters();
@@ -859,6 +951,141 @@ void MainWindow::closeEvent(QCloseEvent* event)
         event->ignore();
 }
 
+// --- Extrusões ---------------------------------------------------------------
+
+QString MainWindow::selectedSketchId() const
+{
+    QTreeWidgetItem* item = m_operationsTree ? m_operationsTree->currentItem() : nullptr;
+    if (!item)
+        return QString();
+    const QString kind = item->data(0, kItemKindRole).toString();
+    if (kind != QLatin1String("esboco") && kind != QLatin1String("entidade"))
+        return QString();
+    const QString id = item->data(0, kItemIdRole).toString();
+    return m_document.findSketch(id.toStdString()) ? id : QString();
+}
+
+QString MainWindow::selectedOperationId() const
+{
+    QTreeWidgetItem* item = m_operationsTree ? m_operationsTree->currentItem() : nullptr;
+    if (!item)
+        return QString();
+    const QString kind = item->data(0, kItemKindRole).toString();
+    if (kind == QLatin1String("esboco") || kind == QLatin1String("entidade") || kind == QLatin1String("documento"))
+        return QString();
+    const QString id = item->data(0, kItemIdRole).toString();
+    return m_document.findOperation(id.toStdString()) ? id : QString();
+}
+
+void MainWindow::selectTreeItem(const QString& id)
+{
+    QTreeWidgetItem* root = m_operationsTree->topLevelItem(0);
+    for (int i = 0; root && i < root->childCount(); ++i)
+        if (root->child(i)->data(0, kItemIdRole).toString() == id)
+        {
+            m_operationsTree->setCurrentItem(root->child(i));
+            return;
+        }
+}
+
+void MainWindow::extrude()
+{
+    if (isEditingSketch())
+        return;
+    const QString sketchId = selectedSketchId();
+    if (sketchId.isEmpty())
+    {
+        statusBar()->showMessage(tr("Selecione um esboço na árvore para extrudar"), 8000);
+        reportError(tr("Extrusão"), tr("Selecione na árvore de operações um esboço concluído com um perfil fechado "
+                                       "(retângulo, círculo ou contorno de linhas) e acione Extrusão novamente."));
+        return;
+    }
+    const Sketch* sketch = m_document.findSketch(sketchId.toStdString());
+    const cad::sketch::ProfileResult profile = cad::sketch::buildProfile(*sketch);
+    if (!profile.ok)
+    {
+        statusBar()->showMessage(tr("Esboço sem perfil válido para extrusão"), 8000);
+        reportError(tr("Extrusão"), tr("O %1 não pode ser extrudado:\n%2")
+                                        .arg(QString::fromStdString(sketch->name()), QString::fromStdString(profile.message)));
+        return;
+    }
+    cad::document::ExtrudeParameters initial;
+    initial.name = m_document.defaultExtrusionName();
+    initial.sketchId = sketchId.toStdString();
+    initial.depth = 10.0;
+    const auto parameters = askExtrusion(initial, false);
+    m_viewer->clearPreviewShape();
+    if (!parameters)
+    {
+        statusBar()->showMessage(tr("Extrusão cancelada; documento mantido"), 5000);
+        return;
+    }
+    addExtrusion(*parameters);
+}
+
+bool MainWindow::addExtrusion(const cad::document::ExtrudeParameters& parameters)
+{
+    std::string newId;
+    const auto result = m_document.addExtrusion(parameters, &newId);
+    if (!result.ok)
+    {
+        statusBar()->showMessage(tr("Extrusão recusada: %1").arg(QString::fromStdString(result.message)), 8000);
+        reportError(tr("Extrusão"), tr("A extrusão não foi criada:\n%1").arg(QString::fromStdString(result.message)));
+        return false;
+    }
+    refreshDocumentViews(true);
+    selectTreeItem(QString::fromStdString(newId));
+    const Operation* op = m_document.findOperation(newId);
+    statusBar()->showMessage(tr("%1 criada: volume %2 mm³")
+                                 .arg(QString::fromStdString(op->name), num(cad::modeling::ShapeInspector::volume(op->result))),
+                             8000);
+    return true;
+}
+
+void MainWindow::editOperation()
+{
+    if (isEditingSketch())
+        return;
+    const QString id = selectedOperationId();
+    const Operation* op = m_document.findOperation(id.toStdString());
+    if (!op)
+        return;
+    if (op->type != OperationType::Extrude)
+    {
+        editParameters(); // bloco base / furo passante
+        return;
+    }
+    const auto parameters = askExtrusion(m_document.extrudeParameters(id.toStdString()), true);
+    m_viewer->clearPreviewShape();
+    if (!parameters)
+    {
+        statusBar()->showMessage(tr("Edição da extrusão cancelada"), 5000);
+        return;
+    }
+    updateExtrusion(id, *parameters);
+}
+
+bool MainWindow::updateExtrusion(const QString& operationId, const cad::document::ExtrudeParameters& parameters)
+{
+    const int revision = m_document.revision();
+    const auto result = m_document.updateExtrusion(operationId.toStdString(), parameters);
+    if (!result.ok)
+    {
+        statusBar()->showMessage(tr("Extrusão não alterada: %1").arg(QString::fromStdString(result.message)), 8000);
+        reportError(tr("Extrusão"), tr("Os parâmetros não foram aplicados:\n%1\n\nA geometria foi mantida no último "
+                                       "estado válido.")
+                                        .arg(QString::fromStdString(result.message)));
+        return false;
+    }
+    if (m_document.revision() != revision)
+    {
+        refreshDocumentViews(true);
+        selectTreeItem(operationId);
+        statusBar()->showMessage(tr("Extrusão recalculada"), 5000);
+    }
+    return true;
+}
+
 // --- Esboços -----------------------------------------------------------------
 
 void MainWindow::setSketchModeUi(bool editing)
@@ -952,18 +1179,26 @@ bool MainWindow::finishSketch()
     if (!isEditingSketch())
         return false;
     std::string error;
+    const int revision = m_document.revision();
     if (!m_document.commitSketch(*m_editSketch, error))
     {
-        reportError(tr("Concluir esboço"), tr("O esboço não pôde ser gravado:\n%1").arg(QString::fromStdString(error)));
+        // Ex.: a alteração invalida uma extrusão dependente; o documento e o esboço salvo ficam
+        // como estavam e a edição continua aberta para correção ou cancelamento.
+        statusBar()->showMessage(tr("Esboço não concluído: %1").arg(QString::fromStdString(error)), 10000);
+        reportError(tr("Concluir esboço"),
+                    tr("O esboço não pôde ser gravado:\n%1\n\nO documento foi mantido no último estado válido; "
+                       "corrija o esboço ou cancele a edição.")
+                        .arg(QString::fromStdString(error)));
         return false;
     }
+    const bool geometryChanged = m_document.revision() != revision; // extrusões dependentes recalculadas
     const QString name = QString::fromStdString(m_editSketch->name());
     const QString id = QString::fromStdString(m_editSketch->id());
     m_editSketch.reset();
     m_selectedEntity.clear();
     m_viewer->exitSketchMode();
     setSketchModeUi(false);
-    refreshDocumentViews(false);
+    refreshDocumentViews(geometryChanged);
     // Seleciona o esboço concluído na árvore.
     QTreeWidgetItem* root = m_operationsTree->topLevelItem(0);
     for (int i = 0; root && i < root->childCount(); ++i)
@@ -1196,6 +1431,68 @@ bool MainWindow::exportStepTo(const QString& filePath)
     return true;
 }
 
+void MainWindow::exportStl()
+{
+    if (part().IsNull())
+    {
+        statusBar()->showMessage(tr("Nada para exportar: o documento não contém sólido"), 8000);
+        reportError(tr("Exportar STL"),
+                    tr("O documento não contém sólido para exportar.\n\n"
+                       "Esboços 2D não são exportados em STL; crie uma extrusão ou abra uma peça com sólido."));
+        return;
+    }
+    const QString base = QString::fromStdString(m_document.name());
+    const auto request = askStlExport(QDir(m_lastExportDir).filePath(base + QStringLiteral(".stl")));
+    if (!request)
+    {
+        statusBar()->showMessage(tr("Exportação STL cancelada"), 5000);
+        return;
+    }
+    QString path = request->filePath;
+    if (QFileInfo(path).suffix().isEmpty())
+        path += QStringLiteral(".stl");
+    if (exportStlTo(path, request->options))
+        m_lastExportDir = QFileInfo(path).absolutePath();
+}
+
+bool MainWindow::exportStlTo(const QString& filePath, const cad::io::StlExportOptions& options)
+{
+    const QString nativePath = QDir::toNativeSeparators(filePath);
+    if (part().IsNull())
+    {
+        reportError(tr("Exportar STL"), tr("O documento não contém sólido para exportar."));
+        return false;
+    }
+    if (QFileInfo::exists(filePath) && !confirmOverwrite(nativePath))
+    {
+        statusBar()->showMessage(tr("Exportação cancelada: arquivo existente mantido"), 5000);
+        return false;
+    }
+
+    QApplication::setOverrideCursor(Qt::WaitCursor);
+    const auto result = cad::io::StlExporter().write(part(), std::filesystem::path(filePath.toStdWString()), options);
+    QApplication::restoreOverrideCursor();
+    if (!result.ok)
+    {
+        statusBar()->showMessage(tr("Falha na exportação STL"), 8000);
+        reportError(tr("Exportar STL"), tr("Não foi possível exportar o arquivo:\n%1\n\n%2")
+                                            .arg(nativePath, QString::fromStdString(result.message)));
+        return false;
+    }
+    const QLocale locale(QLocale::Portuguese, QLocale::Brazil);
+    statusBar()->showMessage(tr("STL exportado: %1 (%2 triângulos)").arg(nativePath).arg(result.triangles), 8000);
+    reportInfo(tr("Exportar STL"),
+               tr("Arquivo exportado com sucesso:\n%1\n\nFormato: %2\nSólidos: %3\nTriângulos: %4\n"
+                  "Deflexão linear: %5 mm\nDeflexão angular: %6°\n\n"
+                  "As coordenadas estão em milímetros. O formato STL não armazena a unidade.")
+                   .arg(nativePath, options.format == cad::io::StlFormat::Ascii ? tr("ASCII") : tr("binário"))
+                   .arg(result.solids)
+                   .arg(result.triangles)
+                   .arg(locale.toString(result.parameters.linearDeflection, 'f', 4),
+                        locale.toString(result.parameters.angularDeflectionDeg, 'f', 1)));
+    return true;
+}
+
 void MainWindow::showAbout()
 {
     QMessageBox::about(this, tr("Sobre o CAD Mecânico"),
@@ -1253,6 +1550,43 @@ QString MainWindow::askSavePath(const QString& suggestedPath)
     return QFileDialog::getSaveFileName(this, tr("Salvar documento"), suggestedPath,
                                         tr("Documentos CadMecanico (*.cadmec)"), nullptr,
                                         QFileDialog::DontConfirmOverwrite);
+}
+
+std::optional<cad::document::ExtrudeParameters> MainWindow::askExtrusion(const cad::document::ExtrudeParameters& initial,
+                                                                        bool editing)
+{
+    const Sketch* sketch = m_document.findSketch(initial.sketchId);
+    const QString description = sketch ? tr("%1 (%2, plano %3)")
+                                             .arg(QString::fromStdString(sketch->name()),
+                                                  QString::fromStdString(sketch->id()),
+                                                  QString::fromLatin1(SketchPlane::name(sketch->plane().type())))
+                                       : QString::fromStdString(initial.sketchId);
+    // A pré-visualização avalia os parâmetros sem alterar o documento.
+    ExtrusionDialog dialog(initial, description,
+                           [this](const cad::document::ExtrudeParameters& p) { return m_document.previewExtrusion(p); },
+                           editing, this);
+    connect(&dialog, &ExtrusionDialog::previewChanged, this,
+            [this](const cad::modeling::FeatureResult& r, bool show) {
+                m_viewer->setPreviewShape(show && r.ok ? r.shape : TopoDS_Shape());
+            });
+    // Força a primeira pré-visualização (o diálogo avaliou antes da conexão).
+    {
+        const auto r = m_document.previewExtrusion(dialog.parameters());
+        m_viewer->setPreviewShape(r.ok ? r.shape : TopoDS_Shape());
+    }
+    const bool accepted = dialog.exec() == QDialog::Accepted;
+    m_viewer->clearPreviewShape();
+    if (!accepted)
+        return std::nullopt;
+    return dialog.parameters();
+}
+
+std::optional<MainWindow::StlExportRequest> MainWindow::askStlExport(const QString& suggestedPath)
+{
+    StlExportDialog dialog(suggestedPath, part(), this);
+    if (dialog.exec() != QDialog::Accepted)
+        return std::nullopt;
+    return StlExportRequest{dialog.filePath(), dialog.options()};
 }
 
 std::optional<PlaneType> MainWindow::askSketchPlane()

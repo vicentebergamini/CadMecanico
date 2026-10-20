@@ -155,11 +155,18 @@ void TestMainWindow::menus()
     QStringList titles;
     for (QAction* a : m_window->menuBar()->actions())
         titles << plainText(a->text());
-    QCOMPARE(titles, QStringList({"Arquivo", "Editar", "Esboço", "Visualizar", "Ajuda"}));
+    QCOMPARE(titles, QStringList({"Arquivo", "Editar", "Operações", "Esboço", "Visualizar", "Ajuda"}));
 
     auto* file = m_window->findChild<QMenu*>("menuArquivo");
     QVERIFY(file);
-    QCOMPARE(actionTexts(file), QStringList({"Novo", "Exemplos", "Abrir...", "Salvar", "Salvar como...", "|", "Exportar STEP...", "|", "Sair"}));
+    QCOMPARE(actionTexts(file), QStringList({"Novo", "Exemplos", "Abrir...", "Salvar", "Salvar como...", "|", "Exportar", "|", "Sair"}));
+    auto* exportMenu = m_window->findChild<QMenu*>("menuExportar");
+    QVERIFY(exportMenu);
+    QCOMPARE(actionTexts(exportMenu), QStringList({"STEP (*.step)...", "STL (*.stl)..."}));
+    auto* operations = m_window->findChild<QMenu*>("menuOperacoes");
+    QVERIFY(operations);
+    QCOMPARE(actionTexts(operations), QStringList({"Extrusão...", "Editar operação..."}));
+    QVERIFY(!action("actionExtrusao")->isEnabled()); // nenhum esboço selecionado
     QVERIFY(action("actionNovo")->isEnabled());
     QVERIFY(action("actionAbrir")->isEnabled());
     QVERIFY(action("actionSalvar")->isEnabled());

@@ -24,6 +24,7 @@ const char* typeName(OperationType t)
     {
     case OperationType::Block:       return "block";
     case OperationType::ThroughHole: return "throughHole";
+    case OperationType::Extrude:     return "extrude";
     }
     return "";
 }
@@ -235,12 +236,18 @@ QByteArray DocumentFile::toJson(const CadDocument& document)
         QJsonObject params;
         for (const OperationParameter& p : op.parameters)
             params.insert(QString::fromStdString(p.key), p.value);
-        operations.append(QJsonObject{
+        QJsonObject o{
             {"id", QString::fromStdString(op.id)},
             {"type", QString::fromLatin1(typeName(op.type))},
             {"name", QString::fromStdString(op.name)},
             {"parameters", params},
-        });
+        };
+        if (op.type == OperationType::Extrude)
+        {
+            o.insert("sketchId", QString::fromStdString(op.sketchId));
+            o.insert("reversed", op.reversed);
+        }
+        operations.append(o);
     }
 
     const QJsonObject root{
@@ -252,6 +259,7 @@ QByteArray DocumentFile::toJson(const CadDocument& document)
              {"name", QString::fromStdString(document.name())},
              {"unit", QString::fromLatin1(document.unit())},
              {"operations", operations},
+             {"nextOperationNumber", document.nextOperationNumber()},
              {"nextSketchNumber", document.nextSketchNumber()},
              {"sketches", sketches},
          }},
@@ -300,55 +308,112 @@ FileResult DocumentFile::fromJson(const QByteArray& json, CadDocument& out)
     if (!opsValue.isArray())
         return error(QStringLiteral("Lista \"operations\" ausente"));
     const QJsonArray ops = opsValue.toArray();
-    // Esquemas 1 e 2: sempre bloco base seguido de furo passante. Esquema 3: também aceita
-    // documento sem operações (nenhum sólido).
-    const bool emptyAllowed = schema >= 3;
-    if (ops.size() != 2 && !(emptyAllowed && ops.isEmpty()))
-        return error(emptyAllowed
-                         ? QStringLiteral("Sequência de operações não suportada (esperado nenhuma operação, ou bloco base e furo passante)")
-                         : QStringLiteral("Sequência de operações não suportada (esperado bloco base e furo passante)"));
+    CadDocument::Data data;
+    data.name = name.toStdString();
 
-    PartParameters p;
-    QString ids[2];
-    QSet<QString> seen;
-    const char* expectedTypes[2] = {"block", "throughHole"};
-    for (int i = 0; i < ops.size(); ++i)
+    // Esquemas 1 e 2: exatamente bloco base + furo passante. Esquema 3: também lista vazia.
+    // Esquema 4: par bloco + furo opcional no início, seguido de extrusões.
+    int index = 0;
+    const bool startsWithPart = !ops.isEmpty() && ops.at(0).toObject().value("type").toString() == QLatin1String("block");
+    if (schema <= 3)
+    {
+        const bool emptyAllowed = schema == 3;
+        if (ops.size() != 2 && !(emptyAllowed && ops.isEmpty()))
+            return error(emptyAllowed
+                             ? QStringLiteral("Sequência de operações não suportada (esperado nenhuma operação, ou bloco base e furo passante)")
+                             : QStringLiteral("Sequência de operações não suportada (esperado bloco base e furo passante)"));
+    }
+    if (schema <= 3 ? !ops.isEmpty() : startsWithPart)
+    {
+        if (ops.size() < 2)
+            return error(QStringLiteral("Bloco base sem furo passante"));
+        PartParameters p;
+        QString ids[2];
+        const char* expectedTypes[2] = {"block", "throughHole"};
+        for (int i = 0; i < 2; ++i)
+        {
+            if (!ops.at(i).isObject())
+                return error(QStringLiteral("Operação %1 não é um objeto").arg(i + 1));
+            const QJsonObject op = ops.at(i).toObject();
+            if (op.value("type").toString() != QLatin1String(expectedTypes[i]))
+                return error(QStringLiteral("Operação %1: tipo inesperado (esperado \"%2\")").arg(i + 1).arg(expectedTypes[i]));
+            const QJsonValue id = op.value("id");
+            if (!id.isString() || !isValidIdentifier(id.toString().toStdString()))
+                return error(QStringLiteral("Operação %1: identificador inválido").arg(i + 1));
+            ids[i] = id.toString();
+            if (op.contains("name") && !op.value("name").isString())
+                return error(QStringLiteral("Operação %1: nome inválido").arg(i + 1));
+
+            QList<double> values;
+            QString message;
+            const QStringList keys = i == 0 ? QStringList{"length", "width", "height"} : QStringList{"radius"};
+            if (!readParameters(op, keys, values, message))
+                return error(QStringLiteral("Operação %1: %2").arg(i + 1).arg(message));
+            if (i == 0)
+            {
+                p.length = values[0];
+                p.width = values[1];
+                p.height = values[2];
+            }
+            else
+            {
+                p.holeRadius = values[0];
+            }
+        }
+        if (ids[0] == ids[1])
+            return error(QStringLiteral("Identificador de operação duplicado: %1").arg(ids[0]));
+        data.part = p;
+        data.blockId = ids[0].toStdString();
+        data.holeId = ids[1].toStdString();
+        index = 2;
+    }
+    for (int i = index; i < ops.size(); ++i)
     {
         if (!ops.at(i).isObject())
             return error(QStringLiteral("Operação %1 não é um objeto").arg(i + 1));
         const QJsonObject op = ops.at(i).toObject();
-        if (op.value("type").toString() != QLatin1String(expectedTypes[i]))
-            return error(QStringLiteral("Operação %1: tipo inesperado (esperado \"%2\")").arg(i + 1).arg(expectedTypes[i]));
+        if (op.value("type").toString() != QLatin1String("extrude"))
+            return error(QStringLiteral("Operação %1: tipo inesperado \"%2\" (esperado \"extrude\")")
+                             .arg(i + 1).arg(op.value("type").toString()));
+        const QStringList allowed{"id", "type", "name", "sketchId", "reversed", "parameters"};
+        for (auto it = op.begin(); it != op.end(); ++it)
+            if (!allowed.contains(it.key()))
+                return error(QStringLiteral("Operação %1: campo desconhecido \"%2\"").arg(i + 1).arg(it.key()));
         const QJsonValue id = op.value("id");
         if (!id.isString() || !isValidIdentifier(id.toString().toStdString()))
             return error(QStringLiteral("Operação %1: identificador inválido").arg(i + 1));
-        if (seen.contains(id.toString()))
-            return error(QStringLiteral("Identificador de operação duplicado: %1").arg(id.toString()));
-        seen.insert(id.toString());
-        ids[i] = id.toString();
-        if (op.contains("name") && !op.value("name").isString())
-            return error(QStringLiteral("Operação %1: nome inválido").arg(i + 1));
-
+        if (!op.value("name").isString())
+            return error(QStringLiteral("Operação %1: nome ausente ou inválido").arg(i + 1));
+        if (!op.value("sketchId").isString())
+            return error(QStringLiteral("Operação %1: referência ao esboço ausente ou inválida").arg(i + 1));
+        if (!op.value("reversed").isBool())
+            return error(QStringLiteral("Operação %1: campo \"reversed\" ausente ou inválido").arg(i + 1));
         QList<double> values;
         QString message;
-        const QStringList keys = i == 0 ? QStringList{"length", "width", "height"} : QStringList{"radius"};
-        if (!readParameters(op, keys, values, message))
+        if (!readParameters(op, QStringList{"depth"}, values, message))
             return error(QStringLiteral("Operação %1: %2").arg(i + 1).arg(message));
-        if (i == 0)
-        {
-            p.length = values[0];
-            p.width = values[1];
-            p.height = values[2];
-        }
-        else
-        {
-            p.holeRadius = values[0];
-        }
+        CadDocument::ExtrudeData e;
+        e.id = id.toString().toStdString();
+        e.parameters.name = op.value("name").toString().toStdString();
+        e.parameters.sketchId = op.value("sketchId").toString().toStdString();
+        e.parameters.reversed = op.value("reversed").toBool();
+        e.parameters.depth = values[0];
+        data.extrusions.push_back(e);
     }
 
+    // Contador de operações: só no esquema 4.
+    if (schema >= 4)
+    {
+        if (!readInt(doc, "nextOperationNumber", 1, data.nextOperationNumber))
+            return error(QStringLiteral("Campo \"nextOperationNumber\" ausente ou inválido"));
+    }
+    else if (doc.contains("nextOperationNumber"))
+    {
+        return error(QStringLiteral("Campo \"nextOperationNumber\" não pertence ao esquema %1").arg(schema));
+    }
     // Esboços: inexistentes na versão 1; obrigatórios (lista, possivelmente vazia) na versão 2.
-    std::vector<cad::sketch::Sketch> sketches;
-    int nextSketchNumber = 1;
+    std::vector<cad::sketch::Sketch>& sketches = data.sketches;
+    int& nextSketchNumber = data.nextSketchNumber;
     if (schema == 1)
     {
         if (doc.contains("sketches") || doc.contains("nextSketchNumber"))
@@ -373,9 +438,7 @@ FileResult DocumentFile::fromJson(const QByteArray& json, CadDocument& out)
 
     // Limites geométricos e reconstrução (fromData só altera 'out' em caso de sucesso).
     std::string buildError;
-    const std::optional<PartParameters> part = ops.isEmpty() ? std::nullopt : std::optional<PartParameters>(p);
-    if (!CadDocument::fromData(name.toStdString(), part, ids[0].toStdString(), ids[1].toStdString(), out,
-                               buildError, sketches, nextSketchNumber))
+    if (!CadDocument::fromData(data, out, buildError))
         return error(QStringLiteral("Dados inválidos: %1").arg(QString::fromStdString(buildError)));
     return FileResult{true, QString()};
 }

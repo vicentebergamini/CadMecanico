@@ -66,6 +66,8 @@ const Quantity_Color kSketchEditColor(0.00, 0.20, 0.85, Quantity_TOC_sRGB);
 const Quantity_Color kSketchPreviewColor(0.25, 0.25, 0.25, Quantity_TOC_sRGB);
 const Quantity_Color kAxisHColor(0.85, 0.10, 0.10, Quantity_TOC_sRGB);
 const Quantity_Color kAxisVColor(0.05, 0.60, 0.10, Quantity_TOC_sRGB);
+// Pré-visualização de sólido (extrusão antes de confirmar).
+const Quantity_Color kPreviewSolidColor(0.20, 0.75, 0.35, Quantity_TOC_sRGB);
 
 // Eixos de referência na origem global, com tamanho constante na tela (pixels lógicos).
 constexpr double kOriginAxesSize = 70.0;
@@ -372,6 +374,7 @@ void OcctViewerWidget::releaseGraphics()
     m_sketchDecorations.clear();
     m_editShapes.clear();
     m_preview.Nullify();
+    m_previewSolid.Nullify();
     m_sketchPlane.reset();
     m_view->Remove();
     m_view.Nullify();
@@ -447,6 +450,24 @@ void OcctViewerWidget::clearSelection()
 QImage OcctViewerWidget::grabViewerImage()
 {
     return grabFramebuffer();
+}
+
+void OcctViewerWidget::setPreviewShape(const TopoDS_Shape& shape)
+{
+    if (m_context.IsNull())
+        return;
+    if (!m_previewSolid.IsNull())
+        m_context->Remove(m_previewSolid, false);
+    m_previewSolid.Nullify();
+    if (!shape.IsNull())
+    {
+        m_previewSolid = new AIS_Shape(shape);
+        m_previewSolid->SetColor(kPreviewSolidColor);
+        m_previewSolid->SetTransparency(0.45);
+        m_previewSolid->Attributes()->SetFaceBoundaryDraw(true);
+        m_context->Display(m_previewSolid, AIS_Shaded, -1, false); // não selecionável
+    }
+    redrawScene();
 }
 
 void OcctViewerWidget::fitAll()

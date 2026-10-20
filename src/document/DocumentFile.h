@@ -33,7 +33,15 @@
 // sem sólido, por exemplo só com esboços). Nas versões 1 e 2 a lista continua exigindo
 // exatamente bloco base + furo passante.
 //
-// Arquivos das versões 1 e 2 continuam sendo lidos sem alteração; a gravação usa sempre a
+// Esquema versão 4 (E5.3): "operations" = par opcional bloco + furo no início, seguido de
+// extrusões; novo campo "nextOperationNumber" em "document". Extrusão:
+//     { "id": "op-3", "type": "extrude", "name": "Extrusão 1", "sketchId": "sk-1",
+//       "reversed": false, "parameters": { "depth": 20 } }
+// A profundidade é em mm; o sentido é a normal do plano do esboço (oposto se "reversed").
+// A geometria é sempre reconstruída a partir desses dados (nenhuma malha ou objeto gráfico é
+// salvo). Toda extrusão precisa referenciar um esboço existente no arquivo.
+//
+// Arquivos das versões 1, 2 e 3 continuam sendo lidos sem alteração; a gravação usa sempre a
 // versão atual.
 #pragma once
 
@@ -53,7 +61,7 @@ struct FileResult
 class DocumentFile
 {
 public:
-    static constexpr int kSchemaVersion = 3;
+    static constexpr int kSchemaVersion = 4;
     static constexpr qint64 kMaxFileSize = 4 * 1024 * 1024;
     static constexpr const char* kFormat = "cadmec";
     static constexpr const char* kExtension = "cadmec";

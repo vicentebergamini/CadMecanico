@@ -1,9 +1,15 @@
 #include "document/CadDocument.h"
 
 #include "modeling/Features.h"
+#include "sketch/SketchProfile.h"
+
+#include <BRep_Builder.hxx>
+#include <TopExp_Explorer.hxx>
+#include <TopoDS_Compound.hxx>
 
 #include <algorithm>
 #include <cmath>
+#include <set>
 #include <sstream>
 
 namespace cad::document {
@@ -39,6 +45,30 @@ ValidationResult checkDimension(const char* field, const char* label, double v)
     return {};
 }
 
+int numberAfter(const std::string& id, const char* prefix)
+{
+    const size_t p = std::char_traits<char>::length(prefix);
+    if (id.size() <= p || id.compare(0, p, prefix) != 0)
+        return 0;
+    int n = 0;
+    for (size_t i = p; i < id.size(); ++i)
+    {
+        if (id[i] < '0' || id[i] > '9' || n > 100000000)
+            return 0;
+        n = n * 10 + (id[i] - '0');
+    }
+    return n;
+}
+
+std::string trim(const std::string& s)
+{
+    const size_t b = s.find_first_not_of(" \t\r\n");
+    if (b == std::string::npos)
+        return {};
+    const size_t e = s.find_last_not_of(" \t\r\n");
+    return s.substr(b, e - b + 1);
+}
+
 } // namespace
 
 double Operation::parameter(const std::string& key) const
@@ -56,6 +86,16 @@ bool isValidIdentifier(const std::string& id)
     return std::all_of(id.begin(), id.end(), [](char c) {
         return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_';
     });
+}
+
+int sketchNumber(const std::string& sketchId)
+{
+    return numberAfter(sketchId, "sk-");
+}
+
+int operationNumber(const std::string& operationId)
+{
+    return numberAfter(operationId, "op-");
 }
 
 CadDocument::CadDocument()
@@ -76,7 +116,8 @@ CadDocument CadDocument::withTestPart(std::string name, const PartParameters& pa
         p = PartParameters(); // nunca deixa o exemplo sem geometria válida
     doc.m_operations = makeOperations(p, kDefaultBlockId, kDefaultHoleId);
     std::string error;
-    rebuild(doc.m_operations, doc.m_shape, error);
+    rebuild(doc.m_operations, doc.m_sketches, doc.m_shape, error);
+    doc.m_nextOperationNumber = 3;
     ++doc.m_revision;
     return doc;
 }
@@ -107,18 +148,119 @@ ValidationResult CadDocument::validate(const PartParameters& p)
     return {};
 }
 
-int sketchNumber(const std::string& sketchId)
+ValidationResult CadDocument::validateExtrude(const ExtrudeParameters& p)
 {
-    if (sketchId.size() < 4 || sketchId.compare(0, 3, "sk-") != 0)
-        return 0;
-    int n = 0;
-    for (size_t i = 3; i < sketchId.size(); ++i)
+    if (!std::isfinite(p.depth))
+        return fail("depth", "Profundidade: valor não numérico");
+    if (p.depth < kMinExtrudeDepth)
+        return fail("depth", "A profundidade deve ser maior que zero (mínimo " + mm(kMinExtrudeDepth) + ")");
+    if (p.depth > kMaxExtrudeDepth)
+        return fail("depth", "A profundidade deve ser no máximo " + mm(kMaxExtrudeDepth));
+    if (trim(p.name).size() > kMaxNameLength)
+        return fail("name", "Nome longo demais");
+    return {};
+}
+
+bool CadDocument::fromData(const Data& data, CadDocument& out, std::string& error)
+{
+    // Esboços: ids "sk-N" únicos e contador coerente (entidades já validadas em Sketch::fromData).
+    int maxSketch = 0;
+    for (size_t i = 0; i < data.sketches.size(); ++i)
     {
-        if (sketchId[i] < '0' || sketchId[i] > '9' || n > 100000000)
-            return 0;
-        n = n * 10 + (sketchId[i] - '0');
+        const int n = sketchNumber(data.sketches[i].id());
+        if (n <= 0)
+        {
+            error = "Identificador de esboço inválido: " + data.sketches[i].id();
+            return false;
+        }
+        for (size_t j = 0; j < i; ++j)
+            if (data.sketches[j].id() == data.sketches[i].id())
+            {
+                error = "Identificador de esboço duplicado: " + data.sketches[i].id();
+                return false;
+            }
+        maxSketch = std::max(maxSketch, n);
     }
-    return n;
+    if (data.nextSketchNumber <= maxSketch)
+    {
+        error = "Contador de esboços inconsistente";
+        return false;
+    }
+
+    std::vector<Operation> ops;
+    if (data.part)
+    {
+        const ValidationResult v = validate(*data.part);
+        if (!v.ok)
+        {
+            error = v.message;
+            return false;
+        }
+        ops = makeOperations(*data.part, data.blockId, data.holeId);
+    }
+    for (const ExtrudeData& e : data.extrusions)
+    {
+        const ValidationResult v = validateExtrude(e.parameters);
+        if (!v.ok)
+        {
+            error = "Extrusão " + e.id + ": " + v.message;
+            return false;
+        }
+        if (trim(e.parameters.name).empty())
+        {
+            error = "Extrusão " + e.id + ": nome vazio";
+            return false;
+        }
+        const bool sketchExists = std::any_of(data.sketches.begin(), data.sketches.end(),
+                                              [&](const cad::sketch::Sketch& s) { return s.id() == e.parameters.sketchId; });
+        if (!sketchExists)
+        {
+            error = "Extrusão " + e.id + ": esboço de origem inexistente (" + e.parameters.sketchId + ")";
+            return false;
+        }
+        ops.push_back(makeExtrusion(e.id, e.parameters));
+    }
+
+    // Identificadores de operação válidos e únicos; contador coerente.
+    std::set<std::string> ids;
+    int maxOp = 0;
+    for (const Operation& op : ops)
+    {
+        if (!isValidIdentifier(op.id))
+        {
+            error = "Identificador de operação inválido";
+            return false;
+        }
+        if (!ids.insert(op.id).second)
+        {
+            error = "Identificadores de operação duplicados";
+            return false;
+        }
+        maxOp = std::max(maxOp, operationNumber(op.id));
+    }
+    int nextOp = data.nextOperationNumber;
+    if (nextOp == 0)
+        nextOp = maxOp + 1;
+    else if (nextOp <= maxOp)
+    {
+        error = "Contador de operações inconsistente";
+        return false;
+    }
+
+    TopoDS_Shape shape;
+    if (!rebuild(ops, data.sketches, shape, error))
+        return false;
+
+    CadDocument doc(data.name);
+    doc.m_operations = std::move(ops);
+    doc.m_shape = shape;
+    doc.m_revision = doc.m_operations.empty() ? 0 : 1;
+    doc.m_sketches = data.sketches;
+    doc.m_nextSketchNumber = data.nextSketchNumber;
+    doc.m_nextOperationNumber = nextOp;
+    doc.m_modified = false;
+    out = std::move(doc);
+    return true;
 }
 
 bool CadDocument::fromData(const std::string& name, const std::optional<PartParameters>& part,
@@ -126,63 +268,14 @@ bool CadDocument::fromData(const std::string& name, const std::optional<PartPara
                            std::string& error, const std::vector<cad::sketch::Sketch>& sketches,
                            int nextSketchNumber)
 {
-    // Esboços: ids "sk-N" únicos e contador coerente (entidades já validadas em Sketch::fromData).
-    int maxSketch = 0;
-    for (size_t i = 0; i < sketches.size(); ++i)
-    {
-        const int n = sketchNumber(sketches[i].id());
-        if (n <= 0)
-        {
-            error = "Identificador de esboço inválido: " + sketches[i].id();
-            return false;
-        }
-        for (size_t j = 0; j < i; ++j)
-            if (sketches[j].id() == sketches[i].id())
-            {
-                error = "Identificador de esboço duplicado: " + sketches[i].id();
-                return false;
-            }
-        maxSketch = std::max(maxSketch, n);
-    }
-    if (nextSketchNumber <= maxSketch)
-    {
-        error = "Contador de esboços inconsistente";
-        return false;
-    }
-
-    CadDocument doc(name);
-    std::vector<Operation> ops;
-    TopoDS_Shape shape;
-    if (part)
-    {
-        if (!isValidIdentifier(blockId) || !isValidIdentifier(holeId))
-        {
-            error = "Identificador de operação inválido";
-            return false;
-        }
-        if (blockId == holeId)
-        {
-            error = "Identificadores de operação duplicados";
-            return false;
-        }
-        const ValidationResult v = validate(*part);
-        if (!v.ok)
-        {
-            error = v.message;
-            return false;
-        }
-        ops = makeOperations(*part, blockId, holeId);
-        if (!rebuild(ops, shape, error))
-            return false;
-    }
-    doc.m_operations = std::move(ops);
-    doc.m_shape = shape;
-    doc.m_revision = part ? 1 : 0;
-    doc.m_sketches = sketches;
-    doc.m_nextSketchNumber = nextSketchNumber;
-    doc.m_modified = false;
-    out = std::move(doc);
-    return true;
+    Data data;
+    data.name = name;
+    data.part = part;
+    data.blockId = blockId;
+    data.holeId = holeId;
+    data.sketches = sketches;
+    data.nextSketchNumber = nextSketchNumber;
+    return fromData(data, out, error);
 }
 
 const cad::sketch::Sketch* CadDocument::findSketch(const std::string& id) const
@@ -216,25 +309,64 @@ bool CadDocument::commitSketch(const cad::sketch::Sketch& sketch, std::string& e
             return false;
         }
     }
-    for (cad::sketch::Sketch& existing : m_sketches)
+
+    std::vector<cad::sketch::Sketch> sketches = m_sketches;
+    bool replaced = false;
+    for (cad::sketch::Sketch& existing : sketches)
         if (existing.id() == sketch.id())
         {
             existing = sketch;
-            m_modified = true;
-            return true;
+            replaced = true;
         }
-    m_sketches.push_back(sketch);
-    m_nextSketchNumber = std::max(m_nextSketchNumber, n + 1);
-    m_modified = true;
+    if (!replaced)
+        sketches.push_back(sketch);
+
+    // Recalcula as extrusões dependentes com o esboço alterado (tudo ou nada).
+    const bool hasDependents = !dependentOperations(sketch.id()).empty();
+    if (hasDependents)
+    {
+        std::vector<Operation> ops = m_operations;
+        TopoDS_Shape shape;
+        std::string rebuildError;
+        if (!rebuild(ops, sketches, shape, rebuildError))
+        {
+            error = "A alteração do esboço invalida a extrusão dependente: " + rebuildError;
+            return false;
+        }
+        m_sketches = std::move(sketches);
+        commit(std::move(ops), shape);
+    }
+    else
+    {
+        m_sketches = std::move(sketches);
+        m_modified = true;
+    }
+    if (!replaced)
+        m_nextSketchNumber = std::max(m_nextSketchNumber, n + 1);
     return true;
 }
 
 bool CadDocument::removeSketch(const std::string& id)
 {
+    std::string error;
+    return removeSketch(id, error);
+}
+
+bool CadDocument::removeSketch(const std::string& id, std::string& error)
+{
     const auto it = std::find_if(m_sketches.begin(), m_sketches.end(),
                                  [&](const cad::sketch::Sketch& s) { return s.id() == id; });
     if (it == m_sketches.end())
+    {
+        error = "Esboço inexistente: " + id;
         return false;
+    }
+    const auto deps = dependentOperations(id);
+    if (!deps.empty())
+    {
+        error = "O esboço é usado pela operação " + deps.front() + " e não pode ser removido";
+        return false;
+    }
     m_sketches.erase(it);
     m_modified = true;
     return true;
@@ -254,6 +386,20 @@ const Operation* CadDocument::findOperation(const std::string& id) const
         if (op.id == id)
             return &op;
     return nullptr;
+}
+
+bool CadDocument::hasPart() const
+{
+    return std::any_of(m_operations.begin(), m_operations.end(),
+                       [](const Operation& op) { return op.type == OperationType::Block; });
+}
+
+int CadDocument::solidCount() const
+{
+    int n = 0;
+    for (TopExp_Explorer ex(m_shape, TopAbs_SOLID); ex.More(); ex.Next())
+        ++n;
+    return n;
 }
 
 PartParameters CadDocument::parameters() const
@@ -286,17 +432,136 @@ ValidationResult CadDocument::setParameters(const PartParameters& parameters)
         return {};
 
     // Recalcula em uma cópia: o documento só muda se tudo der certo.
-    std::vector<Operation> ops = makeOperations(parameters, m_operations.at(0).id, m_operations.at(1).id);
+    std::vector<Operation> ops = m_operations;
+    for (Operation& op : ops)
+    {
+        if (op.type == OperationType::Block)
+            op.parameters = {{"length", parameters.length}, {"width", parameters.width}, {"height", parameters.height}};
+        else if (op.type == OperationType::ThroughHole)
+            op.parameters = {{"radius", parameters.holeRadius}};
+    }
     TopoDS_Shape shape;
     std::string error;
-    if (!rebuild(ops, shape, error))
+    if (!rebuild(ops, m_sketches, shape, error))
         return ValidationResult{false, "", error};
+    commit(std::move(ops), shape);
+    return {};
+}
 
-    m_operations = std::move(ops);
+std::string CadDocument::defaultExtrusionName() const
+{
+    int n = 1;
+    for (const Operation& op : m_operations)
+        if (op.type == OperationType::Extrude)
+            ++n;
+    return "Extrusão " + std::to_string(n);
+}
+
+cad::modeling::FeatureResult CadDocument::previewExtrusion(const ExtrudeParameters& parameters) const
+{
+    cad::modeling::FeatureResult r;
+    const ValidationResult v = validateExtrude(parameters);
+    if (!v.ok)
+    {
+        r.message = v.message;
+        return r;
+    }
+    const cad::sketch::Sketch* sketch = findSketch(parameters.sketchId);
+    if (!sketch)
+    {
+        r.message = "Esboço de origem inexistente: " + parameters.sketchId;
+        return r;
+    }
+    const cad::sketch::ProfileResult profile = cad::sketch::buildProfile(*sketch);
+    if (!profile.ok)
+    {
+        r.message = profile.message;
+        return r;
+    }
+    const gp_Vec direction = gp_Vec(sketch->plane().normal()) * (parameters.reversed ? -parameters.depth : parameters.depth);
+    return cad::modeling::extrudeFace(profile.face, direction);
+}
+
+ValidationResult CadDocument::addExtrusion(const ExtrudeParameters& parameters, std::string* newId)
+{
+    ValidationResult v = validateExtrude(parameters);
+    if (!v.ok)
+        return v;
+    if (!findSketch(parameters.sketchId))
+        return ValidationResult{false, "sketchId", "Esboço de origem inexistente: " + parameters.sketchId};
+
+    ExtrudeParameters p = parameters;
+    if (trim(p.name).empty())
+        p.name = defaultExtrusionName();
+    const std::string id = "op-" + std::to_string(m_nextOperationNumber);
+    std::vector<Operation> ops = m_operations;
+    ops.push_back(makeExtrusion(id, p));
+    TopoDS_Shape shape;
+    std::string error;
+    if (!rebuild(ops, m_sketches, shape, error))
+        return ValidationResult{false, "profile", error};
+    commit(std::move(ops), shape);
+    ++m_nextOperationNumber;
+    if (newId)
+        *newId = id;
+    return {};
+}
+
+ValidationResult CadDocument::updateExtrusion(const std::string& id, const ExtrudeParameters& parameters)
+{
+    const ValidationResult v = validateExtrude(parameters);
+    if (!v.ok)
+        return v;
+    if (!findSketch(parameters.sketchId))
+        return ValidationResult{false, "sketchId", "Esboço de origem inexistente: " + parameters.sketchId};
+    std::vector<Operation> ops = m_operations;
+    auto it = std::find_if(ops.begin(), ops.end(), [&](const Operation& op) { return op.id == id; });
+    if (it == ops.end() || it->type != OperationType::Extrude)
+        return ValidationResult{false, "", "Extrusão inexistente: " + id};
+    ExtrudeParameters p = parameters;
+    if (trim(p.name).empty())
+        p.name = it->name;
+    const Operation updated = makeExtrusion(id, p);
+    if (updated.name == it->name && updated.sketchId == it->sketchId && updated.reversed == it->reversed
+        && updated.parameter("depth") == it->parameter("depth"))
+        return {};
+    *it = updated;
+    TopoDS_Shape shape;
+    std::string error;
+    if (!rebuild(ops, m_sketches, shape, error))
+        return ValidationResult{false, "profile", error};
+    commit(std::move(ops), shape);
+    return {};
+}
+
+ExtrudeParameters CadDocument::extrudeParameters(const std::string& id) const
+{
+    ExtrudeParameters p;
+    if (const Operation* op = findOperation(id); op && op->type == OperationType::Extrude)
+    {
+        p.name = op->name;
+        p.sketchId = op->sketchId;
+        p.depth = op->parameter("depth");
+        p.reversed = op->reversed;
+    }
+    return p;
+}
+
+std::vector<std::string> CadDocument::dependentOperations(const std::string& sketchId) const
+{
+    std::vector<std::string> ids;
+    for (const Operation& op : m_operations)
+        if (op.type == OperationType::Extrude && op.sketchId == sketchId)
+            ids.push_back(op.id);
+    return ids;
+}
+
+void CadDocument::commit(std::vector<Operation> operations, TopoDS_Shape shape)
+{
+    m_operations = std::move(operations);
     m_shape = shape;
     m_modified = true;
     ++m_revision;
-    return {};
 }
 
 std::vector<Operation> CadDocument::makeOperations(const PartParameters& p, const std::string& blockId,
@@ -317,14 +582,29 @@ std::vector<Operation> CadDocument::makeOperations(const PartParameters& p, cons
     return {block, hole};
 }
 
-bool CadDocument::rebuild(std::vector<Operation>& operations, TopoDS_Shape& shape, std::string& error)
+Operation CadDocument::makeExtrusion(const std::string& id, const ExtrudeParameters& parameters)
 {
-    TopoDS_Shape current;
+    Operation op;
+    op.id = id;
+    op.type = OperationType::Extrude;
+    op.name = trim(parameters.name);
+    op.sketchId = parameters.sketchId;
+    op.reversed = parameters.reversed;
+    op.parameters = {{"depth", parameters.depth}};
+    return op;
+}
+
+bool CadDocument::rebuild(std::vector<Operation>& operations, const std::vector<cad::sketch::Sketch>& sketches,
+                          TopoDS_Shape& shape, std::string& error)
+{
+    TopoDS_Shape part; // bloco (+ furo)
+    std::vector<TopoDS_Shape> solids;
     double length = 0.0, width = 0.0;
     bool ok = true;
     for (Operation& op : operations)
     {
         cad::modeling::FeatureResult r;
+        op.result.Nullify();
         if (!ok)
         {
             op.status = OperationStatus::Invalid;
@@ -337,27 +617,68 @@ bool CadDocument::rebuild(std::vector<Operation>& operations, TopoDS_Shape& shap
             length = op.parameter("length");
             width = op.parameter("width");
             r = cad::modeling::makeBlock(length, width, op.parameter("height"));
+            if (r.ok)
+                part = r.shape;
             break;
         case OperationType::ThroughHole:
             // Relação geométrica: furo centrado na face superior do bloco.
-            r = cad::modeling::cutThroughHole(current, length / 2.0, width / 2.0, op.parameter("radius"));
+            r = cad::modeling::cutThroughHole(part, length / 2.0, width / 2.0, op.parameter("radius"));
+            if (r.ok)
+                part = r.shape;
             break;
+        case OperationType::Extrude:
+        {
+            const auto it = std::find_if(sketches.begin(), sketches.end(),
+                                         [&](const cad::sketch::Sketch& s) { return s.id() == op.sketchId; });
+            if (it == sketches.end())
+            {
+                r.message = "esboço de origem inexistente (" + op.sketchId + ")";
+                break;
+            }
+            const cad::sketch::ProfileResult profile = cad::sketch::buildProfile(*it);
+            if (!profile.ok)
+            {
+                r.message = "perfil do " + it->name() + " inválido: " + profile.message;
+                break;
+            }
+            const double depth = op.parameter("depth");
+            const gp_Vec direction = gp_Vec(it->plane().normal()) * (op.reversed ? -depth : depth);
+            r = cad::modeling::extrudeFace(profile.face, direction);
+            if (r.ok)
+                solids.push_back(r.shape);
+            break;
+        }
         }
         op.status = r.ok ? OperationStatus::Valid : OperationStatus::Invalid;
         op.statusMessage = r.message;
         if (r.ok)
-        {
-            current = r.shape;
-        }
+            op.result = r.shape;
         else
         {
             ok = false;
             error = op.name + ": " + r.message;
         }
     }
-    if (ok)
-        shape = current;
-    return ok;
+    if (!ok)
+        return false;
+
+    if (!part.IsNull())
+        solids.insert(solids.begin(), part);
+    if (solids.empty())
+        shape.Nullify();
+    else if (solids.size() == 1)
+        shape = solids.front();
+    else
+    {
+        // Sólidos independentes lado a lado, sem união booleana.
+        BRep_Builder builder;
+        TopoDS_Compound compound;
+        builder.MakeCompound(compound);
+        for (const TopoDS_Shape& s : solids)
+            builder.Add(compound, s);
+        shape = compound;
+    }
+    return true;
 }
 
 } // namespace cad::document

@@ -2,6 +2,8 @@ qt_add_library(cad_app STATIC
     MainWindow.h MainWindow.cpp
     ParametersDialog.h ParametersDialog.cpp
     SketchEntityDialog.h SketchEntityDialog.cpp
+    ExtrusionDialog.h ExtrusionDialog.cpp
+    StlExportDialog.h StlExportDialog.cpp
 )
 set_target_properties(cad_app PROPERTIES AUTOMOC ON)
 target_include_directories(cad_app PUBLIC ${PROJECT_SOURCE_DIR}/src)

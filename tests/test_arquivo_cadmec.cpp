@@ -91,6 +91,11 @@ private slots:
     void documentoSomenteComEsbocos();
     void arquivoE52ComBlocoEFuro();
     void operacoesVaziasPorVersao();
+    // E5.3
+    void salvarEAbrirExtrusao();
+    void arquivoE521SomenteEsbocos();
+    void rejeitaExtrusaoInvalida_data();
+    void rejeitaExtrusaoInvalida();
 
 private:
     QTemporaryDir* m_dir = nullptr;
@@ -523,7 +528,7 @@ void TestArquivoCadmec::documentoVazio()
     const QString path = m_dir->filePath("vazio.cadmec");
     QVERIFY(DocumentFile::save(CadDocument(), path).ok);
     const QJsonObject root = QJsonDocument::fromJson(readFile(path)).object();
-    QCOMPARE(root["schemaVersion"].toInt(), 3);
+    QCOMPARE(root["schemaVersion"].toInt(), DocumentFile::kSchemaVersion);
     const QJsonObject d = root["document"].toObject();
     QCOMPARE(d["name"].toString(), QStringLiteral("Sem título"));
     QVERIFY(d["operations"].isArray() && d["operations"].toArray().isEmpty());
@@ -592,6 +597,8 @@ void TestArquivoCadmec::operacoesVaziasPorVersao()
         while (ops.size() > count)
             ops.removeLast();
         d["operations"] = ops;
+        if (schema < 4)
+            d.remove("nextOperationNumber");
         if (schema == 1)
         {
             d.remove("sketches");
@@ -610,6 +617,145 @@ void TestArquivoCadmec::operacoesVaziasPorVersao()
     QVERIFY(doc.hasPart());
     QVERIFY(DocumentFile::fromJson(withOps(2, 2), doc).ok);
     QVERIFY(DocumentFile::fromJson(withOps(1, 2), doc).ok);
+}
+
+namespace {
+
+// Documento com bloco extrudado (sk-1, op-1) e cilindro invertido (sk-2, op-2).
+CadDocument documentWithExtrusions()
+{
+    using namespace cad::sketch;
+    CadDocument doc("Extrusões");
+    std::string error;
+    Sketch a = doc.createSketch(PlaneType::XY);
+    a.addEntity(SketchRectangle{0.0, 0.0, 100.0, 60.0});
+    doc.commitSketch(a, error);
+    Sketch b = doc.createSketch(PlaneType::XZ);
+    b.addEntity(SketchCircle{200.0, 10.0, 10.0});
+    doc.commitSketch(b, error);
+    doc.addExtrusion({"Bloco", a.id(), 20.0, false});
+    doc.addExtrusion({"", b.id(), 35.0, true});
+    return doc;
+}
+
+QJsonObject extrudeOp(const QJsonObject& root, int i)
+{
+    return root["document"].toObject()["operations"].toArray()[i].toObject();
+}
+
+template <typename F>
+QByteArray extrusionsModified(F edit)
+{
+    QJsonObject root = QJsonDocument::fromJson(DocumentFile::toJson(documentWithExtrusions())).object();
+    edit(root);
+    return QJsonDocument(root).toJson();
+}
+
+} // namespace
+
+void TestArquivoCadmec::salvarEAbrirExtrusao()
+{
+    const CadDocument original = documentWithExtrusions();
+    QCOMPARE(original.operations().size(), size_t(2));
+    const QString path = m_dir->filePath("extrusoes.cadmec");
+    QVERIFY(DocumentFile::save(original, path).ok);
+
+    const QJsonObject root = QJsonDocument::fromJson(readFile(path)).object();
+    QCOMPARE(root["schemaVersion"].toInt(), 4);
+    const QJsonObject d = root["document"].toObject();
+    QCOMPARE(d["nextOperationNumber"].toInt(), 3);
+    const QJsonObject e = d["operations"].toArray()[1].toObject();
+    QCOMPARE(e["type"].toString(), QStringLiteral("extrude"));
+    QCOMPARE(e["id"].toString(), QStringLiteral("op-2"));
+    QCOMPARE(e["name"].toString(), QStringLiteral("Extrusão 2"));
+    QCOMPARE(e["sketchId"].toString(), QStringLiteral("sk-2"));
+    QCOMPARE(e["reversed"].toBool(), true);
+    QCOMPARE(e["parameters"].toObject()["depth"].toDouble(), 35.0);
+    QVERIFY(!readFile(path).contains("triang")); // nenhuma malha/objeto gráfico salvo
+
+    CadDocument doc;
+    const FileResult r = DocumentFile::load(path, doc);
+    QVERIFY2(r.ok, qPrintable(r.message));
+    QCOMPARE(doc.operations().size(), size_t(2));
+    QCOMPARE(doc.solidCount(), 2);
+    QCOMPARE(doc.operations()[0].name, std::string("Bloco"));
+    QCOMPARE(doc.extrudeParameters("op-2").depth, 35.0);
+    QVERIFY(doc.extrudeParameters("op-2").reversed);
+    QCOMPARE(doc.nextOperationNumber(), 3);
+    // Geometria reconstruída a partir dos parâmetros: mesmo volume.
+    const double expected = 120000.0 + 3.14159265358979323846 * 100.0 * 35.0;
+    QVERIFY(qAbs(ShapeInspector::volume(doc.shape()) - expected) < 1e-6);
+    QCOMPARE(DocumentFile::toJson(doc), DocumentFile::toJson(original));
+}
+
+void TestArquivoCadmec::arquivoE521SomenteEsbocos()
+{
+    // Arquivo real gravado pela E5.2.1 (esquema 3, somente esboços).
+    const QString path = QStringLiteral(CADMEC_TEST_DATA_DIR "/documento_e521_v3.cadmec");
+    const QByteArray original = readFile(path);
+    QCOMPARE(QJsonDocument::fromJson(original).object()["schemaVersion"].toInt(), 3);
+    CadDocument doc;
+    const FileResult r = DocumentFile::load(path, doc);
+    QVERIFY2(r.ok, qPrintable(r.message));
+    QVERIFY(doc.operations().empty() && doc.shape().IsNull());
+    QCOMPARE(doc.sketches().size(), size_t(1));
+    QCOMPARE(doc.nextOperationNumber(), 1);
+    QCOMPARE(readFile(path), original);
+    // O esboço antigo tem dois contornos (retângulo + círculo): a extrusão é recusada com mensagem
+    // clara e o documento permanece intacto e regravável no esquema atual.
+    const auto ext = doc.addExtrusion({"", doc.sketches()[0].id(), 10.0, false});
+    QVERIFY(!ext.ok);
+    QVERIFY2(ext.message.find("contornos fechados") != std::string::npos, ext.message.c_str());
+    QVERIFY(doc.operations().empty());
+    QVERIFY(DocumentFile::save(doc, m_dir->filePath("e521_regravado.cadmec")).ok);
+}
+
+void TestArquivoCadmec::rejeitaExtrusaoInvalida_data()
+{
+    QTest::addColumn<QByteArray>("content");
+    auto setOpField = [](QJsonObject& r, int i, const char* key, const QJsonValue& value) {
+        QJsonObject o = extrudeOp(r, i);
+        if (value.isUndefined())
+            o.remove(key);
+        else
+            o[key] = value;
+        setOp(r, i, o);
+    };
+    QTest::newRow("esboco inexistente") << extrusionsModified([&](QJsonObject& r) { setOpField(r, 0, "sketchId", "sk-9"); });
+    QTest::newRow("profundidade zero") << extrusionsModified([&](QJsonObject& r) { setParam(r, 0, "depth", 0.0); });
+    QTest::newRow("profundidade texto") << extrusionsModified([&](QJsonObject& r) { setParam(r, 0, "depth", "20"); });
+    QTest::newRow("sem reversed") << extrusionsModified([&](QJsonObject& r) { setOpField(r, 0, "reversed", QJsonValue(QJsonValue::Undefined)); });
+    QTest::newRow("reversed texto") << extrusionsModified([&](QJsonObject& r) { setOpField(r, 0, "reversed", "sim"); });
+    QTest::newRow("campo desconhecido") << extrusionsModified([&](QJsonObject& r) { setOpField(r, 1, "mesh", "x"); });
+    QTest::newRow("nome vazio") << extrusionsModified([&](QJsonObject& r) { setOpField(r, 0, "name", "  "); });
+    QTest::newRow("id duplicado") << extrusionsModified([&](QJsonObject& r) { setOpField(r, 1, "id", "op-1"); });
+    QTest::newRow("tipo desconhecido") << extrusionsModified([&](QJsonObject& r) { setOpField(r, 1, "type", "revolve"); });
+    QTest::newRow("contador baixo") << extrusionsModified([](QJsonObject& r) {
+        QJsonObject d = r["document"].toObject(); d["nextOperationNumber"] = 2; r["document"] = d; });
+    QTest::newRow("sem contador v4") << extrusionsModified([](QJsonObject& r) {
+        QJsonObject d = r["document"].toObject(); d.remove("nextOperationNumber"); r["document"] = d; });
+    QTest::newRow("extrusao em esquema 3") << extrusionsModified([](QJsonObject& r) {
+        r["schemaVersion"] = 3; QJsonObject d = r["document"].toObject(); d.remove("nextOperationNumber"); r["document"] = d; });
+    QTest::newRow("perfil aberto no arquivo") << extrusionsModified([](QJsonObject& r) {
+        // Troca o retângulo do sk-1 por uma linha: a extrusão op-1 não pode ser reconstruída.
+        QJsonObject s = sketchObject(r, 0);
+        QJsonArray ents;
+        ents.append(QJsonObject{{"id", "e-1"}, {"type", "line"}, {"x1", 0.0}, {"y1", 0.0}, {"x2", 10.0}, {"y2", 0.0}});
+        s["entities"] = ents;
+        setSketch(r, 0, s); });
+}
+
+void TestArquivoCadmec::rejeitaExtrusaoInvalida()
+{
+    QFETCH(QByteArray, content);
+    CadDocument active = documentWithExtrusions();
+    const TopoDS_Shape before = active.shape();
+    const FileResult r = DocumentFile::fromJson(content, active);
+    qInfo("%s -> %s", QTest::currentDataTag(), qPrintable(r.message));
+    QVERIFY(!r.ok);
+    QVERIFY(!r.message.isEmpty());
+    QVERIFY(active.shape().IsSame(before));
+    QCOMPARE(active.operations().size(), size_t(2));
 }
 
 QTEST_GUILESS_MAIN(TestArquivoCadmec)

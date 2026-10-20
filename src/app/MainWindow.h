@@ -2,6 +2,7 @@
 #pragma once
 
 #include "document/CadDocument.h"
+#include "io/StlExporter.h"
 
 #include <QMainWindow>
 #include <QString>
@@ -50,6 +51,15 @@ public:
     // Exporta a peça atual para o arquivo indicado, pedindo confirmação antes de
     // sobrescrever. Retorna true se o arquivo foi gravado.
     bool exportStepTo(const QString& filePath);
+    // Exportação STL da geometria sólida atual (confirmação antes de sobrescrever).
+    bool exportStlTo(const QString& filePath, const cad::io::StlExportOptions& options);
+
+    // Pedido de exportação STL (caminho + opções), devolvido pelo diálogo.
+    struct StlExportRequest
+    {
+        QString filePath;
+        cad::io::StlExportOptions options;
+    };
 
     const cad::document::CadDocument& document() const { return m_document; }
     const TopoDS_Shape& part() const { return m_document.shape(); }
@@ -82,6 +92,16 @@ public:
     bool updateSketchEntity(const QString& entityId, const cad::sketch::SketchGeometry& geometry);
     void selectSketchEntity(const QString& entityId);
 
+    // --- Extrusões (E5.3) -----------------------------------------------------
+    // Esboço/operação selecionados na árvore (vazio se nenhum).
+    QString selectedSketchId() const;
+    QString selectedOperationId() const;
+    // Cria/edita a extrusão; erros são informados e o documento não muda.
+    bool addExtrusion(const cad::document::ExtrudeParameters& parameters);
+    bool updateExtrusion(const QString& operationId, const cad::document::ExtrudeParameters& parameters);
+    // Seleciona um item da árvore pelo id (operação ou esboço).
+    void selectTreeItem(const QString& id);
+
 public slots:
     void exportStep();
     void showAbout();
@@ -96,6 +116,10 @@ public slots:
     bool saveDocument();
     bool saveDocumentAs();
     void editParameters();
+
+    void extrude();
+    void editOperation();
+    void exportStl();
 
     void newSketch();
     void editSelectedSketch();
@@ -115,6 +139,10 @@ protected:
     virtual QString askSavePath(const QString& suggestedPath);
     virtual SaveChoice askSaveChanges();
     virtual std::optional<cad::sketch::PlaneType> askSketchPlane();
+    // Diálogo da extrusão (com pré-visualização); vazio = cancelado.
+    virtual std::optional<cad::document::ExtrudeParameters> askExtrusion(const cad::document::ExtrudeParameters& initial,
+                                                                        bool editing);
+    virtual std::optional<StlExportRequest> askStlExport(const QString& suggestedPath);
     virtual std::optional<cad::sketch::SketchGeometry> askEntityDimensions(const cad::sketch::SketchEntity& entity);
 
 private:
@@ -152,6 +180,9 @@ private:
     QAction* m_actSave = nullptr;
     QAction* m_actSaveAs = nullptr;
     QAction* m_actExportStep = nullptr;
+    QAction* m_actExportStl = nullptr;
+    QAction* m_actExtrude = nullptr;
+    QAction* m_actEditOperation = nullptr;
     QAction* m_actQuit = nullptr;
     QAction* m_actUndo = nullptr;
     QAction* m_actRedo = nullptr;

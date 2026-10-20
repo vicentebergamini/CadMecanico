@@ -86,6 +86,12 @@ public:
     // Imagem do framebuffer (pixels físicos).
     QImage grabViewerImage();
 
+    // Pré-visualização temporária de um sólido (ex.: extrusão antes de confirmar): translúcida,
+    // não selecionável e fora do documento. Forma nula remove a pré-visualização.
+    void setPreviewShape(const TopoDS_Shape& shape);
+    void clearPreviewShape() { setPreviewShape(TopoDS_Shape()); }
+    const occ::handle<AIS_Shape>& previewPresentation() const { return m_previewSolid; }
+
     // --- Esboços --------------------------------------------------------------
     // Esboços do documento exibidos fora da edição (somente visualização).
     void setDocumentSketches(const std::vector<cad::sketch::Sketch>& sketches);
@@ -176,6 +182,7 @@ private:
     std::vector<occ::handle<AIS_InteractiveObject>> m_sketchDecorations; // eixos locais e rótulos
     QHash<QString, occ::handle<AIS_Shape>> m_editShapes;               // id da entidade -> objeto
     occ::handle<AIS_Shape> m_preview;
+    occ::handle<AIS_Shape> m_previewSolid;
     std::optional<cad::sketch::SketchPlane> m_sketchPlane;
     SketchTool m_sketchTool = SketchTool::Select;
     std::optional<gp_Pnt2d> m_pendingPoint;
