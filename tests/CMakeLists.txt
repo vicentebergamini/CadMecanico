@@ -12,7 +12,21 @@ add_executable(test_selecao_info test_selecao_info.cpp TestCheck.h)
 target_link_libraries(test_selecao_info PRIVATE cad_modeling)
 add_test(NAME selecao_info COMMAND test_selecao_info)
 
-set_tests_properties(geometria step_roundtrip selecao_info PROPERTIES LABELS "core")
+add_executable(test_documento test_documento.cpp TestCheck.h ExpectedTestPart.h)
+target_link_libraries(test_documento PRIVATE cad_document)
+add_test(NAME documento COMMAND test_documento)
+
+set_tests_properties(geometria step_roundtrip selecao_info documento PROPERTIES LABELS "core")
+
+# Formato .cadmec (QtCore, sem interface gráfica).
+qt_add_executable(test_arquivo_cadmec test_arquivo_cadmec.cpp)
+set_target_properties(test_arquivo_cadmec PROPERTIES AUTOMOC ON WIN32_EXECUTABLE OFF)
+target_link_libraries(test_arquivo_cadmec PRIVATE cad_document_io cad_modeling Qt6::Test)
+add_test(NAME arquivo_cadmec COMMAND test_arquivo_cadmec)
+set_tests_properties(arquivo_cadmec PROPERTIES
+    LABELS "core"
+    ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${QT6_INSTALL_PREFIX}/${QT6_INSTALL_BINS}"
+)
 
 # Teste de interface (Qt Test). As DLLs e plugins do Qt são localizados pelo ambiente
 # do teste, sem copiar arquivos; a plataforma offscreen dispensa sessão interativa.
@@ -21,7 +35,12 @@ set_target_properties(test_mainwindow PROPERTIES AUTOMOC ON WIN32_EXECUTABLE OFF
 target_link_libraries(test_mainwindow PRIVATE cad_app cad_io cad_modeling Qt6::Test)
 add_test(NAME mainwindow COMMAND test_mainwindow)
 
-set_tests_properties(mainwindow PROPERTIES
+qt_add_executable(test_documento_ui test_documento_ui.cpp)
+set_target_properties(test_documento_ui PROPERTIES AUTOMOC ON WIN32_EXECUTABLE OFF)
+target_link_libraries(test_documento_ui PRIVATE cad_app cad_document_io cad_io cad_modeling Qt6::Test)
+add_test(NAME documento_ui COMMAND test_documento_ui)
+
+set_tests_properties(mainwindow documento_ui PROPERTIES
     LABELS "gui"
     TIMEOUT 120
     ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${QT6_INSTALL_PREFIX}/${QT6_INSTALL_PLUGINS}"

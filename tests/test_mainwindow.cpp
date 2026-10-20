@@ -1,4 +1,5 @@
 // Testes da janela principal (Qt Test): estrutura, menus, barras e exportação STEP.
+// A edição paramétrica e os arquivos .cadmec são testados em test_documento_ui.
 #include "app/MainWindow.h"
 #include "io/StepImporter.h"
 #include "modeling/ShapeInspector.h"
@@ -138,7 +139,9 @@ void TestMainWindow::cleanup()
 void TestMainWindow::abreJanela()
 {
     QVERIFY(m_window->isVisible());
-    QCOMPARE(m_window->windowTitle(), QStringLiteral("CAD Mecânico"));
+    QVERIFY(m_window->windowTitle().contains(QStringLiteral("CAD Mecânico")));
+    QVERIFY(m_window->windowTitle().contains(QStringLiteral("Peça de teste")));
+    QVERIFY(!m_window->isWindowModified());
     QVERIFY(m_window->statusBar()->currentMessage().contains("Open CASCADE"));
 }
 
@@ -151,15 +154,18 @@ void TestMainWindow::menus()
 
     auto* file = m_window->findChild<QMenu*>("menuArquivo");
     QVERIFY(file);
-    QCOMPARE(actionTexts(file), QStringList({"Novo", "Abrir...", "|", "Exportar STEP...", "|", "Sair"}));
-    QVERIFY(!action("actionNovo")->isEnabled());
-    QVERIFY(!action("actionAbrir")->isEnabled());
+    QCOMPARE(actionTexts(file), QStringList({"Novo", "Abrir...", "Salvar", "Salvar como...", "|", "Exportar STEP...", "|", "Sair"}));
+    QVERIFY(action("actionNovo")->isEnabled());
+    QVERIFY(action("actionAbrir")->isEnabled());
+    QVERIFY(action("actionSalvar")->isEnabled());
+    QVERIFY(action("actionSalvarComo")->isEnabled());
     QVERIFY(action("actionExportarStep")->isEnabled());
     QVERIFY(action("actionSair")->isEnabled());
 
     auto* edit = m_window->findChild<QMenu*>("menuEditar");
     QVERIFY(edit);
-    QCOMPARE(actionTexts(edit), QStringList({"Desfazer", "Refazer"}));
+    QCOMPARE(actionTexts(edit), QStringList({"Desfazer", "Refazer", "|", "Parâmetros da peça..."}));
+    QVERIFY(action("actionEditarParametros")->isEnabled());
     QVERIFY(!action("actionDesfazer")->isEnabled());
     QVERIFY(!action("actionRefazer")->isEnabled());
 
@@ -189,7 +195,7 @@ void TestMainWindow::barrasDeFerramentas()
 
     auto* modeling = m_window->findChild<QToolBar*>("toolBarModelagem");
     QVERIFY(modeling);
-    QVERIFY(modeling->actions().isEmpty());
+    QVERIFY(modeling->actions().contains(action("actionEditarParametros")));
 
     auto* view = m_window->findChild<QToolBar*>("toolBarVisualizar");
     QVERIFY(view);
@@ -209,6 +215,7 @@ void TestMainWindow::painelArvoreOperacoes()
     QVERIFY(tree);
     QCOMPARE(tree->topLevelItemCount(), 1);
     QCOMPARE(tree->topLevelItem(0)->text(0), QStringLiteral("Peça de teste"));
+    QCOMPARE(tree->topLevelItem(0)->childCount(), 2); // bloco base e furo passante
 }
 
 void TestMainWindow::areaCentral()

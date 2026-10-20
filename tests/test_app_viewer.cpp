@@ -8,6 +8,7 @@
 
 #include <QAction>
 #include <QDockWidget>
+#include <QLocale>
 #include <QScreen>
 #include <QMenu>
 #include <QStatusBar>
@@ -40,6 +41,7 @@ protected:
     bool confirmOverwrite(const QString&) override { return true; }
     void reportInfo(const QString&, const QString& text) override { infos << text; }
     void reportError(const QString&, const QString& text) override { errors << text; }
+    SaveChoice askSaveChanges() override { return SaveChoice::Discard; }
 };
 
 } // namespace
@@ -63,6 +65,10 @@ private slots:
     void teclaFNaJanela();
     void exportarStepAposInteracoes();
     void redimensionarAposInteracoes();
+    // E5.1
+    void visualizadorAtualizadoAposEdicao();
+    void navegacaoESelecaoAposRecalculo();
+    void selecaoNaArvoreIndependenteDa3D();
     void fechamentoNormal();
 
 private:
@@ -283,6 +289,84 @@ void TestAppViewer::redimensionarAposInteracoes()
         QVERIFY(d.count > 0);
     }
     saveEvidence(m_window->grab().toImage(), "E4_13_janela_redimensionada");
+}
+
+void TestAppViewer::visualizadorAtualizadoAposEdicao()
+{
+    action("actionVistaSuperior")->trigger();
+    const QImage before = viewer()->grabViewerImage();
+    const DiffResult d0 = diff(before, backgroundReference(viewer()));
+    qInfo("Antes: proporcao %.3f", double(d0.box.width()) / d0.box.height());
+    QVERIFY(std::abs(double(d0.box.width()) / d0.box.height() - 100.0 / 60.0) < 0.05 * 100.0 / 60.0);
+
+    const cad::document::PartParameters p{150.0, 50.0, 20.0, 12.0};
+    QVERIFY(m_window->applyParameters(p));
+    QVERIFY(viewer()->shape().IsSame(m_window->part()));
+    QVERIFY(waitFrames(viewer()));
+    // Peça recalculada aparece enquadrada e com a nova proporção na vista superior.
+    const QImage after = viewer()->grabViewerImage();
+    saveEvidence(m_window->grab().toImage(), "E51_01_vista_superior_apos_edicao");
+    const DiffResult d1 = diff(after, backgroundReference(viewer()));
+    const double aspect = double(d1.box.width()) / d1.box.height();
+    qInfo("Depois: proporcao %.3f (esperada %.3f)", aspect, 150.0 / 50.0);
+    QVERIFY(std::abs(aspect - 3.0) < 0.05 * 3.0);
+    QVERIFY(d1.box.width() > 0.8 * after.width() || d1.box.height() > 0.8 * after.height());
+    QVERIFY(viewer()->view()->Camera()->IsOrthographic());
+}
+
+void TestAppViewer::navegacaoESelecaoAposRecalculo()
+{
+    const cad::document::PartParameters p{150.0, 80.0, 30.0, 15.0};
+    QVERIFY(m_window->applyParameters(p));
+    QVERIFY(waitFrames(viewer()));
+    OcctViewerWidget* v = viewer();
+    auto at = [v](const gp_Pnt& pt) { return toLogical(v, project(v, pt)); };
+
+    // Seleção de face da nova geometria: área calculada com os novos parâmetros.
+    QVERIFY(click(v, at(gp_Pnt(30.0, 20.0, 30.0))));
+    QTRY_VERIFY(m_window->statusBar()->currentMessage().startsWith("Face"));
+    const double area = 150.0 * 80.0 - 3.14159265358979323846 * 15.0 * 15.0;
+    const QString expected = QLocale(QLocale::Portuguese, QLocale::Brazil).toString(area, 'f', 2);
+    qInfo("%s", qPrintable(m_window->statusBar()->currentMessage()));
+    QVERIFY(m_window->statusBar()->currentMessage().contains(expected));
+    saveEvidence(m_window->grab().toImage(), "E51_02_selecao_apos_recalculo");
+    pauseBetweenClicks();
+
+    // Aresta do furo com o novo raio.
+    QVERIFY(click(v, at(gp_Pnt(75.0, 40.0 - 15.0, 30.0))));
+    QTRY_VERIFY(m_window->statusBar()->currentMessage().contains("(R 15,00 mm)"));
+    pauseBetweenClicks();
+
+    // Navegação continua funcionando.
+    const gp_Dir before = v->view()->Camera()->Direction();
+    const QPointF c(v->width() / 2.0, v->height() / 2.0);
+    QVERIFY(drag(v, c, c + QPointF(100, 40), Qt::MiddleButton));
+    QVERIFY(before.Angle(v->view()->Camera()->Direction()) > 0.1);
+    sendWheel(v, c, 120);
+    QVERIFY(waitFrames(v));
+    QTest::keyClick(v, Qt::Key_F);
+    QVERIFY(waitFrames(v));
+    QCOMPARE(v->selectedShapes().size(), 1);
+}
+
+void TestAppViewer::selecaoNaArvoreIndependenteDa3D()
+{
+    OcctViewerWidget* v = viewer();
+    QVERIFY(click(v, toLogical(v, project(v, gp_Pnt(25.0, 15.0, 20.0)))));
+    QTRY_COMPARE(v->selectedShapes().size(), 1);
+    const TopoDS_Shape face = v->selectedShapes().first();
+
+    QTreeWidget* tree = m_window->operationsTree();
+    QTreeWidgetItem* hole = tree->topLevelItem(0)->child(1);
+    tree->setCurrentItem(hole);
+    QCOMPARE(hole->data(0, cad::app::MainWindow::kItemIdRole).toString(), QStringLiteral("op-2"));
+    // A seleção de operação não altera a seleção geométrica (e vice-versa).
+    QCOMPARE(v->selectedShapes().size(), 1);
+    QVERIFY(v->selectedShapes().first().IsSame(face));
+    pauseBetweenClicks();
+    QVERIFY(click(v, QPointF(8.0, 8.0))); // canto superior esquerdo: fundo
+    QTRY_VERIFY(v->selectedShapes().isEmpty());
+    QCOMPARE(tree->currentItem(), hole);
 }
 
 void TestAppViewer::fechamentoNormal()
