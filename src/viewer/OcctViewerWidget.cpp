@@ -27,6 +27,9 @@
 #include <Prs3d_Drawer.hxx>
 #include <Prs3d_LineAspect.hxx>
 #include <AIS_TextLabel.hxx>
+#include <AIS_Trihedron.hxx>
+#include <Geom_Axis2Placement.hxx>
+#include <Prs3d_DatumParts.hxx>
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <Quantity_Color.hxx>
 #include <StdSelect_BRepOwner.hxx>
@@ -64,8 +67,11 @@ const Quantity_Color kSketchPreviewColor(0.25, 0.25, 0.25, Quantity_TOC_sRGB);
 const Quantity_Color kAxisHColor(0.85, 0.10, 0.10, Quantity_TOC_sRGB);
 const Quantity_Color kAxisVColor(0.05, 0.60, 0.10, Quantity_TOC_sRGB);
 
-// Transparência do sólido durante a edição de um esboço (o esboço fica sempre por cima).
-constexpr double kSketchSolidTransparency = 0.5;
+// Eixos de referência na origem global, com tamanho constante na tela (pixels lógicos).
+constexpr double kOriginAxesSize = 70.0;
+
+// Região enquadrada quando a cena não tem sólido nem esboço (mm, a partir da origem).
+constexpr double kEmptySceneExtent = 100.0;
 
 // Clique (sem arrasto) no modo de esboço: deslocamento máximo em pixels lógicos.
 constexpr double kClickTolerance = 4.0;
@@ -277,8 +283,20 @@ void OcctViewerWidget::setupViewer()
     m_viewCube->SetBoxSideLabel(V3d_Zneg, "INFERIOR");
     m_viewCube->SetBoxSideLabel(V3d_Xpos, "DIREITA");
     m_viewCube->SetBoxSideLabel(V3d_Xneg, "ESQUERDA");
+
+    // Eixos de referência X (vermelho), Y (verde) e Z (azul) na origem global, de tamanho
+    // constante na tela e fora do enquadramento (Ajustar à janela ignora objetos persistentes).
+    m_originAxes = new AIS_Trihedron(new Geom_Axis2Placement(gp::XOY()));
+    m_originAxes->SetDatumDisplayMode(Prs3d_DM_WireFrame);
+    m_originAxes->SetDatumPartColor(Prs3d_DatumParts_XAxis, Quantity_NOC_RED);
+    m_originAxes->SetDatumPartColor(Prs3d_DatumParts_YAxis, Quantity_Color(0.0, 0.6, 0.0, Quantity_TOC_sRGB));
+    m_originAxes->SetDatumPartColor(Prs3d_DatumParts_ZAxis, Quantity_NOC_BLUE1);
+    m_originAxes->SetTextColor(Quantity_NOC_BLACK);
+    m_originAxes->SetTransformPersistence(new Graphic3d_TransformPers(Graphic3d_TMF_ZoomPers, gp::Origin()));
+
     applyDevicePixelRatio(1.0);
     m_context->Display(m_viewCube, 0, 0, false);
+    m_context->Display(m_originAxes, 0, -1, false);
 }
 
 void OcctViewerWidget::setupSketchNavigation(bool sketchMode)
@@ -324,6 +342,12 @@ void OcctViewerWidget::applyDevicePixelRatio(qreal dpr)
         m_context->Redisplay(m_viewCube, false, true);
         m_context->RecomputeSelectionOnly(m_viewCube);
     }
+    if (!m_originAxes.IsNull())
+    {
+        m_originAxes->SetSize(kOriginAxesSize * dpr);
+        if (m_context->IsDisplayed(m_originAxes))
+            m_context->Redisplay(m_originAxes, false);
+    }
 
     m_context->SetPixelTolerance(qRound(kPickTolerance * dpr));
     m_view->Invalidate();
@@ -343,6 +367,7 @@ void OcctViewerWidget::releaseGraphics()
     m_context.Nullify();
     m_shape.Nullify();
     m_viewCube.Nullify();
+    m_originAxes.Nullify();
     m_documentSketchShapes.clear();
     m_sketchDecorations.clear();
     m_editShapes.clear();
@@ -369,7 +394,7 @@ void OcctViewerWidget::setShape(const TopoDS_Shape& shape)
     m_shape.Nullify();
     if (shape.IsNull())
     {
-        updateView();
+        redrawScene();
         return;
     }
 
@@ -390,13 +415,10 @@ void OcctViewerWidget::setShape(const TopoDS_Shape& shape)
     for (TopAbs_ShapeEnum type : {TopAbs_EDGE, TopAbs_VERTEX})
         m_context->Activate(m_shape, AIS_Shape::SelectionMode(type));
     if (isSketchMode())
-    {
-        m_context->Deactivate(m_shape); // no modo de esboço o sólido não é selecionável
-        m_context->SetTransparency(m_shape, kSketchSolidTransparency, false);
-    }
+        m_context->Erase(m_shape, false); // oculto durante a edição do esboço
 
     m_fitPending = true;
-    updateView();
+    redrawScene();
 }
 
 QList<TopoDS_Shape> OcctViewerWidget::selectedShapes() const
@@ -418,7 +440,7 @@ void OcctViewerWidget::clearSelection()
     if (m_context.IsNull())
         return;
     m_context->ClearSelected(false);
-    updateView();
+    redrawScene();
     emit selectionChanged();
 }
 
@@ -435,9 +457,44 @@ void OcctViewerWidget::fitAll()
         m_fitPending = true;
         return;
     }
-    m_view->FitAll(kFitMargin, false);
+    fitScene();
     m_view->Invalidate();
     updateView();
+}
+
+bool OcctViewerWidget::hasFittableContent() const
+{
+    if (isSketchMode())
+        return !m_editShapes.isEmpty() || !m_sketchDecorations.empty();
+    return !m_shape.IsNull() || !m_documentSketchShapes.empty();
+}
+
+void OcctViewerWidget::fitScene()
+{
+    if (!isSketchMode() && m_shape.IsNull() && !m_documentSketchShapes.empty())
+    {
+        // Documento só com esboços: caixa calculada a partir das arestas dos esboços.
+        Bnd_Box box;
+        for (const auto& prs : m_documentSketchShapes)
+            box.Add(cad::modeling::ShapeInspector::boundingBox(prs->Shape()));
+        box.Add(gp::Origin()); // mantém a origem (eixos de referência) no enquadramento
+        if (!box.IsVoid())
+        {
+            box.Enlarge(1.0);
+            m_view->FitAll(box, kFitMargin, false);
+            return;
+        }
+    }
+    if (hasFittableContent())
+    {
+        m_view->FitAll(kFitMargin, false);
+        return;
+    }
+    // Cena vazia: enquadra uma região padrão centrada na origem (eixos de referência no centro).
+    Bnd_Box box;
+    const double e = 0.6 * kEmptySceneExtent;
+    box.Update(-e, -e, -e, e, e, e);
+    m_view->FitAll(box, kFitMargin, false);
 }
 
 void OcctViewerWidget::setStandardView(StandardView view)
@@ -545,10 +602,10 @@ void OcctViewerWidget::paintGL()
     // A janela pode mudar de monitor (outra escala).
     applyDevicePixelRatio(devicePixelRatioF());
 
-    if (m_fitPending && !m_shape.IsNull())
+    if (m_fitPending)
     {
         m_fitPending = false;
-        m_view->FitAll(kFitMargin, false);
+        fitScene();
         m_view->Invalidate();
     }
 
@@ -681,6 +738,15 @@ void OcctViewerWidget::updateView()
     update();
 }
 
+void OcctViewerWidget::redrawScene()
+{
+    // Objetos exibidos/ocultos com Display/Erase(..., false) só aparecem num redesenho completo
+    // da camada principal; sem Invalidate() apenas a camada imediata seria redesenhada.
+    if (!m_view.IsNull())
+        m_view->Invalidate();
+    update();
+}
+
 // --- Esboços -----------------------------------------------------------------
 
 void OcctViewerWidget::setDocumentSketches(const std::vector<cad::sketch::Sketch>& sketches)
@@ -699,9 +765,11 @@ void OcctViewerWidget::setDocumentSketches(const std::vector<cad::sketch::Sketch
         prs->SetWidth(1.5);
         m_context->Display(prs, AIS_WireFrame, -1, false); // apenas visualização
         m_context->SetZLayer(prs, Graphic3d_ZLayerId_Topmost); // visível através do sólido
+        if (isSketchMode())
+            m_context->Erase(prs, false); // outros esboços ocultos durante a edição
         m_documentSketchShapes.push_back(prs);
     }
-    updateView();
+    redrawScene();
 }
 
 void OcctViewerWidget::enterSketchMode(const cad::sketch::Sketch& sketch)
@@ -714,23 +782,24 @@ void OcctViewerWidget::enterSketchMode(const cad::sketch::Sketch& sketch)
     m_sketchTool = SketchTool::Select;
     m_pendingPoint.reset();
 
-    // Sólido visível (semitransparente) mas não selecionável; ViewCube oculto (sem rotação).
+    // Somente o esboço ativo: sólidos, outros esboços, eixos globais e ViewCube ficam ocultos
+    // (sem rotação no esboço) e voltam em exitSketchMode().
     m_context->ClearSelected(false);
     if (!m_shape.IsNull())
-    {
-        m_context->Deactivate(m_shape);
-        m_context->SetTransparency(m_shape, kSketchSolidTransparency, false);
-    }
+        m_context->Erase(m_shape, false);
+    for (const auto& s : m_documentSketchShapes)
+        m_context->Erase(s, false);
     m_context->Erase(m_viewCube, false);
+    m_context->Erase(m_originAxes, false);
     setupSketchNavigation(true);
 
     // Eixos locais: horizontal (vermelho) e vertical (verde) a partir da origem do plano.
-    double axisLength = 50.0;
+    double axisLength = kEmptySceneExtent;
     if (!m_shapeData.IsNull())
     {
         const Bnd_Box box = cad::modeling::ShapeInspector::boundingBox(m_shapeData);
         if (!box.IsVoid())
-            axisLength = std::max(30.0, 0.6 * std::sqrt(box.SquareExtent()));
+            axisLength = std::max(kEmptySceneExtent, 0.6 * std::sqrt(box.SquareExtent()));
     }
     const cad::sketch::SketchPlane& plane = *m_sketchPlane;
     auto addAxis = [&](const gp_Dir& dir, const Quantity_Color& color, const char* label) {
@@ -783,7 +852,7 @@ void OcctViewerWidget::updateEditingSketch(const cad::sketch::Sketch& sketch, co
         m_context->SetZLayer(prs, Graphic3d_ZLayerId_Topmost);
         m_editShapes.insert(id, prs);
     }
-    updateView();
+    redrawScene();
 }
 
 void OcctViewerWidget::clearEditShapes()
@@ -807,16 +876,23 @@ void OcctViewerWidget::exitSketchMode()
     m_leftPressed = false;
     m_sketchTool = SketchTool::Select;
 
+    // Restaura a visualização do documento.
     if (!m_shape.IsNull())
     {
-        m_context->UnsetTransparency(m_shape, false);
-        for (TopAbs_ShapeEnum type : {TopAbs_FACE, TopAbs_EDGE, TopAbs_VERTEX})
+        m_context->Display(m_shape, AIS_Shaded, AIS_Shape::SelectionMode(TopAbs_FACE), false);
+        for (TopAbs_ShapeEnum type : {TopAbs_EDGE, TopAbs_VERTEX})
             m_context->Activate(m_shape, AIS_Shape::SelectionMode(type));
     }
+    for (const auto& s : m_documentSketchShapes)
+    {
+        m_context->Display(s, AIS_WireFrame, -1, false);
+        m_context->SetZLayer(s, Graphic3d_ZLayerId_Topmost);
+    }
     m_context->Display(m_viewCube, 0, 0, false);
+    m_context->Display(m_originAxes, 0, -1, false);
     setupSketchNavigation(false);
     ResetPreviousMoveTo();
-    updateView();
+    redrawScene();
 }
 
 void OcctViewerWidget::setSketchTool(SketchTool tool)
@@ -829,7 +905,7 @@ void OcctViewerWidget::cancelSketchInput()
 {
     m_pendingPoint.reset();
     removePreview();
-    updateView();
+    redrawScene();
 }
 
 occ::handle<AIS_Shape> OcctViewerWidget::sketchEntityPresentation(const QString& entityId) const
@@ -858,7 +934,10 @@ std::optional<gp_Pnt2d> OcctViewerWidget::sketchPointAt(const QPointF& logicalPo
 void OcctViewerWidget::removePreview()
 {
     if (!m_preview.IsNull() && !m_context.IsNull())
+    {
         m_context->Remove(m_preview, false);
+        m_view->Invalidate();
+    }
     m_preview.Nullify();
 }
 
@@ -891,6 +970,7 @@ void OcctViewerWidget::updatePreview(const gp_Pnt2d& current)
     m_preview->SetWidth(1.0);
     m_context->Display(m_preview, AIS_WireFrame, -1, false);
     m_context->SetZLayer(m_preview, Graphic3d_ZLayerId_Topmost);
+    m_view->Invalidate();
 }
 
 void OcctViewerWidget::handleSketchClick(const QPointF& pos)

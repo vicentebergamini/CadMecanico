@@ -27,8 +27,14 @@
 //           { "id": "e-1", "type": "line",      "x1": 0, "y1": 0, "x2": 50, "y2": 0 },
 //           { "id": "e-2", "type": "rectangle", "x": 10, "y": 10, "width": 40, "height": 20 },
 //           { "id": "e-3", "type": "circle",    "cx": 50, "cy": 30, "radius": 8 } ] } ]
-// Coordenadas locais do plano, em mm. Arquivos da versão 1 (sem esboços) continuam sendo lidos;
-// a gravação usa sempre a versão atual.
+// Coordenadas locais do plano, em mm.
+//
+// Esquema versão 3 (E5.2.1): mesmos campos da versão 2; "operations" pode ser vazia (documento
+// sem sólido, por exemplo só com esboços). Nas versões 1 e 2 a lista continua exigindo
+// exatamente bloco base + furo passante.
+//
+// Arquivos das versões 1 e 2 continuam sendo lidos sem alteração; a gravação usa sempre a
+// versão atual.
 #pragma once
 
 #include "document/CadDocument.h"
@@ -47,7 +53,7 @@ struct FileResult
 class DocumentFile
 {
 public:
-    static constexpr int kSchemaVersion = 2;
+    static constexpr int kSchemaVersion = 3;
     static constexpr qint64 kMaxFileSize = 4 * 1024 * 1024;
     static constexpr const char* kFormat = "cadmec";
     static constexpr const char* kExtension = "cadmec";

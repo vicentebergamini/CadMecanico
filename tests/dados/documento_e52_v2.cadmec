@@ -1,0 +1,63 @@
+{
+    "document": {
+        "name": "Peça de teste",
+        "nextSketchNumber": 2,
+        "operations": [
+            {
+                "id": "op-1",
+                "name": "Bloco base",
+                "parameters": {
+                    "height": 20,
+                    "length": 100,
+                    "width": 60
+                },
+                "type": "block"
+            },
+            {
+                "id": "op-2",
+                "name": "Furo passante",
+                "parameters": {
+                    "radius": 10
+                },
+                "type": "throughHole"
+            }
+        ],
+        "sketches": [
+            {
+                "entities": [
+                    {
+                        "id": "e-1",
+                        "type": "line",
+                        "x1": 5,
+                        "x2": 68.1,
+                        "y1": 49.3,
+                        "y2": 49.3
+                    },
+                    {
+                        "height": 16.4,
+                        "id": "e-2",
+                        "type": "rectangle",
+                        "width": 24.1,
+                        "x": 28.8,
+                        "y": 22
+                    },
+                    {
+                        "cx": 74.1,
+                        "cy": 29.3,
+                        "id": "e-3",
+                        "radius": 9.1,
+                        "type": "circle"
+                    }
+                ],
+                "id": "sk-1",
+                "name": "Esboço 1",
+                "nextEntityNumber": 4,
+                "plane": "XY"
+            }
+        ],
+        "unit": "mm"
+    },
+    "format": "cadmec",
+    "generator": "CadMecanico",
+    "schemaVersion": 2
+}

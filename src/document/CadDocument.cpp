@@ -59,20 +59,26 @@ bool isValidIdentifier(const std::string& id)
 }
 
 CadDocument::CadDocument()
-    : CadDocument("Peça de teste")
+    : CadDocument("Sem título")
 {
 }
 
-CadDocument::CadDocument(std::string name, const PartParameters& parameters)
+CadDocument::CadDocument(std::string name)
     : m_name(std::move(name))
 {
+}
+
+CadDocument CadDocument::withTestPart(std::string name, const PartParameters& parameters)
+{
+    CadDocument doc(std::move(name));
     PartParameters p = parameters;
     if (!validate(p).ok)
-        p = PartParameters(); // construtor nunca deixa o documento sem geometria válida
-    m_operations = makeOperations(p, kDefaultBlockId, kDefaultHoleId);
+        p = PartParameters(); // nunca deixa o exemplo sem geometria válida
+    doc.m_operations = makeOperations(p, kDefaultBlockId, kDefaultHoleId);
     std::string error;
-    rebuild(m_operations, m_shape, error);
-    ++m_revision;
+    rebuild(doc.m_operations, doc.m_shape, error);
+    ++doc.m_revision;
+    return doc;
 }
 
 ValidationResult CadDocument::validate(const PartParameters& p)
@@ -115,9 +121,10 @@ int sketchNumber(const std::string& sketchId)
     return n;
 }
 
-bool CadDocument::fromData(const std::string& name, const PartParameters& parameters, const std::string& blockId,
-                           const std::string& holeId, CadDocument& out, std::string& error,
-                           const std::vector<cad::sketch::Sketch>& sketches, int nextSketchNumber)
+bool CadDocument::fromData(const std::string& name, const std::optional<PartParameters>& part,
+                           const std::string& blockId, const std::string& holeId, CadDocument& out,
+                           std::string& error, const std::vector<cad::sketch::Sketch>& sketches,
+                           int nextSketchNumber)
 {
     // Esboços: ids "sk-N" únicos e contador coerente (entidades já validadas em Sketch::fromData).
     int maxSketch = 0;
@@ -143,31 +150,34 @@ bool CadDocument::fromData(const std::string& name, const PartParameters& parame
         return false;
     }
 
-    if (!isValidIdentifier(blockId) || !isValidIdentifier(holeId))
-    {
-        error = "Identificador de operação inválido";
-        return false;
-    }
-    if (blockId == holeId)
-    {
-        error = "Identificadores de operação duplicados";
-        return false;
-    }
-    const ValidationResult v = validate(parameters);
-    if (!v.ok)
-    {
-        error = v.message;
-        return false;
-    }
-
-    CadDocument doc;
-    doc.m_name = name;
-    std::vector<Operation> ops = makeOperations(parameters, blockId, holeId);
+    CadDocument doc(name);
+    std::vector<Operation> ops;
     TopoDS_Shape shape;
-    if (!rebuild(ops, shape, error))
-        return false;
+    if (part)
+    {
+        if (!isValidIdentifier(blockId) || !isValidIdentifier(holeId))
+        {
+            error = "Identificador de operação inválido";
+            return false;
+        }
+        if (blockId == holeId)
+        {
+            error = "Identificadores de operação duplicados";
+            return false;
+        }
+        const ValidationResult v = validate(*part);
+        if (!v.ok)
+        {
+            error = v.message;
+            return false;
+        }
+        ops = makeOperations(*part, blockId, holeId);
+        if (!rebuild(ops, shape, error))
+            return false;
+    }
     doc.m_operations = std::move(ops);
     doc.m_shape = shape;
+    doc.m_revision = part ? 1 : 0;
     doc.m_sketches = sketches;
     doc.m_nextSketchNumber = nextSketchNumber;
     doc.m_modified = false;
@@ -267,6 +277,8 @@ PartParameters CadDocument::parameters() const
 
 ValidationResult CadDocument::setParameters(const PartParameters& parameters)
 {
+    if (!hasPart())
+        return ValidationResult{false, "", "O documento não possui peça paramétrica"};
     const ValidationResult v = validate(parameters);
     if (!v.ok)
         return v;

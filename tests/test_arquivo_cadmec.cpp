@@ -33,7 +33,7 @@ void writeFile(const QString& path, const QByteArray& data)
 template <typename F>
 QByteArray modified(F edit)
 {
-    QJsonObject root = QJsonDocument::fromJson(DocumentFile::toJson(CadDocument())).object();
+    QJsonObject root = QJsonDocument::fromJson(DocumentFile::toJson(CadDocument::withTestPart())).object();
     edit(root);
     return QJsonDocument(root).toJson();
 }
@@ -86,6 +86,11 @@ private slots:
     void compatibilidadeArquivoE51();
     void rejeitaEsbocoInvalido_data();
     void rejeitaEsbocoInvalido();
+    // E5.2.1
+    void documentoVazio();
+    void documentoSomenteComEsbocos();
+    void arquivoE52ComBlocoEFuro();
+    void operacoesVaziasPorVersao();
 
 private:
     QTemporaryDir* m_dir = nullptr;
@@ -105,7 +110,7 @@ void TestArquivoCadmec::cleanup()
 
 void TestArquivoCadmec::salvarDocumento()
 {
-    CadDocument doc("Flange de teste");
+    CadDocument doc = CadDocument::withTestPart("Flange de teste");
     QVERIFY(doc.setParameters({120.0, 70.0, 15.0, 12.5}).ok);
     const QString path = m_dir->filePath("flange.cadmec");
     const FileResult r = DocumentFile::save(doc, path);
@@ -155,7 +160,7 @@ void TestArquivoCadmec::abrirDocumento()
 
 void TestArquivoCadmec::idaEVoltaPreservaTudo()
 {
-    CadDocument a("Ida e volta");
+    CadDocument a = CadDocument::withTestPart("Ida e volta");
     QVERIFY(a.setParameters({77.7, 44.4, 33.3, 11.1}).ok);
     const QString path = m_dir->filePath("ida_volta.cadmec");
     QVERIFY(DocumentFile::save(a, path).ok);
@@ -200,7 +205,7 @@ void TestArquivoCadmec::rejeitaArquivoCorrompido_data()
     QTest::addColumn<QByteArray>("content");
 
     QTest::newRow("vazio") << QByteArray();
-    QTest::newRow("json truncado") << DocumentFile::toJson(CadDocument()).left(60);
+    QTest::newRow("json truncado") << DocumentFile::toJson(CadDocument::withTestPart()).left(60);
     QTest::newRow("binario") << QByteArray("\x00\x01\x02\xff\xfe", 5);
     QTest::newRow("raiz array") << QByteArray("[1,2,3]");
     QTest::newRow("formato errado") << modified([](QJsonObject& r) { r["format"] = "outro"; });
@@ -248,7 +253,7 @@ void TestArquivoCadmec::rejeitaArquivoCorrompido()
     const QString path = m_dir->filePath("corrompido.cadmec");
     writeFile(path, content);
 
-    CadDocument active("Documento ativo");
+    CadDocument active = CadDocument::withTestPart("Documento ativo");
     QVERIFY(active.setParameters({111.0, 55.0, 22.0, 9.0}).ok);
     const auto paramsBefore = active.parameters();
     const TopoDS_Shape shapeBefore = active.shape();
@@ -268,7 +273,7 @@ void TestArquivoCadmec::preservaDocumentoAtivoAposFalha()
 {
     // Arquivo válido -> carregado; em seguida arquivo inválido não altera o documento carregado.
     const QString good = m_dir->filePath("bom.cadmec");
-    CadDocument saved("Bom");
+    CadDocument saved = CadDocument::withTestPart("Bom");
     QVERIFY(saved.setParameters({60.0, 50.0, 40.0, 20.0}).ok);
     QVERIFY(DocumentFile::save(saved, good).ok);
 
@@ -300,7 +305,7 @@ namespace {
 CadDocument documentWithSketches()
 {
     using namespace cad::sketch;
-    CadDocument doc("Com esboços");
+    CadDocument doc = CadDocument::withTestPart("Com esboços");
     std::string error;
     Sketch a = doc.createSketch(PlaneType::XY);
     a.addEntity(SketchLine{0.0, 0.0, 50.0, 0.0});
@@ -361,7 +366,7 @@ void TestArquivoCadmec::salvarEsbocos()
     const QString path = m_dir->filePath("esbocos.cadmec");
     QVERIFY(DocumentFile::save(documentWithSketches(), path).ok);
     const QJsonObject root = QJsonDocument::fromJson(readFile(path)).object();
-    QCOMPARE(root["schemaVersion"].toInt(), 2);
+    QCOMPARE(root["schemaVersion"].toInt(), DocumentFile::kSchemaVersion);
     const QJsonObject d = root["document"].toObject();
     QCOMPARE(d["nextSketchNumber"].toInt(), 4);
     const QJsonArray sketches = d["sketches"].toArray();
@@ -446,7 +451,7 @@ void TestArquivoCadmec::compatibilidadeArquivoE51()
     // Regravado na versão atual, preservando os dados.
     const QString resaved = m_dir->filePath("migrado.cadmec");
     QVERIFY(DocumentFile::save(doc, resaved).ok);
-    QCOMPARE(QJsonDocument::fromJson(readFile(resaved)).object()["schemaVersion"].toInt(), 2);
+    QCOMPARE(QJsonDocument::fromJson(readFile(resaved)).object()["schemaVersion"].toInt(), DocumentFile::kSchemaVersion);
     CadDocument again;
     QVERIFY(DocumentFile::load(resaved, again).ok);
     QCOMPARE(again.parameters(), doc.parameters());
@@ -511,6 +516,100 @@ void TestArquivoCadmec::rejeitaEsbocoInvalido()
     QVERIFY(!r.message.isEmpty());
     QCOMPARE(active.sketches().size(), sketchesBefore);
     QCOMPARE(active.parameters(), (PartParameters{111.0, 55.0, 22.0, 9.0}));
+}
+
+void TestArquivoCadmec::documentoVazio()
+{
+    const QString path = m_dir->filePath("vazio.cadmec");
+    QVERIFY(DocumentFile::save(CadDocument(), path).ok);
+    const QJsonObject root = QJsonDocument::fromJson(readFile(path)).object();
+    QCOMPARE(root["schemaVersion"].toInt(), 3);
+    const QJsonObject d = root["document"].toObject();
+    QCOMPARE(d["name"].toString(), QStringLiteral("Sem título"));
+    QVERIFY(d["operations"].isArray() && d["operations"].toArray().isEmpty());
+    QVERIFY(d["sketches"].isArray() && d["sketches"].toArray().isEmpty());
+
+    CadDocument doc = CadDocument::withTestPart("ativo");
+    const FileResult r = DocumentFile::load(path, doc);
+    QVERIFY2(r.ok, qPrintable(r.message));
+    QVERIFY(!doc.hasPart());
+    QVERIFY(doc.shape().IsNull());
+    QVERIFY(doc.sketches().empty());
+    QVERIFY(!doc.isModified());
+    QCOMPARE(DocumentFile::toJson(doc), DocumentFile::toJson(CadDocument()));
+}
+
+void TestArquivoCadmec::documentoSomenteComEsbocos()
+{
+    using namespace cad::sketch;
+    CadDocument doc("Somente esboços");
+    std::string error;
+    Sketch s = doc.createSketch(PlaneType::XY);
+    QVERIFY(s.addEntity(SketchRectangle{0.0, 0.0, 80.0, 40.0}).ok);
+    QVERIFY(s.addEntity(SketchCircle{40.0, 20.0, 10.0}).ok);
+    QVERIFY(doc.commitSketch(s, error));
+    QVERIFY(!doc.hasPart() && doc.shape().IsNull()); // esboços não criam sólido
+
+    const QString path = m_dir->filePath("somente_esbocos.cadmec");
+    QVERIFY(DocumentFile::save(doc, path).ok);
+    CadDocument loaded;
+    const FileResult r = DocumentFile::load(path, loaded);
+    QVERIFY2(r.ok, qPrintable(r.message));
+    QVERIFY(!loaded.hasPart());
+    QVERIFY(loaded.shape().IsNull());
+    QCOMPARE(loaded.sketches().size(), size_t(1));
+    QCOMPARE(loaded.sketches()[0].entities().size(), size_t(2));
+    QVERIFY(loaded.sketches()[0].entities()[0].type() == EntityType::Rectangle);
+    QCOMPARE(std::get<SketchCircle>(loaded.sketches()[0].entities()[1].geometry).radius, 10.0);
+    QCOMPARE(DocumentFile::toJson(loaded), DocumentFile::toJson(doc));
+}
+
+void TestArquivoCadmec::arquivoE52ComBlocoEFuro()
+{
+    // Arquivo real gravado pela versão E5.2 (esquema 2): bloco, furo e um esboço.
+    const QString path = QStringLiteral(CADMEC_TEST_DATA_DIR "/documento_e52_v2.cadmec");
+    const QByteArray original = readFile(path);
+    QCOMPARE(QJsonDocument::fromJson(original).object()["schemaVersion"].toInt(), 2);
+    CadDocument doc;
+    const FileResult r = DocumentFile::load(path, doc);
+    QVERIFY2(r.ok, qPrintable(r.message));
+    QVERIFY(doc.hasPart());
+    QCOMPARE(doc.parameters(), PartParameters());
+    QCOMPARE(ShapeInspector::inspect(doc.shape()).faces, 7);
+    QCOMPARE(doc.sketches().size(), size_t(1));
+    QCOMPARE(doc.sketches()[0].entities().size(), size_t(3));
+    QCOMPARE(readFile(path), original); // abrir não altera o arquivo
+}
+
+void TestArquivoCadmec::operacoesVaziasPorVersao()
+{
+    // Esquemas 1 e 2 exigem bloco + furo; o esquema 3 aceita lista vazia, mas não parcial.
+    auto withOps = [](int schema, int count) {
+        QJsonObject root = QJsonDocument::fromJson(DocumentFile::toJson(CadDocument::withTestPart())).object();
+        root["schemaVersion"] = schema;
+        QJsonObject d = root["document"].toObject();
+        QJsonArray ops = d["operations"].toArray();
+        while (ops.size() > count)
+            ops.removeLast();
+        d["operations"] = ops;
+        if (schema == 1)
+        {
+            d.remove("sketches");
+            d.remove("nextSketchNumber");
+        }
+        root["document"] = d;
+        return QJsonDocument(root).toJson();
+    };
+    CadDocument doc;
+    QVERIFY(!DocumentFile::fromJson(withOps(1, 0), doc).ok);
+    QVERIFY(!DocumentFile::fromJson(withOps(2, 0), doc).ok);
+    QVERIFY(!DocumentFile::fromJson(withOps(3, 1), doc).ok);
+    QVERIFY(DocumentFile::fromJson(withOps(3, 0), doc).ok);
+    QVERIFY(!doc.hasPart());
+    QVERIFY(DocumentFile::fromJson(withOps(3, 2), doc).ok);
+    QVERIFY(doc.hasPart());
+    QVERIFY(DocumentFile::fromJson(withOps(2, 2), doc).ok);
+    QVERIFY(DocumentFile::fromJson(withOps(1, 2), doc).ok);
 }
 
 QTEST_GUILESS_MAIN(TestArquivoCadmec)

@@ -88,7 +88,10 @@ public slots:
     // Mostra na barra de status as informações da entidade selecionada no visualizador.
     void updateSelectionStatus();
 
+    // Documento vazio (sem operações nem esboços).
     void newDocument();
+    // Documento de exemplo com a peça de teste (bloco com furo); nunca criado automaticamente.
+    void newExampleDocument();
     void openDocument();
     bool saveDocument();
     bool saveDocumentAs();
@@ -131,6 +134,7 @@ private:
     void showItemProperties(QTreeWidgetItem* item);
     QString documentDirectory() const;
     void setSketchModeUi(bool editing);
+    void updateActionStates();
     void refreshSketchViews();
     void onTreeItemChanged(QTreeWidgetItem* item);
     // Esboços exibidos na árvore/visualizador: os do documento, com o esboço em edição substituído.
@@ -143,6 +147,7 @@ private:
     QString m_readyMessage;
 
     QAction* m_actNew = nullptr;
+    QAction* m_actExampleBlock = nullptr;
     QAction* m_actOpen = nullptr;
     QAction* m_actSave = nullptr;
     QAction* m_actSaveAs = nullptr;

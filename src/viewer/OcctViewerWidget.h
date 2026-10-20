@@ -8,6 +8,7 @@
 
 #include <AIS_InteractiveContext.hxx>
 #include <AIS_Shape.hxx>
+#include <AIS_Trihedron.hxx>
 #include <AIS_ViewController.hxx>
 #include <AIS_ViewCube.hxx>
 #include <TopoDS_Shape.hxx>
@@ -43,12 +44,13 @@ enum class SketchTool
 // Navegação: botão central gira, Ctrl + botão central desloca, roda aproxima no cursor,
 // F ajusta à janela. Botão esquerdo seleciona faces, arestas e vértices (Shift alterna).
 //
-// Modo de esboço (E5.2): câmera perpendicular ao plano, rotação e ViewCube desativados.
+// Modo de esboço (E5.2/E5.2.1): câmera perpendicular ao plano, rotação e ViewCube desativados;
+// sólidos, outros esboços e eixos globais ficam ocultos até sair do modo.
 //   Botão esquerdo: ferramenta ativa. Selecionar = clique sobre uma entidade 2D; Linha e
 //   Retângulo = clique no primeiro ponto e clique no segundo (pré-visualização entre eles);
 //   Círculo = clique no centro e clique em um ponto da circunferência. Esc cancela o ponto
 //   pendente. Botão central (com ou sem Ctrl) desloca; roda aproxima no cursor; F ajusta.
-//   O sólido continua visível, mas não é selecionável.
+//   Somente o esboço ativo e seus eixos locais H/V são exibidos.
 class OcctViewerWidget : public QOpenGLWidget, public AIS_ViewController
 {
     Q_OBJECT
@@ -76,6 +78,10 @@ public:
     const occ::handle<AIS_InteractiveContext>& aisContext() const { return m_context; }
     const occ::handle<AIS_Shape>& shapePresentation() const { return m_shape; }
     const occ::handle<AIS_ViewCube>& viewCube() const { return m_viewCube; }
+    // Eixos de referência X/Y/Z na origem global (tamanho constante na tela).
+    occ::handle<AIS_InteractiveObject> originAxes() const { return m_originAxes; }
+    // Objetos exibidos dos esboços do documento (fora da edição).
+    const std::vector<occ::handle<AIS_Shape>>& documentSketchPresentations() const { return m_documentSketchShapes; }
 
     // Imagem do framebuffer (pixels físicos).
     QImage grabViewerImage();
@@ -137,10 +143,15 @@ private:
     void applyDevicePixelRatio(qreal dpr);
     void releaseGraphics();
     void updateView();
+    // Redesenho completo (após exibir/ocultar objetos).
+    void redrawScene();
     // Posição do mouse (pixels lógicos do Qt) em pixels físicos da janela OCCT.
     NCollection_Vec2<int> toViewPixels(const QPointF& pos) const;
 
     void setupSketchNavigation(bool sketchMode);
+    bool hasFittableContent() const;
+    // Ajusta à janela; cena vazia enquadra uma região padrão em torno da origem.
+    void fitScene();
     void clearEditShapes();
     void updatePreview(const gp_Pnt2d& current);
     void removePreview();
@@ -151,6 +162,7 @@ private:
     occ::handle<AIS_InteractiveContext> m_context;
     occ::handle<AIS_Shape> m_shape;
     occ::handle<AIS_ViewCube> m_viewCube;
+    occ::handle<AIS_Trihedron> m_originAxes;
     TopoDS_Shape m_shapeData;
 
     bool m_initialized = false;

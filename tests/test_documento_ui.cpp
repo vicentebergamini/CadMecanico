@@ -133,7 +133,11 @@ void TestDocumentoUi::init()
     m_window = new TestableMainWindow;
     m_window->show();
     QVERIFY(QTest::qWaitForWindowExposed(m_window));
+    // A peça de teste não é mais criada na inicialização: criada explicitamente (exemplo).
+    m_window->findChild<QAction*>("actionExemploBlocoFuro")->trigger();
+    QVERIFY(m_window->document().hasPart());
 }
+
 
 void TestDocumentoUi::cleanup()
 {
@@ -295,16 +299,29 @@ void TestDocumentoUi::novoDocumento()
     action("actionNovo")->trigger();
     QCOMPARE(m_window->saveChangesRequests, 1);
     QCOMPARE(m_window->document().parameters(), (PartParameters{90.0, 50.0, 10.0, 5.0}));
-    // Descartar: novo documento com a peça padrão.
+    // Descartar: novo documento VAZIO (E5.2.1): sem operações, sem sólido, sem esboços.
     m_window->saveChoice = MainWindow::SaveChoice::Discard;
     action("actionNovo")->trigger();
     QCOMPARE(m_window->saveChangesRequests, 2);
-    QCOMPARE(QString::fromStdString(m_window->document().name()), QStringLiteral("Nova peça"));
-    QCOMPARE(m_window->document().parameters(), PartParameters());
+    QCOMPARE(QString::fromStdString(m_window->document().name()), QStringLiteral("Sem título"));
+    QVERIFY(!m_window->document().hasPart());
+    QVERIFY(m_window->document().operations().empty());
+    QVERIFY(m_window->document().sketches().empty());
+    QVERIFY(m_window->part().IsNull());
     QVERIFY(!m_window->document().isModified());
     QVERIFY(m_window->documentPath().isEmpty());
-    QCOMPARE(tree()->topLevelItem(0)->text(0), QStringLiteral("Nova peça"));
-    QVERIFY(m_window->viewer()->shape().IsSame(m_window->part()));
+    QCOMPARE(tree()->topLevelItem(0)->text(0), QStringLiteral("Sem título"));
+    QCOMPARE(tree()->topLevelItem(0)->childCount(), 0);
+    QVERIFY(m_window->viewer()->shape().IsNull());
+    QVERIFY(!action("actionEditarParametros")->isEnabled());
+    QVERIFY(!action("actionExportarStep")->isEnabled());
+    // Parâmetros não se aplicam a documento sem peça.
+    QVERIFY(!m_window->applyParameters(PartParameters()));
+    QVERIFY(m_window->part().IsNull());
+    // O exemplo continua disponível explicitamente.
+    action("actionExemploBlocoFuro")->trigger();
+    QVERIFY(m_window->document().hasPart());
+    QCOMPARE(m_window->document().parameters(), PartParameters());
 }
 
 void TestDocumentoUi::salvarEAbrir()
@@ -322,9 +339,9 @@ void TestDocumentoUi::salvarEAbrir()
     QVERIFY(!m_window->isWindowModified());
     QVERIFY(m_window->errors.isEmpty());
 
-    // Novo documento e depois abrir o arquivo salvo.
+    // Novo documento (vazio) e depois abrir o arquivo salvo.
     action("actionNovo")->trigger();
-    QCOMPARE(m_window->document().parameters(), PartParameters());
+    QVERIFY(!m_window->document().hasPart());
     m_window->nextOpenPath = path;
     action("actionAbrir")->trigger();
     QVERIFY(m_window->errors.isEmpty());

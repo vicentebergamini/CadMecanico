@@ -7,6 +7,7 @@
 
 #include <TopoDS_Shape.hxx>
 
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -77,18 +78,25 @@ public:
     static constexpr double kMinHoleRadius = 0.05;
     static constexpr double kMinWall = 1.0; // parede mínima entre o furo e as faces laterais
 
-    // Documento com a peça de referência (bloco 100x60x20 com furo R10).
+    // Documento vazio: sem operações, sem geometria e sem esboços (E5.2.1).
     CadDocument();
-    explicit CadDocument(std::string name, const PartParameters& parameters = PartParameters());
+    explicit CadDocument(std::string name);
+
+    // Documento de exemplo/teste com a peça paramétrica (bloco com furo passante). Nunca é
+    // criado automaticamente pela aplicação; parâmetros inválidos usam a peça de referência.
+    static CadDocument withTestPart(std::string name = "Peça de teste",
+                                    const PartParameters& parameters = PartParameters());
 
     // Valida as dimensões e as relações entre bloco e furo (sem construir geometria).
     static ValidationResult validate(const PartParameters& parameters);
 
     // Constrói um documento a partir de dados persistidos. Em caso de falha retorna false e
     // não altera 'out'. Os identificadores são preservados.
-    static bool fromData(const std::string& name, const PartParameters& parameters, const std::string& blockId,
-                         const std::string& holeId, CadDocument& out, std::string& error,
-                         const std::vector<cad::sketch::Sketch>& sketches = {}, int nextSketchNumber = 1);
+    // 'part' vazio = documento sem operações (ids ignorados).
+    static bool fromData(const std::string& name, const std::optional<PartParameters>& part,
+                         const std::string& blockId, const std::string& holeId, CadDocument& out,
+                         std::string& error, const std::vector<cad::sketch::Sketch>& sketches = {},
+                         int nextSketchNumber = 1);
 
     const std::string& name() const { return m_name; }
     void setName(const std::string& name);
@@ -98,13 +106,18 @@ public:
     const std::vector<Operation>& operations() const { return m_operations; }
     const Operation* findOperation(const std::string& id) const;
 
+    // true se o documento contém a peça paramétrica (bloco base + furo passante).
+    bool hasPart() const { return !m_operations.empty(); }
+
+    // Parâmetros da peça (valores de referência se o documento não tiver peça).
     PartParameters parameters() const;
 
     // Valida e recalcula. Se os parâmetros forem inválidos ou a construção falhar, o documento
-    // (parâmetros, operações e geometria) permanece no último estado válido.
+    // (parâmetros, operações e geometria) permanece no último estado válido. Recusado em
+    // documento sem peça.
     ValidationResult setParameters(const PartParameters& parameters);
 
-    // Geometria resultante do último recálculo válido.
+    // Geometria resultante do último recálculo válido (nula em documento sem operações).
     const TopoDS_Shape& shape() const { return m_shape; }
 
     bool isModified() const { return m_modified; }

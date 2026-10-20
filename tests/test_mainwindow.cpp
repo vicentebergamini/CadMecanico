@@ -4,6 +4,7 @@
 #include "io/StepImporter.h"
 #include "modeling/ShapeInspector.h"
 #include "viewer/OcctViewerWidget.h"
+#include "document/CadDocument.h"
 
 #include <QAction>
 #include <QApplication>
@@ -126,7 +127,11 @@ void TestMainWindow::init()
     m_window = new TestableMainWindow;
     m_window->show();
     QVERIFY(QTest::qWaitForWindowExposed(m_window));
+    // A peça de teste não é mais criada na inicialização: criada explicitamente (exemplo).
+    m_window->findChild<QAction*>("actionExemploBlocoFuro")->trigger();
+    QVERIFY(m_window->document().hasPart());
 }
+
 
 void TestMainWindow::cleanup()
 {
@@ -154,7 +159,7 @@ void TestMainWindow::menus()
 
     auto* file = m_window->findChild<QMenu*>("menuArquivo");
     QVERIFY(file);
-    QCOMPARE(actionTexts(file), QStringList({"Novo", "Abrir...", "Salvar", "Salvar como...", "|", "Exportar STEP...", "|", "Sair"}));
+    QCOMPARE(actionTexts(file), QStringList({"Novo", "Exemplos", "Abrir...", "Salvar", "Salvar como...", "|", "Exportar STEP...", "|", "Sair"}));
     QVERIFY(action("actionNovo")->isEnabled());
     QVERIFY(action("actionAbrir")->isEnabled());
     QVERIFY(action("actionSalvar")->isEnabled());

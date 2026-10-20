@@ -153,8 +153,13 @@ void MainWindow::createActions()
     m_actNew = new QAction(st->standardIcon(QStyle::SP_FileIcon), tr("&Novo"), this);
     m_actNew->setObjectName("actionNovo");
     m_actNew->setShortcut(QKeySequence::New);
-    m_actNew->setStatusTip(tr("Cria um novo documento com a peça padrão"));
+    m_actNew->setStatusTip(tr("Cria um novo documento vazio"));
     connect(m_actNew, &QAction::triggered, this, &MainWindow::newDocument);
+
+    m_actExampleBlock = new QAction(tr("&Bloco com furo passante"), this);
+    m_actExampleBlock->setObjectName("actionExemploBlocoFuro");
+    m_actExampleBlock->setStatusTip(tr("Abre um novo documento de exemplo com o bloco 100 x 60 x 20 mm e furo R10"));
+    connect(m_actExampleBlock, &QAction::triggered, this, &MainWindow::newExampleDocument);
 
     m_actOpen = new QAction(st->standardIcon(QStyle::SP_DialogOpenButton), tr("&Abrir..."), this);
     m_actOpen->setObjectName("actionAbrir");
@@ -286,6 +291,9 @@ void MainWindow::createMenus()
     QMenu* menuFile = menuBar()->addMenu(tr("&Arquivo"));
     menuFile->setObjectName("menuArquivo");
     menuFile->addAction(m_actNew);
+    QMenu* menuExamples = menuFile->addMenu(tr("E&xemplos"));
+    menuExamples->setObjectName("menuExemplos");
+    menuExamples->addAction(m_actExampleBlock);
     menuFile->addAction(m_actOpen);
     menuFile->addAction(m_actSave);
     menuFile->addAction(m_actSaveAs);
@@ -455,6 +463,14 @@ void MainWindow::refreshDocumentViews(bool geometryChanged)
     m_viewer->setDocumentSketches(displayedSketches(false));
     rebuildTree();
     updateTitle();
+    updateActionStates();
+}
+
+void MainWindow::updateActionStates()
+{
+    const bool editing = isEditingSketch();
+    m_actEditParameters->setEnabled(!editing && m_document.hasPart());
+    m_actExportStep->setEnabled(!m_document.shape().IsNull());
 }
 
 std::vector<Sketch> MainWindow::displayedSketches(bool includeEditing) const
@@ -705,10 +721,24 @@ void MainWindow::newDocument()
         cancelSketch();
     if (!maybeSaveChanges())
         return;
-    m_document = CadDocument(tr("Nova peça").toStdString());
+    m_document = CadDocument(tr("Sem título").toStdString()); // vazio: sem operações nem esboços
     m_documentPath.clear();
     refreshDocumentViews(true);
+    m_viewer->viewIsometric();
     statusBar()->showMessage(tr("Novo documento"), 5000);
+}
+
+void MainWindow::newExampleDocument()
+{
+    if (isEditingSketch())
+        cancelSketch();
+    if (!maybeSaveChanges())
+        return;
+    m_document = CadDocument::withTestPart(tr("Peça de teste").toStdString());
+    m_documentPath.clear();
+    refreshDocumentViews(true);
+    m_viewer->viewIsometric();
+    statusBar()->showMessage(m_readyMessage);
 }
 
 void MainWindow::openDocument()
@@ -745,6 +775,7 @@ bool MainWindow::openDocumentFrom(const QString& filePath)
     m_documentPath = QFileInfo(filePath).absoluteFilePath();
     m_lastDocumentDir = QFileInfo(filePath).absolutePath();
     refreshDocumentViews(true);
+    m_viewer->viewIsometric(); // documento aberto: vista isométrica enquadrando sólido e esboços
     statusBar()->showMessage(tr("Documento aberto: %1").arg(nativePath), 5000);
     return true;
 }
@@ -839,10 +870,11 @@ void MainWindow::setSketchModeUi(bool editing)
     m_actEntityDimensions->setEnabled(hasEntity);
     m_actDeleteEntity->setEnabled(hasEntity);
     // Fora do esboço: documento, parâmetros e vistas padrão; no esboço a câmera fica no plano.
-    for (QAction* a : {m_actNew, m_actOpen, m_actSave, m_actSaveAs, m_actEditParameters, m_actNewSketch, m_actEditSketch,
-                       m_actViewFront, m_actViewTop, m_actViewRight, m_actViewIso})
+    for (QAction* a : {m_actNew, m_actExampleBlock, m_actOpen, m_actSave, m_actSaveAs, m_actNewSketch,
+                       m_actEditSketch, m_actViewFront, m_actViewTop, m_actViewRight, m_actViewIso})
         a->setEnabled(!editing);
     m_menuStandardViews->setEnabled(!editing);
+    updateActionStates();
 }
 
 void MainWindow::refreshSketchViews()
@@ -1108,6 +1140,14 @@ void MainWindow::updateSelectionStatus()
 
 void MainWindow::exportStep()
 {
+    if (part().IsNull())
+    {
+        statusBar()->showMessage(tr("Nada para exportar: o documento não contém sólido"), 8000);
+        reportError(tr("Exportar STEP"),
+                    tr("O documento não contém sólido para exportar.\n\n"
+                       "Esboços 2D não são exportados em STEP; crie ou abra uma peça com sólido."));
+        return;
+    }
     const QString suggested = QDir(m_lastExportDir).filePath("peca_teste.step");
     QString path = askExportPath(suggested);
     if (path.isEmpty())
@@ -1126,6 +1166,11 @@ void MainWindow::exportStep()
 bool MainWindow::exportStepTo(const QString& filePath)
 {
     const QString nativePath = QDir::toNativeSeparators(filePath);
+    if (part().IsNull())
+    {
+        reportError(tr("Exportar STEP"), tr("O documento não contém sólido para exportar."));
+        return false;
+    }
 
     if (QFileInfo::exists(filePath) && !confirmOverwrite(nativePath))
     {

@@ -67,9 +67,31 @@ void checkRejected(CadDocument& doc, const PartParameters& bad, const char* fiel
 
 int main()
 {
-    // 1. Documento inicial
-    std::printf("1. Documento inicial\n");
-    CadDocument doc;
+    // 0. Documento vazio (padrão desde a E5.2.1): sem operações, sem sólido, sem esboços.
+    std::printf("0. Documento vazio\n");
+    {
+        CadDocument empty;
+        CAD_CHECK(empty.name() == "Sem título");
+        CAD_CHECK(!empty.hasPart());
+        CAD_CHECK(empty.operations().empty());
+        CAD_CHECK(empty.shape().IsNull());
+        CAD_CHECK(empty.sketches().empty());
+        CAD_CHECK(!empty.isModified());
+        const ValidationResult r = empty.setParameters(PartParameters());
+        CAD_CHECK(!r.ok && !r.message.empty());
+        CAD_CHECK(!empty.hasPart() && empty.shape().IsNull() && !empty.isModified());
+        CAD_CHECK(CadDocument("Outro").name() == "Outro" && !CadDocument("Outro").hasPart());
+        // fromData sem peça: documento vazio.
+        CadDocument out("x");
+        std::string error;
+        CAD_CHECK(CadDocument::fromData("Vazio", std::nullopt, "", "", out, error));
+        CAD_CHECK(out.name() == "Vazio" && !out.hasPart() && out.shape().IsNull());
+    }
+
+    // 1. Documento com a peça de teste (criada explicitamente)
+    std::printf("1. Documento com a peca de teste\n");
+    CadDocument doc = CadDocument::withTestPart();
+    CAD_CHECK(doc.hasPart());
     CAD_CHECK(doc.name() == "Peça de teste");
     CAD_CHECK(std::string(doc.unit()) == "mm");
     CAD_CHECK(!doc.isModified());
@@ -129,7 +151,7 @@ int main()
     // Furo continua centrado no bloco (relação geométrica).
     {
         const PartParameters p = doc.parameters();
-        CadDocument shifted("x", p);
+        CadDocument shifted = CadDocument::withTestPart("x", p);
         const ShapeSummary s = ShapeInspector::inspect(shifted.shape());
         CAD_CHECK_NEAR(s.volume, expectedVolume(p), 1e-6);
     }
@@ -138,19 +160,19 @@ int main()
     std::printf("9. Recalculo deterministico\n");
     {
         const PartParameters p{123.4, 56.7, 8.9, 12.3};
-        CadDocument a("a", p), b("b", p);
+        CadDocument a = CadDocument::withTestPart("a", p), b = CadDocument::withTestPart("b", p);
         const ShapeSummary sa = ShapeInspector::inspect(a.shape());
         const ShapeSummary sb = ShapeInspector::inspect(b.shape());
         CAD_CHECK(sa.faces == sb.faces && sa.edges == sb.edges && sa.vertices == sb.vertices);
         CAD_CHECK(sa.volume == sb.volume && sa.area == sb.area);
         // Ida e volta de parâmetros reproduz a mesma geometria.
-        CadDocument c("c", p);
+        CadDocument c = CadDocument::withTestPart("c", p);
         CAD_CHECK(c.setParameters({200.0, 100.0, 10.0, 5.0}).ok);
         CAD_CHECK(c.setParameters(p).ok);
         const ShapeSummary sc = ShapeInspector::inspect(c.shape());
         CAD_CHECK(sc.volume == sa.volume && sc.area == sa.area && sc.faces == sa.faces);
         // Mesmos parâmetros: sem recálculo e sem marcar modificação.
-        CadDocument d("d", p);
+        CadDocument d = CadDocument::withTestPart("d", p);
         const int rev = d.revision();
         CAD_CHECK(d.setParameters(p).ok);
         CAD_CHECK(d.revision() == rev && !d.isModified());
@@ -161,7 +183,7 @@ int main()
     {
         const double nan = std::numeric_limits<double>::quiet_NaN();
         const double inf = std::numeric_limits<double>::infinity();
-        CadDocument v;
+        CadDocument v = CadDocument::withTestPart();
         checkRejected(v, {0.0, 60.0, 20.0, 10.0}, "length");
         checkRejected(v, {-5.0, 60.0, 20.0, 10.0}, "length");
         checkRejected(v, {100.0, 0.05, 20.0, 10.0}, "width");
@@ -189,13 +211,13 @@ int main()
     {
         CadDocument out("original");
         std::string error;
-        CAD_CHECK(CadDocument::fromData("lido", {80.0, 40.0, 10.0, 5.0}, "bloco-A", "furo_B", out, error));
+        CAD_CHECK(CadDocument::fromData("lido", PartParameters{80.0, 40.0, 10.0, 5.0}, "bloco-A", "furo_B", out, error));
         CAD_CHECK(out.name() == "lido" && !out.isModified());
         CAD_CHECK(out.operations().at(0).id == "bloco-A" && out.operations().at(1).id == "furo_B");
         checkPart("fromData", out.shape(), {80.0, 40.0, 10.0, 5.0});
 
         CadDocument keep("mantido");
-        CAD_CHECK(!CadDocument::fromData("x", {80.0, 40.0, 10.0, 50.0}, "a", "b", keep, error));
+        CAD_CHECK(!CadDocument::fromData("x", PartParameters{80.0, 40.0, 10.0, 50.0}, "a", "b", keep, error));
         CAD_CHECK(!CadDocument::fromData("x", PartParameters(), "a", "a", keep, error));
         CAD_CHECK(!CadDocument::fromData("x", PartParameters(), "id com espaço", "b", keep, error));
         CAD_CHECK(keep.name() == "mantido");

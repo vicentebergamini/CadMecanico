@@ -71,6 +71,11 @@ qt_add_executable(test_esboco_ui test_esboco_ui.cpp ViewerTestUtils.h)
 set_target_properties(test_esboco_ui PROPERTIES AUTOMOC ON WIN32_EXECUTABLE OFF)
 target_link_libraries(test_esboco_ui PRIVATE cad_app cad_viewer cad_document_io cad_io cad_modeling Qt6::Test)
 
+qt_add_executable(test_documento_vazio test_documento_vazio.cpp ViewerTestUtils.h)
+set_target_properties(test_documento_vazio PROPERTIES AUTOMOC ON WIN32_EXECUTABLE OFF)
+target_link_libraries(test_documento_vazio PRIVATE cad_app cad_viewer cad_document_io cad_io cad_modeling Qt6::Test)
+target_compile_definitions(test_documento_vazio PRIVATE CADMEC_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/dados")
+
 add_test(NAME viewer COMMAND test_viewer)
 add_test(NAME viewer_escala COMMAND test_viewer)
 add_test(NAME app_viewer COMMAND test_app_viewer)
@@ -78,9 +83,10 @@ add_test(NAME interacao COMMAND test_interacao)
 add_test(NAME interacao_escala COMMAND test_interacao)
 add_test(NAME esboco_ui COMMAND test_esboco_ui)
 add_test(NAME esboco_ui_escala COMMAND test_esboco_ui)
+add_test(NAME documento_vazio COMMAND test_documento_vazio)
 
 set(_cad_gl_env "QT_QPA_PLATFORM=windows;QT_PLUGIN_PATH=${QT6_INSTALL_PREFIX}/${QT6_INSTALL_PLUGINS}")
-set_tests_properties(viewer app_viewer interacao esboco_ui PROPERTIES
+set_tests_properties(viewer app_viewer interacao esboco_ui documento_vazio PROPERTIES
     LABELS "gui;opengl"
     TIMEOUT 300
     ENVIRONMENT "${_cad_gl_env}"

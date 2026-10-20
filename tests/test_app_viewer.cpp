@@ -84,7 +84,11 @@ void TestAppViewer::init()
     m_window->resize(1100, 750);
     m_window->show();
     QVERIFY(QTest::qWaitForWindowExposed(m_window));
+    // A peça de teste não é mais criada na inicialização: criada explicitamente (exemplo).
+    m_window->findChild<QAction*>("actionExemploBlocoFuro")->trigger();
+    QVERIFY(m_window->document().hasPart());
     QVERIFY(viewer());
+
     QVERIFY2(waitViewerReady(viewer()), "visualizador não inicializado na janela principal");
 }
 

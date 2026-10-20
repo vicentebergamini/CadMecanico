@@ -160,7 +160,11 @@ void TestEsbocoUi::init()
     m_window->show();
     m_window->activateWindow();
     QVERIFY(QTest::qWaitForWindowExposed(m_window));
+    // A peça de teste não é mais criada na inicialização: criada explicitamente (exemplo).
+    m_window->findChild<QAction*>("actionExemploBlocoFuro")->trigger();
+    QVERIFY(m_window->document().hasPart());
     QVERIFY(waitViewerReady(viewer()));
+
     pauseBetweenClicks();
 }
 
@@ -233,8 +237,12 @@ void TestEsbocoUi::novoEsbocoNoPlano()
     const QPoint v = project(viewer(), s->plane().toGlobal(0, 20));
     QVERIFY(h.x() > o.x() + 10 && std::abs(h.y() - o.y()) <= 1);
     QVERIFY(v.y() < o.y() - 10 && std::abs(v.x() - o.x()) <= 1);
-    // ViewCube oculto e vistas padrão desabilitadas no modo de esboço; documento ainda intacto.
+    // ViewCube, sólido e eixos globais ocultos e vistas padrão desabilitadas no modo de
+    // esboço (E5.2.1); documento ainda intacto.
     QVERIFY(!viewer()->aisContext()->IsDisplayed(viewer()->viewCube()));
+    QVERIFY(!viewer()->aisContext()->IsDisplayed(viewer()->shapePresentation()));
+    QVERIFY(!viewer()->aisContext()->IsDisplayed(viewer()->originAxes()));
+    QVERIFY(m_window->part().IsSame(viewer()->shape()));
     QVERIFY(!action("actionVistaFrente")->isEnabled());
     QVERIFY(action("actionFerramentaLinha")->isEnabled());
     QVERIFY(m_window->document().sketches().empty());
@@ -506,8 +514,11 @@ void TestEsbocoUi::concluirAtualizaArvoreEDocumento()
     QCOMPARE(m_window->operationsTree()->currentItem(), sketch);
     auto* panel = m_window->findChild<QLabel*>("painelPropriedades");
     QVERIFY(panel->text().contains("Normal: (1,00; 0,00; 0,00)"));
-    // Esboço continua visível fora da edição (camada do documento) e o ViewCube volta.
+    // Esboço continua visível fora da edição (camada do documento); ViewCube, eixos globais e
+    // sólido voltam.
     QVERIFY(viewer()->aisContext()->IsDisplayed(viewer()->viewCube()));
+    QVERIFY(viewer()->aisContext()->IsDisplayed(viewer()->shapePresentation()));
+    QVERIFY(viewer()->aisContext()->IsDisplayed(viewer()->originAxes()));
     QVERIFY(action("actionVistaFrente")->isEnabled());
     action("actionVistaDireita")->trigger();
     QVERIFY(waitFrames(viewer()));
@@ -557,7 +568,7 @@ void TestEsbocoUi::salvarEAbrirComEsbocos()
 
     action("actionNovo")->trigger();
     QVERIFY(m_window->document().sketches().empty());
-    QCOMPARE(m_window->operationsTree()->topLevelItem(0)->childCount(), 2);
+    QCOMPARE(m_window->operationsTree()->topLevelItem(0)->childCount(), 0); // documento vazio
 
     m_window->nextOpenPath = m_dir->filePath("com_esbocos.cadmec");
     action("actionAbrir")->trigger();

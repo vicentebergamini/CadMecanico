@@ -84,7 +84,7 @@ int main()
 {
     // 1-3. Criação de esboço em cada plano (documento)
     std::printf("1-3. Esbocos nos planos XY, XZ e YZ\n");
-    CadDocument doc;
+    CadDocument doc = CadDocument::withTestPart();
     const TopoDS_Shape solidBefore = doc.shape();
     const double volumeBefore = cad::modeling::ShapeInspector::volume(solidBefore);
     const PlaneType planes[] = {PlaneType::XY, PlaneType::XZ, PlaneType::YZ};

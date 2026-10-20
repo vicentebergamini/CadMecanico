@@ -300,15 +300,19 @@ FileResult DocumentFile::fromJson(const QByteArray& json, CadDocument& out)
     if (!opsValue.isArray())
         return error(QStringLiteral("Lista \"operations\" ausente"));
     const QJsonArray ops = opsValue.toArray();
-    // Sequência suportada no esquema 1: bloco base seguido de furo passante.
-    if (ops.size() != 2)
-        return error(QStringLiteral("Sequência de operações não suportada (esperado bloco base e furo passante)"));
+    // Esquemas 1 e 2: sempre bloco base seguido de furo passante. Esquema 3: também aceita
+    // documento sem operações (nenhum sólido).
+    const bool emptyAllowed = schema >= 3;
+    if (ops.size() != 2 && !(emptyAllowed && ops.isEmpty()))
+        return error(emptyAllowed
+                         ? QStringLiteral("Sequência de operações não suportada (esperado nenhuma operação, ou bloco base e furo passante)")
+                         : QStringLiteral("Sequência de operações não suportada (esperado bloco base e furo passante)"));
 
     PartParameters p;
     QString ids[2];
     QSet<QString> seen;
     const char* expectedTypes[2] = {"block", "throughHole"};
-    for (int i = 0; i < 2; ++i)
+    for (int i = 0; i < ops.size(); ++i)
     {
         if (!ops.at(i).isObject())
             return error(QStringLiteral("Operação %1 não é um objeto").arg(i + 1));
@@ -369,8 +373,9 @@ FileResult DocumentFile::fromJson(const QByteArray& json, CadDocument& out)
 
     // Limites geométricos e reconstrução (fromData só altera 'out' em caso de sucesso).
     std::string buildError;
-    if (!CadDocument::fromData(name.toStdString(), p, ids[0].toStdString(), ids[1].toStdString(), out, buildError,
-                               sketches, nextSketchNumber))
+    const std::optional<PartParameters> part = ops.isEmpty() ? std::nullopt : std::optional<PartParameters>(p);
+    if (!CadDocument::fromData(name.toStdString(), part, ids[0].toStdString(), ids[1].toStdString(), out,
+                               buildError, sketches, nextSketchNumber))
         return error(QStringLiteral("Dados inválidos: %1").arg(QString::fromStdString(buildError)));
     return FileResult{true, QString()};
 }
