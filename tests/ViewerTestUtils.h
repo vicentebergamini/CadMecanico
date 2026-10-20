@@ -3,12 +3,15 @@
 
 #include "viewer/OcctViewerWidget.h"
 
+#include <QApplication>
 #include <QDir>
 #include <QElapsedTimer>
 #include <QImage>
+#include <QMouseEvent>
 #include <QPoint>
 #include <QRect>
 #include <QTest>
+#include <QWheelEvent>
 
 #include <Graphic3d_Camera.hxx>
 #include <gp_Pnt.hxx>
@@ -133,14 +136,14 @@ inline bool waitViewerReady(cad::viewer::OcctViewerWidget* w, int timeoutMs = 10
 inline bool waitFrames(cad::viewer::OcctViewerWidget* w, int frames = 1, int timeoutMs = 5000)
 {
     const int target = w->frameCount() + frames;
-    w->update();
     QElapsedTimer t;
     t.start();
     while (t.elapsed() < timeoutMs)
     {
+        w->update(); // um update() por quadro pedido (o Qt agrupa updates pendentes)
+        QTest::qWait(10);
         if (w->frameCount() >= target)
             return true;
-        QTest::qWait(10);
     }
     return false;
 }
@@ -157,6 +160,65 @@ inline QImage backgroundReference(cad::viewer::OcctViewerWidget* w)
     ref->view()->Camera()->Copy(w->view()->Camera());
     ref->view()->Invalidate();
     return ref->grabViewerImage();
+}
+
+// --- Eventos de mouse do Qt entregues ao widget (E4) ---
+
+// Pixel físico (OCCT) -> posição lógica do Qt.
+inline QPointF toLogical(const QWidget* w, QPoint physical)
+{
+    const qreal dpr = w->devicePixelRatioF();
+    return QPointF(physical.x() / dpr, physical.y() / dpr);
+}
+
+inline void sendMouse(QWidget* w, QEvent::Type type, QPointF pos, Qt::MouseButton button, Qt::MouseButtons buttons,
+               Qt::KeyboardModifiers mods = Qt::NoModifier)
+{
+    QMouseEvent e(type, pos, w->mapToGlobal(pos), button, buttons, mods);
+    QApplication::sendEvent(w, &e);
+}
+
+inline void sendWheel(QWidget* w, QPointF pos, int angle)
+{
+    QWheelEvent e(pos, w->mapToGlobal(pos), QPoint(), QPoint(0, angle), Qt::NoButton, Qt::NoModifier,
+                  Qt::NoScrollPhase, false);
+    QApplication::sendEvent(w, &e);
+}
+
+// Arrasto com quadros renderizados entre os eventos, como numa interação real.
+inline bool drag(cad::viewer::OcctViewerWidget* w, QPointF from, QPointF to, Qt::MouseButton button,
+          Qt::KeyboardModifiers mods = Qt::NoModifier, int steps = 8)
+{
+    sendMouse(w, QEvent::MouseMove, from, Qt::NoButton, Qt::NoButton, mods);
+    sendMouse(w, QEvent::MouseButtonPress, from, button, button, mods);
+    if (!waitFrames(w))
+        return false;
+    for (int i = 1; i <= steps; ++i)
+    {
+        const QPointF p = from + (to - from) * (double(i) / steps);
+        sendMouse(w, QEvent::MouseMove, p, Qt::NoButton, button, mods);
+        if (!waitFrames(w))
+            return false;
+    }
+    sendMouse(w, QEvent::MouseButtonRelease, to, button, Qt::NoButton, mods);
+    return waitFrames(w);
+}
+
+inline bool click(cad::viewer::OcctViewerWidget* w, QPointF pos, Qt::MouseButton button = Qt::LeftButton,
+           Qt::KeyboardModifiers mods = Qt::NoModifier)
+{
+    sendMouse(w, QEvent::MouseMove, pos, Qt::NoButton, Qt::NoButton, mods);
+    if (!waitFrames(w))
+        return false;
+    sendMouse(w, QEvent::MouseButtonPress, pos, button, button, mods);
+    sendMouse(w, QEvent::MouseButtonRelease, pos, button, Qt::NoButton, mods);
+    return waitFrames(w, 2);
+}
+
+// Espera o intervalo de duplo clique do OCCT (0,4 s) para cliques independentes.
+inline void pauseBetweenClicks()
+{
+    QTest::qWait(450);
 }
 
 } // namespace cad::test::viewer

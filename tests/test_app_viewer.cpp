@@ -8,6 +8,7 @@
 
 #include <QAction>
 #include <QDockWidget>
+#include <QScreen>
 #include <QMenu>
 #include <QStatusBar>
 #include <QTemporaryDir>
@@ -57,6 +58,11 @@ private slots:
     void ajustarPelaAcao();
     void recursosE2Preservados();
     void exportarStepAposVistas();
+    // E4
+    void barraDeStatusSelecao();
+    void teclaFNaJanela();
+    void exportarStepAposInteracoes();
+    void redimensionarAposInteracoes();
     void fechamentoNormal();
 
 private:
@@ -167,6 +173,116 @@ void TestAppViewer::exportarStepAposVistas()
     QVERIFY(s.isValid);
     QCOMPARE(s.faces, 7);
     QVERIFY(qAbs(s.volume - kExpectedVolume) <= kExpectedVolume * 1e-9);
+}
+
+void TestAppViewer::barraDeStatusSelecao()
+{
+    OcctViewerWidget* v = viewer();
+    auto at = [v](const gp_Pnt& p) { return toLogical(v, project(v, p)); };
+    auto message = [this] { return m_window->statusBar()->currentMessage(); };
+
+    QVERIFY(click(v, at(gp_Pnt(25.0, 15.0, 20.0))));
+    QTRY_VERIFY(message().startsWith("Face"));
+    qInfo("%s", qPrintable(message()));
+    QVERIFY(message().contains("/7"));
+    QVERIFY(message().contains("Plana"));
+    QVERIFY(message().contains(QString::fromUtf8("Área: 5.685,84 mm²")));
+    saveEvidence(m_window->grab().toImage(), "E4_10_status_face");
+    pauseBetweenClicks();
+
+    QVERIFY(click(v, at(gp_Pnt(50.0, 0.0, 20.0))));
+    QTRY_VERIFY(message().startsWith("Aresta"));
+    qInfo("%s", qPrintable(message()));
+    QVERIFY(message().contains("/15"));
+    QVERIFY(message().contains("Reta"));
+    QVERIFY(message().contains("Comprimento: 100,00 mm"));
+    saveEvidence(m_window->grab().toImage(), "E4_11_status_aresta");
+    pauseBetweenClicks();
+
+    QVERIFY(click(v, at(gp_Pnt(50.0, 20.0, 20.0))));
+    QTRY_VERIFY(message().contains("Circular"));
+    qInfo("%s", qPrintable(message()));
+    QVERIFY(message().contains("(R 10,00 mm)"));
+    QVERIFY(message().contains("Comprimento: 62,83 mm"));
+    pauseBetweenClicks();
+
+    QVERIFY(click(v, at(gp_Pnt(100.0, 0.0, 20.0))));
+    QTRY_VERIFY(message().startsWith(QString::fromUtf8("Vértice")));
+    qInfo("%s", qPrintable(message()));
+    QVERIFY(message().contains("/10"));
+    QVERIFY(message().contains("X 100,00  Y 0,00  Z 20,00 mm"));
+    saveEvidence(m_window->grab().toImage(), "E4_12_status_vertice");
+    pauseBetweenClicks();
+
+    QVERIFY(click(v, QPointF(12.0, v->height() / 2.0)));
+    QTRY_VERIFY(message().contains("Open CASCADE"));
+}
+
+void TestAppViewer::teclaFNaJanela()
+{
+    const auto& cam = viewer()->view()->Camera();
+    cam->SetScale(cam->Scale() * 6.0);
+    viewer()->view()->Invalidate();
+    viewer()->setFocus();
+    QTest::keyClick(viewer(), Qt::Key_F);
+    QVERIFY(waitFrames(viewer()));
+    const QImage img = viewer()->grabViewerImage();
+    const DiffResult d = diff(img, backgroundReference(viewer()));
+    QVERIFY(d.box.width() > 0.8 * img.width() || d.box.height() > 0.8 * img.height());
+}
+
+void TestAppViewer::exportarStepAposInteracoes()
+{
+    OcctViewerWidget* v = viewer();
+    const QPointF c(v->width() / 2.0, v->height() / 2.0);
+    QVERIFY(drag(v, c, c + QPointF(80, 40), Qt::MiddleButton));
+    QVERIFY(drag(v, c, c + QPointF(-50, 30), Qt::MiddleButton, Qt::ControlModifier));
+    sendWheel(v, c, 120);
+    v->fitAll();
+    QVERIFY(waitFrames(v));
+    QVERIFY(click(v, toLogical(v, project(v, gp_Pnt(25.0, 15.0, 20.0)))));
+    QTRY_COMPARE(v->selectedShapes().size(), 1);
+
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    m_window->nextPath = dir.filePath("apos_interacoes.step");
+    action("actionExportarStep")->trigger();
+    QCOMPARE(m_window->infos.size(), 1);
+    QVERIFY(m_window->errors.isEmpty());
+
+    const auto read = cad::io::StepImporter().read(std::filesystem::path(m_window->nextPath.toStdWString()));
+    QVERIFY2(read.ok, read.message.c_str());
+    const auto s = cad::modeling::ShapeInspector::inspect(read.shape);
+    QVERIFY(s.isValid);
+    QCOMPARE(s.solids, 1);
+    QCOMPARE(s.faces, 7);
+    QVERIFY(qAbs(s.volume - kExpectedVolume) <= kExpectedVolume * 1e-9);
+    // Geometria em memória intacta e seleção preservada.
+    QVERIFY(v->shape().IsSame(m_window->part()));
+    QCOMPARE(v->selectedShapes().size(), 1);
+}
+
+void TestAppViewer::redimensionarAposInteracoes()
+{
+    OcctViewerWidget* v = viewer();
+    const QPointF c(v->width() / 2.0, v->height() / 2.0);
+    QVERIFY(drag(v, c, c + QPointF(70, -30), Qt::MiddleButton));
+    const QSize available = m_window->screen()->availableGeometry().size() * 0.85;
+    for (QSize s : {QSize(800, 560), QSize(1150, 760)})
+    {
+        s = s.boundedTo(available);
+        m_window->resize(s);
+        QTRY_COMPARE(m_window->size(), s);
+        QVERIFY(waitFrames(v));
+        const QImage img = v->grabViewerImage();
+        int w = 0, h = 0;
+        v->view()->Window()->Size(w, h);
+        QCOMPARE(QSize(w, h), img.size());
+        v->fitAll();
+        const DiffResult d = diff(v->grabViewerImage(), backgroundReference(v));
+        QVERIFY(d.count > 0);
+    }
+    saveEvidence(m_window->grab().toImage(), "E4_13_janela_redimensionada");
 }
 
 void TestAppViewer::fechamentoNormal()

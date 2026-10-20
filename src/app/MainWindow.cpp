@@ -1,6 +1,7 @@
 #include "app/MainWindow.h"
 
 #include "io/StepExporter.h"
+#include "modeling/SubShapeInfo.h"
 #include "modeling/TestPart.h"
 #include "viewer/OcctViewerWidget.h"
 
@@ -10,6 +11,7 @@
 #include <QDockWidget>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QLocale>
 #include <QMenu>
 #include <QMenuBar>
 #include <QMessageBox>
@@ -39,7 +41,8 @@ MainWindow::MainWindow(QWidget* parent)
     createDocks();
     createCentralArea();
 
-    statusBar()->showMessage(tr("Pronto  |  Qt %1  |  Open CASCADE %2").arg(qVersion(), OCC_VERSION_COMPLETE));
+    m_readyMessage = tr("Pronto  |  Qt %1  |  Open CASCADE %2").arg(qVersion(), OCC_VERSION_COMPLETE);
+    statusBar()->showMessage(m_readyMessage);
 }
 
 MainWindow::~MainWindow() = default;
@@ -194,6 +197,78 @@ void MainWindow::createCentralArea()
     connect(m_viewer, &cad::viewer::OcctViewerWidget::initializationFailed, this, [this](const QString& message) {
         statusBar()->showMessage(message);
     });
+    connect(m_viewer, &cad::viewer::OcctViewerWidget::selectionChanged, this, &MainWindow::updateSelectionStatus);
+}
+
+namespace {
+
+QString geometryName(cad::modeling::GeometryKind kind)
+{
+    using cad::modeling::GeometryKind;
+    switch (kind)
+    {
+    case GeometryKind::Plane:        return MainWindow::tr("Plana");
+    case GeometryKind::Cylinder:     return MainWindow::tr("Cilíndrica");
+    case GeometryKind::Cone:         return MainWindow::tr("Cônica");
+    case GeometryKind::Sphere:       return MainWindow::tr("Esférica");
+    case GeometryKind::Torus:        return MainWindow::tr("Toroidal");
+    case GeometryKind::OtherSurface: return MainWindow::tr("Superfície livre");
+    case GeometryKind::Line:         return MainWindow::tr("Reta");
+    case GeometryKind::Circle:       return MainWindow::tr("Circular");
+    case GeometryKind::Ellipse:      return MainWindow::tr("Elíptica");
+    case GeometryKind::OtherCurve:   return MainWindow::tr("Curva livre");
+    case GeometryKind::Point:
+    case GeometryKind::None:         break;
+    }
+    return QString();
+}
+
+} // namespace
+
+void MainWindow::updateSelectionStatus()
+{
+    using cad::modeling::SubShapeKind;
+
+    const QList<TopoDS_Shape> selected = m_viewer->selectedShapes();
+    if (selected.isEmpty())
+    {
+        statusBar()->showMessage(m_readyMessage);
+        return;
+    }
+    if (selected.size() > 1)
+    {
+        statusBar()->showMessage(tr("%1 entidades selecionadas").arg(selected.size()));
+        return;
+    }
+
+    const QLocale locale(QLocale::Portuguese, QLocale::Brazil);
+    auto mm = [&locale](double v) { return locale.toString(v, 'f', 2); };
+
+    const auto info = cad::modeling::describeSubShape(m_part, selected.first());
+    QString geometry = geometryName(info.geometry);
+    if (info.radius > 0.0)
+        geometry += tr(" (R %1 mm)").arg(mm(info.radius));
+
+    QString text;
+    switch (info.kind)
+    {
+    case SubShapeKind::Face:
+        text = tr("Face %1/%2  |  %3  |  Área: %4 mm²").arg(info.index).arg(info.count).arg(geometry, mm(info.area));
+        break;
+    case SubShapeKind::Edge:
+        text = tr("Aresta %1/%2  |  %3  |  Comprimento: %4 mm")
+                   .arg(info.index).arg(info.count).arg(geometry, mm(info.length));
+        break;
+    case SubShapeKind::Vertex:
+        text = tr("Vértice %1/%2  |  X %3  Y %4  Z %5 mm")
+                   .arg(info.index).arg(info.count)
+                   .arg(mm(info.point.X()), mm(info.point.Y()), mm(info.point.Z()));
+        break;
+    default:
+        text = tr("Entidade selecionada");
+        break;
+    }
+    statusBar()->showMessage(text);
 }
 
 void MainWindow::exportStep()

@@ -8,7 +8,11 @@ add_executable(test_step_roundtrip test_step_roundtrip.cpp TestCheck.h ExpectedT
 target_link_libraries(test_step_roundtrip PRIVATE cad_modeling cad_io)
 add_test(NAME step_roundtrip COMMAND test_step_roundtrip ${CMAKE_CURRENT_BINARY_DIR}/saida)
 
-set_tests_properties(geometria step_roundtrip PROPERTIES LABELS "core")
+add_executable(test_selecao_info test_selecao_info.cpp TestCheck.h)
+target_link_libraries(test_selecao_info PRIVATE cad_modeling)
+add_test(NAME selecao_info COMMAND test_selecao_info)
+
+set_tests_properties(geometria step_roundtrip selecao_info PROPERTIES LABELS "core")
 
 # Teste de interface (Qt Test). As DLLs e plugins do Qt são localizados pelo ambiente
 # do teste, sem copiar arquivos; a plataforma offscreen dispensa sessão interativa.
@@ -35,18 +39,24 @@ qt_add_executable(test_app_viewer test_app_viewer.cpp ViewerTestUtils.h)
 set_target_properties(test_app_viewer PROPERTIES AUTOMOC ON WIN32_EXECUTABLE OFF)
 target_link_libraries(test_app_viewer PRIVATE cad_app cad_viewer cad_io cad_modeling Qt6::Test)
 
+qt_add_executable(test_interacao test_interacao.cpp ViewerTestUtils.h)
+set_target_properties(test_interacao PROPERTIES AUTOMOC ON WIN32_EXECUTABLE OFF)
+target_link_libraries(test_interacao PRIVATE cad_viewer cad_modeling Qt6::Test)
+
 add_test(NAME viewer COMMAND test_viewer)
 add_test(NAME viewer_escala COMMAND test_viewer)
 add_test(NAME app_viewer COMMAND test_app_viewer)
+add_test(NAME interacao COMMAND test_interacao)
+add_test(NAME interacao_escala COMMAND test_interacao)
 
 set(_cad_gl_env "QT_QPA_PLATFORM=windows;QT_PLUGIN_PATH=${QT6_INSTALL_PREFIX}/${QT6_INSTALL_PLUGINS}")
-set_tests_properties(viewer app_viewer PROPERTIES
+set_tests_properties(viewer app_viewer interacao PROPERTIES
     LABELS "gui;opengl"
     TIMEOUT 300
     ENVIRONMENT "${_cad_gl_env}"
     ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${QT6_INSTALL_PREFIX}/${QT6_INSTALL_BINS}"
 )
-set_tests_properties(viewer_escala PROPERTIES
+set_tests_properties(viewer_escala interacao_escala PROPERTIES
     LABELS "gui;opengl"
     TIMEOUT 300
     ENVIRONMENT "${_cad_gl_env};QT_SCALE_FACTOR=1.25"

@@ -37,6 +37,8 @@ public:
 public slots:
     void exportStep();
     void showAbout();
+    // Mostra na barra de status as informações da entidade selecionada no visualizador.
+    void updateSelectionStatus();
 
 protected:
     // Pontos de interação com o usuário, substituíveis nos testes automatizados.
@@ -54,6 +56,7 @@ private:
 
     TopoDS_Shape m_part;
     QString m_lastExportDir;
+    QString m_readyMessage;
 
     QAction* m_actNew = nullptr;
     QAction* m_actOpen = nullptr;
