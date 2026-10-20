@@ -14,6 +14,13 @@
 #include <V3d_View.hxx>
 #include <V3d_Viewer.hxx>
 
+#include "sketch/Sketch.h"
+
+#include <QHash>
+
+#include <optional>
+#include <vector>
+
 namespace cad::viewer {
 
 enum class StandardView
@@ -24,8 +31,24 @@ enum class StandardView
     Isometric
 };
 
+// Ferramentas do modo de esboço.
+enum class SketchTool
+{
+    Select,
+    Line,
+    Rectangle,
+    Circle
+};
+
 // Navegação: botão central gira, Ctrl + botão central desloca, roda aproxima no cursor,
 // F ajusta à janela. Botão esquerdo seleciona faces, arestas e vértices (Shift alterna).
+//
+// Modo de esboço (E5.2): câmera perpendicular ao plano, rotação e ViewCube desativados.
+//   Botão esquerdo: ferramenta ativa. Selecionar = clique sobre uma entidade 2D; Linha e
+//   Retângulo = clique no primeiro ponto e clique no segundo (pré-visualização entre eles);
+//   Círculo = clique no centro e clique em um ponto da circunferência. Esc cancela o ponto
+//   pendente. Botão central (com ou sem Ctrl) desloca; roda aproxima no cursor; F ajusta.
+//   O sólido continua visível, mas não é selecionável.
 class OcctViewerWidget : public QOpenGLWidget, public AIS_ViewController
 {
     Q_OBJECT
@@ -57,6 +80,21 @@ public:
     // Imagem do framebuffer (pixels físicos).
     QImage grabViewerImage();
 
+    // --- Esboços --------------------------------------------------------------
+    // Esboços do documento exibidos fora da edição (somente visualização).
+    void setDocumentSketches(const std::vector<cad::sketch::Sketch>& sketches);
+    void enterSketchMode(const cad::sketch::Sketch& sketch);
+    void updateEditingSketch(const cad::sketch::Sketch& sketch, const QString& selectedEntityId);
+    void exitSketchMode();
+    bool isSketchMode() const { return m_sketchPlane.has_value(); }
+    void setSketchTool(SketchTool tool);
+    SketchTool sketchTool() const { return m_sketchTool; }
+    // Ponto do plano do esboço sob a posição lógica do mouse (coordenadas locais, mm,
+    // arredondadas a 0,1 mm). Vazio fora do modo de esboço.
+    std::optional<gp_Pnt2d> sketchPointAt(const QPointF& logicalPos) const;
+    // Objeto exibido de uma entidade em edição (para testes e diagnóstico).
+    occ::handle<AIS_Shape> sketchEntityPresentation(const QString& entityId) const;
+
 public slots:
     void fitAll();
     void setStandardView(cad::viewer::StandardView view);
@@ -65,11 +103,16 @@ public slots:
     void viewRight() { setStandardView(StandardView::Right); }
     void viewIsometric() { setStandardView(StandardView::Isometric); }
     void clearSelection();
+    void cancelSketchInput();
 
 signals:
     void viewerInitialized();
     void initializationFailed(const QString& message);
     void selectionChanged();
+    // Geometria criada com o mouse no modo de esboço (coordenadas locais do plano).
+    void sketchGeometryRequested(const cad::sketch::SketchGeometry& geometry);
+    // Clique com a ferramenta Selecionar: id da entidade ou vazio (clique fora das entidades).
+    void sketchEntityClicked(const QString& entityId);
 
 protected:
     void initializeGL() override;
@@ -97,6 +140,12 @@ private:
     // Posição do mouse (pixels lógicos do Qt) em pixels físicos da janela OCCT.
     NCollection_Vec2<int> toViewPixels(const QPointF& pos) const;
 
+    void setupSketchNavigation(bool sketchMode);
+    void clearEditShapes();
+    void updatePreview(const gp_Pnt2d& current);
+    void removePreview();
+    void handleSketchClick(const QPointF& pos);
+
     occ::handle<V3d_Viewer> m_viewer;
     occ::handle<V3d_View> m_view;
     occ::handle<AIS_InteractiveContext> m_context;
@@ -109,6 +158,17 @@ private:
     int m_frameCount = 0;
     qreal m_appliedDpr = 0.0;
     QString m_glInfo;
+
+    // Esboços
+    std::vector<occ::handle<AIS_Shape>> m_documentSketchShapes;
+    std::vector<occ::handle<AIS_InteractiveObject>> m_sketchDecorations; // eixos locais e rótulos
+    QHash<QString, occ::handle<AIS_Shape>> m_editShapes;               // id da entidade -> objeto
+    occ::handle<AIS_Shape> m_preview;
+    std::optional<cad::sketch::SketchPlane> m_sketchPlane;
+    SketchTool m_sketchTool = SketchTool::Select;
+    std::optional<gp_Pnt2d> m_pendingPoint;
+    QPointF m_leftPressPos;
+    bool m_leftPressed = false;
 };
 
 } // namespace cad::viewer

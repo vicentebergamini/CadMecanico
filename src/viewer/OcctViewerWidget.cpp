@@ -26,8 +26,15 @@
 #include <OpenGl_GraphicDriver.hxx>
 #include <Prs3d_Drawer.hxx>
 #include <Prs3d_LineAspect.hxx>
+#include <AIS_TextLabel.hxx>
+#include <BRepBuilderAPI_MakeEdge.hxx>
 #include <Quantity_Color.hxx>
 #include <StdSelect_BRepOwner.hxx>
+
+#include "modeling/ShapeInspector.h"
+#include "sketch/SketchShapes.h"
+
+#include <cmath>
 #include <V3d_AmbientLight.hxx>
 #include <V3d_DirectionalLight.hxx>
 
@@ -49,6 +56,66 @@ constexpr double kPickTolerance = 4.0;
 
 const Quantity_Color kHoverColor(0.10, 0.65, 1.00, Quantity_TOC_sRGB);
 const Quantity_Color kSelectionColor(1.00, 0.55, 0.00, Quantity_TOC_sRGB);
+
+// Esboços: entidades do documento, entidades em edição, entidade selecionada e pré-visualização.
+const Quantity_Color kSketchColor(0.10, 0.30, 0.70, Quantity_TOC_sRGB);
+const Quantity_Color kSketchEditColor(0.00, 0.20, 0.85, Quantity_TOC_sRGB);
+const Quantity_Color kSketchPreviewColor(0.25, 0.25, 0.25, Quantity_TOC_sRGB);
+const Quantity_Color kAxisHColor(0.85, 0.10, 0.10, Quantity_TOC_sRGB);
+const Quantity_Color kAxisVColor(0.05, 0.60, 0.10, Quantity_TOC_sRGB);
+
+// Transparência do sólido durante a edição de um esboço (o esboço fica sempre por cima).
+constexpr double kSketchSolidTransparency = 0.5;
+
+// Clique (sem arrasto) no modo de esboço: deslocamento máximo em pixels lógicos.
+constexpr double kClickTolerance = 4.0;
+// Coordenadas criadas com o mouse são arredondadas a 0,1 mm (1/kSnapDivisions).
+constexpr double kSnapDivisions = 10.0;
+
+// round(v * 10) / 10 dá o double mais próximo de x,y (ex.: 74.1), sem resíduos de ponto flutuante.
+double snapValue(double v)
+{
+    const double r = std::round(v * kSnapDivisions) / kSnapDivisions;
+    return r == 0.0 ? 0.0 : r; // evita -0
+}
+
+// Larguras, alturas e raios derivados de pontos arredondados também são arredondados.
+cad::sketch::SketchGeometry snapGeometry(cad::sketch::SketchGeometry g)
+{
+    if (auto* l = std::get_if<cad::sketch::SketchLine>(&g))
+    {
+        l->x1 = snapValue(l->x1);
+        l->y1 = snapValue(l->y1);
+        l->x2 = snapValue(l->x2);
+        l->y2 = snapValue(l->y2);
+    }
+    else if (auto* r = std::get_if<cad::sketch::SketchRectangle>(&g))
+    {
+        r->x = snapValue(r->x);
+        r->y = snapValue(r->y);
+        r->width = snapValue(r->width);
+        r->height = snapValue(r->height);
+    }
+    else
+    {
+        auto& c = std::get<cad::sketch::SketchCircle>(g);
+        c.cx = snapValue(c.cx);
+        c.cy = snapValue(c.cy);
+        c.radius = snapValue(c.radius);
+    }
+    return g;
+}
+
+V3d_TypeOfOrientation sketchOrientation(cad::sketch::PlaneType plane)
+{
+    switch (plane)
+    {
+    case cad::sketch::PlaneType::XY: return V3d_TypeOfOrientation_Zup_Top;   // olha -Z, vertical = +Y
+    case cad::sketch::PlaneType::XZ: return V3d_TypeOfOrientation_Zup_Front; // olha +Y, vertical = +Z
+    case cad::sketch::PlaneType::YZ: return V3d_TypeOfOrientation_Zup_Right; // olha -X, vertical = +Z
+    }
+    return V3d_TypeOfOrientation_Zup_Top;
+}
 
 // O QOpenGLWidget renderiza em um FBO próprio, sem sRGB; o OCCT precisa saber disso
 // para não aplicar a conversão de cor duas vezes.
@@ -214,13 +281,20 @@ void OcctViewerWidget::setupViewer()
     m_context->Display(m_viewCube, 0, 0, false);
 }
 
+void OcctViewerWidget::setupSketchNavigation(bool sketchMode)
+{
+    // Navegação CAD: botão central gira, Ctrl + botão central desloca. No modo de esboço a
+    // rotação é desativada (câmera perpendicular ao plano): o botão central só desloca.
+    myMouseGestureMap.Clear();
+    myMouseGestureMap.Bind(Aspect_VKeyMouse_MiddleButton,
+                           sketchMode ? AIS_MouseGesture_Pan : AIS_MouseGesture_RotateOrbit);
+    myMouseGestureMap.Bind(Aspect_VKeyMouse_MiddleButton | Aspect_VKeyFlags_CTRL, AIS_MouseGesture_Pan);
+}
+
 void OcctViewerWidget::setupNavigation()
 {
-    // Navegação CAD: botão central gira, Ctrl + botão central desloca. O botão esquerdo
-    // fica reservado à seleção (sem rotação nem arrasto de objetos).
-    myMouseGestureMap.Clear();
-    myMouseGestureMap.Bind(Aspect_VKeyMouse_MiddleButton, AIS_MouseGesture_RotateOrbit);
-    myMouseGestureMap.Bind(Aspect_VKeyMouse_MiddleButton | Aspect_VKeyFlags_CTRL, AIS_MouseGesture_Pan);
+    // O botão esquerdo fica reservado à seleção (sem rotação nem arrasto de objetos).
+    setupSketchNavigation(false);
     myMouseGestureMapDrag.Clear();
     SetAllowDragging(false);
 
@@ -269,6 +343,11 @@ void OcctViewerWidget::releaseGraphics()
     m_context.Nullify();
     m_shape.Nullify();
     m_viewCube.Nullify();
+    m_documentSketchShapes.clear();
+    m_sketchDecorations.clear();
+    m_editShapes.clear();
+    m_preview.Nullify();
+    m_sketchPlane.reset();
     m_view->Remove();
     m_view.Nullify();
     m_viewer.Nullify();
@@ -310,6 +389,11 @@ void OcctViewerWidget::setShape(const TopoDS_Shape& shape)
     m_context->Display(m_shape, AIS_Shaded, AIS_Shape::SelectionMode(TopAbs_FACE), false);
     for (TopAbs_ShapeEnum type : {TopAbs_EDGE, TopAbs_VERTEX})
         m_context->Activate(m_shape, AIS_Shape::SelectionMode(type));
+    if (isSketchMode())
+    {
+        m_context->Deactivate(m_shape); // no modo de esboço o sólido não é selecionável
+        m_context->SetTransparency(m_shape, kSketchSolidTransparency, false);
+    }
 
     m_fitPending = true;
     updateView();
@@ -501,6 +585,14 @@ void OcctViewerWidget::mousePressEvent(QMouseEvent* event)
     QOpenGLWidget::mousePressEvent(event);
     if (!m_initialized)
         return;
+    if (isSketchMode() && event->button() == Qt::LeftButton)
+    {
+        // Botão esquerdo no esboço: tratado pela ferramenta ativa, não pela seleção 3D.
+        m_leftPressed = true;
+        m_leftPressPos = event->position();
+        event->accept();
+        return;
+    }
     if (UpdateMouseButtons(toViewPixels(event->position()), toVKeyMouse(event->buttons()),
                            toVKeyFlags(event->modifiers()), false))
         updateView();
@@ -512,6 +604,16 @@ void OcctViewerWidget::mouseReleaseEvent(QMouseEvent* event)
     QOpenGLWidget::mouseReleaseEvent(event);
     if (!m_initialized)
         return;
+    if (isSketchMode() && event->button() == Qt::LeftButton)
+    {
+        const bool wasPressed = m_leftPressed;
+        m_leftPressed = false;
+        const QPointF delta = event->position() - m_leftPressPos;
+        if (wasPressed && std::hypot(delta.x(), delta.y()) <= kClickTolerance)
+            handleSketchClick(event->position());
+        event->accept();
+        return;
+    }
     if (UpdateMouseButtons(toViewPixels(event->position()), toVKeyMouse(event->buttons()),
                            toVKeyFlags(event->modifiers()), false))
         updateView();
@@ -523,7 +625,15 @@ void OcctViewerWidget::mouseMoveEvent(QMouseEvent* event)
     QOpenGLWidget::mouseMoveEvent(event);
     if (!m_initialized)
         return;
-    if (UpdateMousePosition(toViewPixels(event->position()), toVKeyMouse(event->buttons()),
+    Qt::MouseButtons buttons = event->buttons();
+    if (isSketchMode())
+    {
+        buttons &= ~Qt::LeftButton; // o esquerdo não participa da navegação no esboço
+        if (m_pendingPoint)
+            if (const auto p = sketchPointAt(event->position()))
+                updatePreview(*p);
+    }
+    if (UpdateMousePosition(toViewPixels(event->position()), toVKeyMouse(buttons),
                             toVKeyFlags(event->modifiers()), false))
         updateView();
 }
@@ -550,6 +660,12 @@ void OcctViewerWidget::keyPressEvent(QKeyEvent* event)
         event->accept();
         return;
     }
+    if (event->key() == Qt::Key_Escape && isSketchMode() && m_pendingPoint)
+    {
+        cancelSketchInput();
+        event->accept();
+        return;
+    }
     QOpenGLWidget::keyPressEvent(event);
 }
 
@@ -563,6 +679,269 @@ void OcctViewerWidget::focusOutEvent(QFocusEvent* event)
 void OcctViewerWidget::updateView()
 {
     update();
+}
+
+// --- Esboços -----------------------------------------------------------------
+
+void OcctViewerWidget::setDocumentSketches(const std::vector<cad::sketch::Sketch>& sketches)
+{
+    if (m_context.IsNull())
+        return;
+    for (const auto& s : m_documentSketchShapes)
+        m_context->Remove(s, false);
+    m_documentSketchShapes.clear();
+    for (const cad::sketch::Sketch& sketch : sketches)
+    {
+        if (sketch.entities().empty())
+            continue;
+        occ::handle<AIS_Shape> prs = new AIS_Shape(cad::sketch::buildSketchShape(sketch));
+        prs->SetColor(kSketchColor);
+        prs->SetWidth(1.5);
+        m_context->Display(prs, AIS_WireFrame, -1, false); // apenas visualização
+        m_context->SetZLayer(prs, Graphic3d_ZLayerId_Topmost); // visível através do sólido
+        m_documentSketchShapes.push_back(prs);
+    }
+    updateView();
+}
+
+void OcctViewerWidget::enterSketchMode(const cad::sketch::Sketch& sketch)
+{
+    if (m_context.IsNull())
+        return;
+    if (isSketchMode())
+        exitSketchMode();
+    m_sketchPlane = sketch.plane();
+    m_sketchTool = SketchTool::Select;
+    m_pendingPoint.reset();
+
+    // Sólido visível (semitransparente) mas não selecionável; ViewCube oculto (sem rotação).
+    m_context->ClearSelected(false);
+    if (!m_shape.IsNull())
+    {
+        m_context->Deactivate(m_shape);
+        m_context->SetTransparency(m_shape, kSketchSolidTransparency, false);
+    }
+    m_context->Erase(m_viewCube, false);
+    setupSketchNavigation(true);
+
+    // Eixos locais: horizontal (vermelho) e vertical (verde) a partir da origem do plano.
+    double axisLength = 50.0;
+    if (!m_shapeData.IsNull())
+    {
+        const Bnd_Box box = cad::modeling::ShapeInspector::boundingBox(m_shapeData);
+        if (!box.IsVoid())
+            axisLength = std::max(30.0, 0.6 * std::sqrt(box.SquareExtent()));
+    }
+    const cad::sketch::SketchPlane& plane = *m_sketchPlane;
+    auto addAxis = [&](const gp_Dir& dir, const Quantity_Color& color, const char* label) {
+        const gp_Pnt end = plane.origin().Translated(gp_Vec(dir) * axisLength);
+        const TopoDS_Shape edge = BRepBuilderAPI_MakeEdge(plane.origin(), end).Shape();
+        occ::handle<AIS_Shape> axis = new AIS_Shape(edge);
+        axis->SetColor(color);
+        axis->SetWidth(2.0);
+        m_context->Display(axis, AIS_WireFrame, -1, false);
+        m_context->SetZLayer(axis, Graphic3d_ZLayerId_Topmost);
+        m_sketchDecorations.push_back(axis);
+
+        occ::handle<AIS_TextLabel> text = new AIS_TextLabel();
+        text->SetText(TCollection_ExtendedString(label));
+        text->SetPosition(end.Translated(gp_Vec(dir) * (0.04 * axisLength)));
+        text->SetColor(color);
+        text->SetHeight(12.0);
+        m_context->Display(text, 0, -1, false);
+        m_context->SetZLayer(text, Graphic3d_ZLayerId_Topmost);
+        m_sketchDecorations.push_back(text);
+    };
+    addAxis(plane.horizontalAxis(), kAxisHColor, "H");
+    addAxis(plane.verticalAxis(), kAxisVColor, "V");
+
+    updateEditingSketch(sketch, QString());
+
+    // Câmera perpendicular ao plano, ortográfica, sem espelhamento (H para a direita, V para cima).
+    AbortViewAnimation();
+    m_view->SetProj(sketchOrientation(plane.type()), false);
+    m_view->Camera()->SetProjectionType(Graphic3d_Camera::Projection_Orthographic);
+    fitAll();
+}
+
+void OcctViewerWidget::updateEditingSketch(const cad::sketch::Sketch& sketch, const QString& selectedEntityId)
+{
+    if (!isSketchMode())
+        return;
+    clearEditShapes();
+    for (const cad::sketch::SketchEntity& e : sketch.entities())
+    {
+        const TopoDS_Shape shape = cad::sketch::buildEntityShape(*m_sketchPlane, e);
+        if (shape.IsNull())
+            continue;
+        const QString id = QString::fromStdString(e.id);
+        occ::handle<AIS_Shape> prs = new AIS_Shape(shape);
+        const bool selected = id == selectedEntityId;
+        prs->SetColor(selected ? kSelectionColor : kSketchEditColor);
+        prs->SetWidth(selected ? 3.0 : 2.0);
+        m_context->Display(prs, AIS_WireFrame, 0, false); // selecionável no modo de esboço
+        m_context->SetZLayer(prs, Graphic3d_ZLayerId_Topmost);
+        m_editShapes.insert(id, prs);
+    }
+    updateView();
+}
+
+void OcctViewerWidget::clearEditShapes()
+{
+    for (const auto& prs : std::as_const(m_editShapes))
+        m_context->Remove(prs, false);
+    m_editShapes.clear();
+}
+
+void OcctViewerWidget::exitSketchMode()
+{
+    if (!isSketchMode() || m_context.IsNull())
+        return;
+    removePreview();
+    clearEditShapes();
+    for (const auto& d : m_sketchDecorations)
+        m_context->Remove(d, false);
+    m_sketchDecorations.clear();
+    m_sketchPlane.reset();
+    m_pendingPoint.reset();
+    m_leftPressed = false;
+    m_sketchTool = SketchTool::Select;
+
+    if (!m_shape.IsNull())
+    {
+        m_context->UnsetTransparency(m_shape, false);
+        for (TopAbs_ShapeEnum type : {TopAbs_FACE, TopAbs_EDGE, TopAbs_VERTEX})
+            m_context->Activate(m_shape, AIS_Shape::SelectionMode(type));
+    }
+    m_context->Display(m_viewCube, 0, 0, false);
+    setupSketchNavigation(false);
+    ResetPreviousMoveTo();
+    updateView();
+}
+
+void OcctViewerWidget::setSketchTool(SketchTool tool)
+{
+    m_sketchTool = tool;
+    cancelSketchInput();
+}
+
+void OcctViewerWidget::cancelSketchInput()
+{
+    m_pendingPoint.reset();
+    removePreview();
+    updateView();
+}
+
+occ::handle<AIS_Shape> OcctViewerWidget::sketchEntityPresentation(const QString& entityId) const
+{
+    return m_editShapes.value(entityId);
+}
+
+std::optional<gp_Pnt2d> OcctViewerWidget::sketchPointAt(const QPointF& logicalPos) const
+{
+    if (!isSketchMode() || !m_initialized || m_view.IsNull())
+        return std::nullopt;
+    const NCollection_Vec2<int> px = toViewPixels(logicalPos);
+    double x = 0, y = 0, z = 0, vx = 0, vy = 0, vz = 0;
+    m_view->ConvertWithProj(px.x(), px.y(), x, y, z, vx, vy, vz);
+    // Interseção do raio do pixel com o plano do esboço.
+    const gp_Pnt origin(x, y, z);
+    const gp_Vec ray(vx, vy, vz);
+    const double denom = ray.Dot(gp_Vec(m_sketchPlane->normal()));
+    if (std::fabs(denom) < 1e-9)
+        return std::nullopt;
+    const double t = -m_sketchPlane->distance(origin) / denom;
+    const gp_Pnt2d local = m_sketchPlane->toLocal(origin.Translated(ray * t));
+    return gp_Pnt2d(snapValue(local.X()), snapValue(local.Y()));
+}
+
+void OcctViewerWidget::removePreview()
+{
+    if (!m_preview.IsNull() && !m_context.IsNull())
+        m_context->Remove(m_preview, false);
+    m_preview.Nullify();
+}
+
+void OcctViewerWidget::updatePreview(const gp_Pnt2d& current)
+{
+    removePreview();
+    if (!m_pendingPoint || !isSketchMode())
+        return;
+    const gp_Pnt2d& a = *m_pendingPoint;
+    cad::sketch::SketchEntity e;
+    switch (m_sketchTool)
+    {
+    case SketchTool::Line:
+        e.geometry = cad::sketch::SketchLine{a.X(), a.Y(), current.X(), current.Y()};
+        break;
+    case SketchTool::Rectangle:
+        e.geometry = cad::sketch::SketchRectangle::fromCorners(a.X(), a.Y(), current.X(), current.Y());
+        break;
+    case SketchTool::Circle:
+        e.geometry = cad::sketch::SketchCircle{a.X(), a.Y(), a.Distance(current)};
+        break;
+    case SketchTool::Select:
+        return;
+    }
+    const TopoDS_Shape shape = cad::sketch::buildEntityShape(*m_sketchPlane, e);
+    if (shape.IsNull())
+        return;
+    m_preview = new AIS_Shape(shape);
+    m_preview->SetColor(kSketchPreviewColor);
+    m_preview->SetWidth(1.0);
+    m_context->Display(m_preview, AIS_WireFrame, -1, false);
+    m_context->SetZLayer(m_preview, Graphic3d_ZLayerId_Topmost);
+}
+
+void OcctViewerWidget::handleSketchClick(const QPointF& pos)
+{
+    if (m_sketchTool == SketchTool::Select)
+    {
+        const NCollection_Vec2<int> px = toViewPixels(pos);
+        m_context->MoveTo(px.x(), px.y(), m_view, false);
+        QString id;
+        if (m_context->HasDetected())
+        {
+            const occ::handle<AIS_InteractiveObject> detected = m_context->DetectedInteractive();
+            for (auto it = m_editShapes.cbegin(); it != m_editShapes.cend(); ++it)
+                if (it.value().get() == detected.get())
+                    id = it.key();
+        }
+        ResetPreviousMoveTo();
+        emit sketchEntityClicked(id);
+        updateView();
+        return;
+    }
+
+    const auto p = sketchPointAt(pos);
+    if (!p)
+        return;
+    if (!m_pendingPoint)
+    {
+        m_pendingPoint = *p;
+        updateView();
+        return;
+    }
+    const gp_Pnt2d a = *m_pendingPoint;
+    cad::sketch::SketchGeometry geometry;
+    switch (m_sketchTool)
+    {
+    case SketchTool::Line:
+        geometry = cad::sketch::SketchLine{a.X(), a.Y(), p->X(), p->Y()};
+        break;
+    case SketchTool::Rectangle:
+        geometry = cad::sketch::SketchRectangle::fromCorners(a.X(), a.Y(), p->X(), p->Y());
+        break;
+    case SketchTool::Circle:
+        geometry = cad::sketch::SketchCircle{a.X(), a.Y(), a.Distance(*p)};
+        break;
+    case SketchTool::Select:
+        return;
+    }
+    m_pendingPoint.reset();
+    removePreview();
+    emit sketchGeometryRequested(snapGeometry(geometry));
+    updateView();
 }
 
 } // namespace cad::viewer

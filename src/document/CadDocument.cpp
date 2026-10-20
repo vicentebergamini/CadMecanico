@@ -101,9 +101,48 @@ ValidationResult CadDocument::validate(const PartParameters& p)
     return {};
 }
 
-bool CadDocument::fromData(const std::string& name, const PartParameters& parameters, const std::string& blockId,
-                           const std::string& holeId, CadDocument& out, std::string& error)
+int sketchNumber(const std::string& sketchId)
 {
+    if (sketchId.size() < 4 || sketchId.compare(0, 3, "sk-") != 0)
+        return 0;
+    int n = 0;
+    for (size_t i = 3; i < sketchId.size(); ++i)
+    {
+        if (sketchId[i] < '0' || sketchId[i] > '9' || n > 100000000)
+            return 0;
+        n = n * 10 + (sketchId[i] - '0');
+    }
+    return n;
+}
+
+bool CadDocument::fromData(const std::string& name, const PartParameters& parameters, const std::string& blockId,
+                           const std::string& holeId, CadDocument& out, std::string& error,
+                           const std::vector<cad::sketch::Sketch>& sketches, int nextSketchNumber)
+{
+    // Esboços: ids "sk-N" únicos e contador coerente (entidades já validadas em Sketch::fromData).
+    int maxSketch = 0;
+    for (size_t i = 0; i < sketches.size(); ++i)
+    {
+        const int n = sketchNumber(sketches[i].id());
+        if (n <= 0)
+        {
+            error = "Identificador de esboço inválido: " + sketches[i].id();
+            return false;
+        }
+        for (size_t j = 0; j < i; ++j)
+            if (sketches[j].id() == sketches[i].id())
+            {
+                error = "Identificador de esboço duplicado: " + sketches[i].id();
+                return false;
+            }
+        maxSketch = std::max(maxSketch, n);
+    }
+    if (nextSketchNumber <= maxSketch)
+    {
+        error = "Contador de esboços inconsistente";
+        return false;
+    }
+
     if (!isValidIdentifier(blockId) || !isValidIdentifier(holeId))
     {
         error = "Identificador de operação inválido";
@@ -129,8 +168,65 @@ bool CadDocument::fromData(const std::string& name, const PartParameters& parame
         return false;
     doc.m_operations = std::move(ops);
     doc.m_shape = shape;
+    doc.m_sketches = sketches;
+    doc.m_nextSketchNumber = nextSketchNumber;
     doc.m_modified = false;
     out = std::move(doc);
+    return true;
+}
+
+const cad::sketch::Sketch* CadDocument::findSketch(const std::string& id) const
+{
+    for (const cad::sketch::Sketch& s : m_sketches)
+        if (s.id() == id)
+            return &s;
+    return nullptr;
+}
+
+cad::sketch::Sketch CadDocument::createSketch(cad::sketch::PlaneType plane) const
+{
+    const std::string n = std::to_string(m_nextSketchNumber);
+    return cad::sketch::Sketch("sk-" + n, "Esboço " + n, plane);
+}
+
+bool CadDocument::commitSketch(const cad::sketch::Sketch& sketch, std::string& error)
+{
+    const int n = sketchNumber(sketch.id());
+    if (n <= 0)
+    {
+        error = "Identificador de esboço inválido: " + sketch.id();
+        return false;
+    }
+    for (const cad::sketch::SketchEntity& e : sketch.entities())
+    {
+        const auto v = cad::sketch::SketchEntity::validate(e.geometry);
+        if (!v.ok)
+        {
+            error = "Entidade " + e.id + ": " + v.message;
+            return false;
+        }
+    }
+    for (cad::sketch::Sketch& existing : m_sketches)
+        if (existing.id() == sketch.id())
+        {
+            existing = sketch;
+            m_modified = true;
+            return true;
+        }
+    m_sketches.push_back(sketch);
+    m_nextSketchNumber = std::max(m_nextSketchNumber, n + 1);
+    m_modified = true;
+    return true;
+}
+
+bool CadDocument::removeSketch(const std::string& id)
+{
+    const auto it = std::find_if(m_sketches.begin(), m_sketches.end(),
+                                 [&](const cad::sketch::Sketch& s) { return s.id() == id; });
+    if (it == m_sketches.end())
+        return false;
+    m_sketches.erase(it);
+    m_modified = true;
     return true;
 }
 

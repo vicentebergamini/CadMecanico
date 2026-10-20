@@ -1,0 +1,29 @@
+{
+    "document": {
+        "name": "Peça de teste",
+        "operations": [
+            {
+                "id": "op-1",
+                "name": "Bloco base",
+                "parameters": {
+                    "height": 25,
+                    "length": 150,
+                    "width": 80
+                },
+                "type": "block"
+            },
+            {
+                "id": "op-2",
+                "name": "Furo passante",
+                "parameters": {
+                    "radius": 15
+                },
+                "type": "throughHole"
+            }
+        ],
+        "unit": "mm"
+    },
+    "format": "cadmec",
+    "generator": "CadMecanico",
+    "schemaVersion": 1
+}

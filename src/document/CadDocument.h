@@ -1,6 +1,9 @@
-// Documento CAD paramétrico: parâmetros, sequência ordenada de operações e geometria
-// resultante. Núcleo sem dependência de Qt; a geometria é construída pelo Open CASCADE.
+// Documento CAD paramétrico: parâmetros, sequência ordenada de operações, geometria
+// resultante e esboços 2D. Núcleo sem dependência de Qt; a geometria é construída pelo
+// Open CASCADE. Os esboços (E5.2) não alteram o sólido.
 #pragma once
+
+#include "sketch/Sketch.h"
 
 #include <TopoDS_Shape.hxx>
 
@@ -84,7 +87,8 @@ public:
     // Constrói um documento a partir de dados persistidos. Em caso de falha retorna false e
     // não altera 'out'. Os identificadores são preservados.
     static bool fromData(const std::string& name, const PartParameters& parameters, const std::string& blockId,
-                         const std::string& holeId, CadDocument& out, std::string& error);
+                         const std::string& holeId, CadDocument& out, std::string& error,
+                         const std::vector<cad::sketch::Sketch>& sketches = {}, int nextSketchNumber = 1);
 
     const std::string& name() const { return m_name; }
     void setName(const std::string& name);
@@ -109,6 +113,18 @@ public:
     // Incrementado a cada recálculo bem-sucedido.
     int revision() const { return m_revision; }
 
+    // --- Esboços --------------------------------------------------------------
+    const std::vector<cad::sketch::Sketch>& sketches() const { return m_sketches; }
+    const cad::sketch::Sketch* findSketch(const std::string& id) const;
+    // Esboço vazio com novo id ("sk-N") e nome ("Esboço N"), ainda não incluído no documento.
+    cad::sketch::Sketch createSketch(cad::sketch::PlaneType plane) const;
+    // Inclui (id novo) ou substitui (id existente) o esboço. Valida as entidades; em falha o
+    // documento não muda.
+    bool commitSketch(const cad::sketch::Sketch& sketch, std::string& error);
+    bool removeSketch(const std::string& id);
+    // Próximo número de esboço; nunca diminui (ids não reutilizados).
+    int nextSketchNumber() const { return m_nextSketchNumber; }
+
 private:
     static std::vector<Operation> makeOperations(const PartParameters& p, const std::string& blockId,
                                                  const std::string& holeId);
@@ -120,7 +136,12 @@ private:
     TopoDS_Shape m_shape;
     bool m_modified = false;
     int m_revision = 0;
+    std::vector<cad::sketch::Sketch> m_sketches;
+    int m_nextSketchNumber = 1;
 };
+
+// Número N de um identificador de esboço "sk-N" (0 se o formato for outro).
+int sketchNumber(const std::string& sketchId);
 
 // Identificador estável: letras, dígitos, '-' e '_' (1 a 64 caracteres).
 bool isValidIdentifier(const std::string& id);

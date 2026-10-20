@@ -150,7 +150,7 @@ void TestMainWindow::menus()
     QStringList titles;
     for (QAction* a : m_window->menuBar()->actions())
         titles << plainText(a->text());
-    QCOMPARE(titles, QStringList({"Arquivo", "Editar", "Visualizar", "Ajuda"}));
+    QCOMPARE(titles, QStringList({"Arquivo", "Editar", "Esboço", "Visualizar", "Ajuda"}));
 
     auto* file = m_window->findChild<QMenu*>("menuArquivo");
     QVERIFY(file);

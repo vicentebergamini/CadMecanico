@@ -11,6 +11,7 @@
 #include <optional>
 
 class QAction;
+class QActionGroup;
 class QCloseEvent;
 class QDockWidget;
 class QLabel;
@@ -31,8 +32,10 @@ class MainWindow : public QMainWindow
 
 public:
     // Papéis de dados dos itens da árvore de operações.
-    static constexpr int kItemKindRole = Qt::UserRole;     // "documento", "operacao", "parametro", "estado"
-    static constexpr int kItemIdRole = Qt::UserRole + 1;   // id da operação (itens de operação e filhos)
+    static constexpr int kItemKindRole = Qt::UserRole;     // "documento", "operacao", "parametro", "estado",
+                                                           // "esboco", "entidade"
+    static constexpr int kItemIdRole = Qt::UserRole + 1;   // id da operação ou do esboço
+    static constexpr int kItemEntityRole = Qt::UserRole + 2; // id da entidade (itens "entidade")
 
     enum class SaveChoice
     {
@@ -64,6 +67,21 @@ public:
     cad::viewer::OcctViewerWidget* viewer() const { return m_viewer; }
     QTreeWidget* operationsTree() const { return m_operationsTree; }
 
+    // --- Esboços (E5.2) -------------------------------------------------------
+    // A edição trabalha sobre uma cópia; o documento só muda em finishSketch().
+    bool isEditingSketch() const { return m_editSketch.has_value(); }
+    const cad::sketch::Sketch* editingSketch() const { return m_editSketch ? &*m_editSketch : nullptr; }
+    QString selectedSketchEntity() const { return m_selectedEntity; }
+    bool startNewSketch(cad::sketch::PlaneType plane);
+    bool editSketch(const QString& sketchId);
+    bool finishSketch();
+    void cancelSketch();
+    // Acrescenta uma entidade ao esboço em edição (criação pelo mouse ou programática).
+    bool addSketchGeometry(const cad::sketch::SketchGeometry& geometry);
+    // Aplica nova geometria à entidade (mesmo tipo); valores inválidos são recusados.
+    bool updateSketchEntity(const QString& entityId, const cad::sketch::SketchGeometry& geometry);
+    void selectSketchEntity(const QString& entityId);
+
 public slots:
     void exportStep();
     void showAbout();
@@ -75,6 +93,11 @@ public slots:
     bool saveDocument();
     bool saveDocumentAs();
     void editParameters();
+
+    void newSketch();
+    void editSelectedSketch();
+    void editEntityDimensions();
+    void deleteSelectedEntity();
 
 protected:
     void closeEvent(QCloseEvent* event) override;
@@ -88,6 +111,8 @@ protected:
     virtual QString askOpenPath(const QString& directory);
     virtual QString askSavePath(const QString& suggestedPath);
     virtual SaveChoice askSaveChanges();
+    virtual std::optional<cad::sketch::PlaneType> askSketchPlane();
+    virtual std::optional<cad::sketch::SketchGeometry> askEntityDimensions(const cad::sketch::SketchEntity& entity);
 
 private:
     void createActions();
@@ -105,6 +130,11 @@ private:
     void updateTitle();
     void showItemProperties(QTreeWidgetItem* item);
     QString documentDirectory() const;
+    void setSketchModeUi(bool editing);
+    void refreshSketchViews();
+    void onTreeItemChanged(QTreeWidgetItem* item);
+    // Esboços exibidos na árvore/visualizador: os do documento, com o esboço em edição substituído.
+    std::vector<cad::sketch::Sketch> displayedSketches(bool includeEditing) const;
 
     cad::document::CadDocument m_document;
     QString m_documentPath;
@@ -127,6 +157,23 @@ private:
     QAction* m_actViewRight = nullptr;
     QAction* m_actViewIso = nullptr;
     QAction* m_actAbout = nullptr;
+    QAction* m_actNewSketch = nullptr;
+    QAction* m_actEditSketch = nullptr;
+    QAction* m_actToolSelect = nullptr;
+    QAction* m_actToolLine = nullptr;
+    QAction* m_actToolRectangle = nullptr;
+    QAction* m_actToolCircle = nullptr;
+    QAction* m_actEntityDimensions = nullptr;
+    QAction* m_actDeleteEntity = nullptr;
+    QAction* m_actFinishSketch = nullptr;
+    QAction* m_actCancelSketch = nullptr;
+    QActionGroup* m_sketchTools = nullptr;
+    QToolBar* m_toolBarSketch = nullptr;
+
+    std::optional<cad::sketch::Sketch> m_editSketch;
+    bool m_editSketchIsNew = false;
+    QString m_selectedEntity;
+    bool m_updatingTree = false;
 
     QMenu* m_menuStandardViews = nullptr;
     QToolBar* m_toolBarFile = nullptr;

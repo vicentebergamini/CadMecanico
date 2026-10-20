@@ -17,6 +17,18 @@
 //     ]
 //   }
 // }
+//
+// Esquema versão 2 (E5.2): igual à versão 1, com dois campos novos em "document" (os campos da
+// versão 1 mantêm o mesmo significado):
+//     "nextSketchNumber": 3,
+//     "sketches": [
+//       { "id": "sk-1", "name": "Esboço 1", "plane": "XY", "nextEntityNumber": 4,
+//         "entities": [
+//           { "id": "e-1", "type": "line",      "x1": 0, "y1": 0, "x2": 50, "y2": 0 },
+//           { "id": "e-2", "type": "rectangle", "x": 10, "y": 10, "width": 40, "height": 20 },
+//           { "id": "e-3", "type": "circle",    "cx": 50, "cy": 30, "radius": 8 } ] } ]
+// Coordenadas locais do plano, em mm. Arquivos da versão 1 (sem esboços) continuam sendo lidos;
+// a gravação usa sempre a versão atual.
 #pragma once
 
 #include "document/CadDocument.h"
@@ -35,7 +47,7 @@ struct FileResult
 class DocumentFile
 {
 public:
-    static constexpr int kSchemaVersion = 1;
+    static constexpr int kSchemaVersion = 2;
     static constexpr qint64 kMaxFileSize = 4 * 1024 * 1024;
     static constexpr const char* kFormat = "cadmec";
     static constexpr const char* kExtension = "cadmec";

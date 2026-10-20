@@ -63,10 +63,172 @@ bool readParameters(const QJsonObject& op, const QStringList& keys, QList<double
     return true;
 }
 
+bool readInt(const QJsonObject& o, const char* key, int minimum, int& value)
+{
+    const QJsonValue v = o.value(key);
+    if (!v.isDouble() || v.toDouble() != std::floor(v.toDouble()) || v.toDouble() < minimum || v.toDouble() > 1e9)
+        return false;
+    value = v.toInt();
+    return true;
+}
+
+// Lê um esboço (esquema 2). Chaves desconhecidas são recusadas.
+bool readSketch(const QJsonValue& value, int index, cad::sketch::Sketch& out, QString& message)
+{
+    using namespace cad::sketch;
+    const QString where = QStringLiteral("Esboço %1").arg(index + 1);
+    if (!value.isObject())
+    {
+        message = where + QStringLiteral(": não é um objeto");
+        return false;
+    }
+    const QJsonObject o = value.toObject();
+    const QStringList allowed{"id", "name", "plane", "nextEntityNumber", "entities"};
+    for (auto it = o.begin(); it != o.end(); ++it)
+        if (!allowed.contains(it.key()))
+        {
+            message = where + QStringLiteral(": campo desconhecido \"%1\"").arg(it.key());
+            return false;
+        }
+    if (!o.value("id").isString())
+    {
+        message = where + QStringLiteral(": identificador inválido");
+        return false;
+    }
+    const QJsonValue name = o.value("name");
+    if (!name.isString() || name.toString().trimmed().isEmpty() || name.toString().size() > kMaxNameLength)
+    {
+        message = where + QStringLiteral(": nome inválido");
+        return false;
+    }
+    const auto plane = SketchPlane::fromName(o.value("plane").toString().toStdString());
+    if (!o.value("plane").isString() || !plane)
+    {
+        message = where + QStringLiteral(": plano inválido (esperado XY, XZ ou YZ)");
+        return false;
+    }
+    int nextEntity = 0;
+    if (!readInt(o, "nextEntityNumber", 1, nextEntity))
+    {
+        message = where + QStringLiteral(": \"nextEntityNumber\" inválido");
+        return false;
+    }
+    if (!o.value("entities").isArray())
+    {
+        message = where + QStringLiteral(": lista \"entities\" ausente");
+        return false;
+    }
+
+    std::vector<SketchEntity> entities;
+    const QJsonArray array = o.value("entities").toArray();
+    for (int i = 0; i < array.size(); ++i)
+    {
+        const QString ewhere = where + QStringLiteral(", entidade %1").arg(i + 1);
+        if (!array.at(i).isObject())
+        {
+            message = ewhere + QStringLiteral(": não é um objeto");
+            return false;
+        }
+        const QJsonObject e = array.at(i).toObject();
+        if (!e.value("id").isString() || !e.value("type").isString())
+        {
+            message = ewhere + QStringLiteral(": identificador ou tipo ausente");
+            return false;
+        }
+        const auto type = typeFromName(e.value("type").toString().toStdString());
+        if (!type)
+        {
+            message = ewhere + QStringLiteral(": tipo desconhecido \"%1\"").arg(e.value("type").toString());
+            return false;
+        }
+        const QStringList keys = *type == EntityType::Line        ? QStringList{"x1", "y1", "x2", "y2"}
+                                 : *type == EntityType::Rectangle ? QStringList{"x", "y", "width", "height"}
+                                                                  : QStringList{"cx", "cy", "radius"};
+        for (auto it = e.begin(); it != e.end(); ++it)
+            if (it.key() != "id" && it.key() != "type" && !keys.contains(it.key()))
+            {
+                message = ewhere + QStringLiteral(": campo desconhecido \"%1\"").arg(it.key());
+                return false;
+            }
+        double v[4] = {0, 0, 0, 0};
+        for (int k = 0; k < keys.size(); ++k)
+        {
+            const QJsonValue x = e.value(keys[k]);
+            if (!x.isDouble() || !std::isfinite(x.toDouble()))
+            {
+                message = ewhere + QStringLiteral(": campo \"%1\" ausente ou não numérico").arg(keys[k]);
+                return false;
+            }
+            v[k] = x.toDouble();
+        }
+        SketchEntity entity;
+        entity.id = e.value("id").toString().toStdString();
+        if (*type == EntityType::Line)
+            entity.geometry = SketchLine{v[0], v[1], v[2], v[3]};
+        else if (*type == EntityType::Rectangle)
+            entity.geometry = SketchRectangle{v[0], v[1], v[2], v[3]};
+        else
+            entity.geometry = SketchCircle{v[0], v[1], v[2]};
+        entities.push_back(entity);
+    }
+
+    std::string error;
+    if (!Sketch::fromData(o.value("id").toString().toStdString(), name.toString().trimmed().toStdString(), *plane,
+                          entities, nextEntity, out, error))
+    {
+        message = where + QStringLiteral(": ") + QString::fromStdString(error);
+        return false;
+    }
+    return true;
+}
+
+QJsonObject sketchToJson(const cad::sketch::Sketch& sketch)
+{
+    using namespace cad::sketch;
+    QJsonArray entities;
+    for (const SketchEntity& e : sketch.entities())
+    {
+        QJsonObject o{{"id", QString::fromStdString(e.id)}, {"type", QString::fromLatin1(typeName(e.type()))}};
+        if (const auto* l = std::get_if<SketchLine>(&e.geometry))
+        {
+            o.insert("x1", l->x1);
+            o.insert("y1", l->y1);
+            o.insert("x2", l->x2);
+            o.insert("y2", l->y2);
+        }
+        else if (const auto* r = std::get_if<SketchRectangle>(&e.geometry))
+        {
+            o.insert("x", r->x);
+            o.insert("y", r->y);
+            o.insert("width", r->width);
+            o.insert("height", r->height);
+        }
+        else
+        {
+            const auto& c = std::get<SketchCircle>(e.geometry);
+            o.insert("cx", c.cx);
+            o.insert("cy", c.cy);
+            o.insert("radius", c.radius);
+        }
+        entities.append(o);
+    }
+    return QJsonObject{
+        {"id", QString::fromStdString(sketch.id())},
+        {"name", QString::fromStdString(sketch.name())},
+        {"plane", QString::fromLatin1(SketchPlane::name(sketch.plane().type()))},
+        {"nextEntityNumber", sketch.nextEntityNumber()},
+        {"entities", entities},
+    };
+}
+
 } // namespace
 
 QByteArray DocumentFile::toJson(const CadDocument& document)
 {
+    QJsonArray sketches;
+    for (const auto& s : document.sketches())
+        sketches.append(sketchToJson(s));
+
     QJsonArray operations;
     for (const Operation& op : document.operations())
     {
@@ -90,6 +252,8 @@ QByteArray DocumentFile::toJson(const CadDocument& document)
              {"name", QString::fromStdString(document.name())},
              {"unit", QString::fromLatin1(document.unit())},
              {"operations", operations},
+             {"nextSketchNumber", document.nextSketchNumber()},
+             {"sketches", sketches},
          }},
     };
     return QJsonDocument(root).toJson(QJsonDocument::Indented);
@@ -178,10 +342,36 @@ FileResult DocumentFile::fromJson(const QByteArray& json, CadDocument& out)
         }
     }
 
+    // Esboços: inexistentes na versão 1; obrigatórios (lista, possivelmente vazia) na versão 2.
+    std::vector<cad::sketch::Sketch> sketches;
+    int nextSketchNumber = 1;
+    if (schema == 1)
+    {
+        if (doc.contains("sketches") || doc.contains("nextSketchNumber"))
+            return error(QStringLiteral("Campos de esboço não pertencem ao esquema 1"));
+    }
+    else
+    {
+        if (!doc.value("sketches").isArray())
+            return error(QStringLiteral("Lista \"sketches\" ausente"));
+        if (!readInt(doc, "nextSketchNumber", 1, nextSketchNumber))
+            return error(QStringLiteral("Campo \"nextSketchNumber\" ausente ou inválido"));
+        const QJsonArray array = doc.value("sketches").toArray();
+        for (int i = 0; i < array.size(); ++i)
+        {
+            cad::sketch::Sketch sketch;
+            QString message;
+            if (!readSketch(array.at(i), i, sketch, message))
+                return error(message);
+            sketches.push_back(sketch);
+        }
+    }
+
     // Limites geométricos e reconstrução (fromData só altera 'out' em caso de sucesso).
     std::string buildError;
-    if (!CadDocument::fromData(name.toStdString(), p, ids[0].toStdString(), ids[1].toStdString(), out, buildError))
-        return error(QStringLiteral("Parâmetros inválidos: %1").arg(QString::fromStdString(buildError)));
+    if (!CadDocument::fromData(name.toStdString(), p, ids[0].toStdString(), ids[1].toStdString(), out, buildError,
+                               sketches, nextSketchNumber))
+        return error(QStringLiteral("Dados inválidos: %1").arg(QString::fromStdString(buildError)));
     return FileResult{true, QString()};
 }
 

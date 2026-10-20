@@ -20,7 +20,8 @@ endif()
 add_subdirectory(src/modeling)
 add_subdirectory(src/io)
 
-# Documento paramétrico e formato nativo .cadmec
+# Esboços 2D, documento paramétrico e formato nativo .cadmec
+add_subdirectory(src/sketch)
 add_subdirectory(src/document)
 
 # Visualizador 3D (Qt + OCCT)

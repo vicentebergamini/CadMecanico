@@ -6,6 +6,8 @@ target_include_directories(cad_viewer PUBLIC ${PROJECT_SOURCE_DIR}/src)
 target_link_libraries(cad_viewer PUBLIC
     Qt6::Widgets
     Qt6::OpenGLWidgets
+    cad_sketch
+    cad_modeling
     TKernel TKMath TKBRep TKService TKV3d TKOpenGl
 )
 if(WIN32)
