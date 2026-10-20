@@ -1,0 +1,265 @@
+#include "app/MainWindow.h"
+
+#include "io/StepExporter.h"
+#include "modeling/TestPart.h"
+
+#include <QAction>
+#include <QApplication>
+#include <QDir>
+#include <QDockWidget>
+#include <QFileDialog>
+#include <QFileInfo>
+#include <QLabel>
+#include <QMenu>
+#include <QMenuBar>
+#include <QMessageBox>
+#include <QStandardPaths>
+#include <QStatusBar>
+#include <QStyle>
+#include <QToolBar>
+#include <QTreeWidget>
+
+#include <Standard_Version.hxx>
+
+#include <filesystem>
+
+namespace cad::app {
+
+MainWindow::MainWindow(QWidget* parent)
+    : QMainWindow(parent)
+    , m_part(cad::modeling::buildTestPart())
+    , m_lastExportDir(QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation))
+{
+    setObjectName("MainWindow");
+    setWindowTitle(tr("CAD Mecânico"));
+
+    createActions();
+    createMenus();
+    createToolBars();
+    createDocks();
+    createCentralArea();
+
+    statusBar()->showMessage(tr("Pronto  |  Qt %1  |  Open CASCADE %2").arg(qVersion(), OCC_VERSION_COMPLETE));
+}
+
+MainWindow::~MainWindow() = default;
+
+void MainWindow::createActions()
+{
+    QStyle* st = style();
+
+    // Arquivo
+    m_actNew = new QAction(tr("&Novo"), this);
+    m_actNew->setObjectName("actionNovo");
+    m_actNew->setShortcut(QKeySequence::New);
+    m_actNew->setEnabled(false);
+
+    m_actOpen = new QAction(tr("&Abrir..."), this);
+    m_actOpen->setObjectName("actionAbrir");
+    m_actOpen->setShortcut(QKeySequence::Open);
+    m_actOpen->setEnabled(false);
+
+    m_actExportStep = new QAction(st->standardIcon(QStyle::SP_DialogSaveButton), tr("&Exportar STEP..."), this);
+    m_actExportStep->setObjectName("actionExportarStep");
+    m_actExportStep->setShortcut(QKeySequence(tr("Ctrl+E")));
+    m_actExportStep->setStatusTip(tr("Exporta a peça atual em formato STEP"));
+    connect(m_actExportStep, &QAction::triggered, this, &MainWindow::exportStep);
+
+    m_actQuit = new QAction(st->standardIcon(QStyle::SP_DialogCloseButton), tr("&Sair"), this);
+    m_actQuit->setObjectName("actionSair");
+    m_actQuit->setShortcut(QKeySequence(tr("Ctrl+Q")));
+    m_actQuit->setStatusTip(tr("Encerra o CAD Mecânico"));
+    connect(m_actQuit, &QAction::triggered, this, &QWidget::close);
+
+    // Editar (habilitados com a árvore paramétrica)
+    m_actUndo = new QAction(tr("&Desfazer"), this);
+    m_actUndo->setObjectName("actionDesfazer");
+    m_actUndo->setShortcut(QKeySequence::Undo);
+    m_actUndo->setEnabled(false);
+
+    m_actRedo = new QAction(tr("&Refazer"), this);
+    m_actRedo->setObjectName("actionRefazer");
+    m_actRedo->setShortcut(QKeySequence::Redo);
+    m_actRedo->setEnabled(false);
+
+    // Visualizar (habilitados com o visualizador 3D na E3)
+    m_actFitAll = new QAction(tr("&Ajustar à janela"), this);
+    m_actFitAll->setObjectName("actionAjustarJanela");
+    m_actFitAll->setShortcut(QKeySequence(Qt::Key_F));
+    m_actFitAll->setEnabled(false);
+
+    auto makeViewAction = [this](const QString& text, const char* name) {
+        auto* act = new QAction(text, this);
+        act->setObjectName(name);
+        act->setEnabled(false);
+        return act;
+    };
+    m_actViewFront = makeViewAction(tr("&Frente"), "actionVistaFrente");
+    m_actViewTop   = makeViewAction(tr("&Superior"), "actionVistaSuperior");
+    m_actViewRight = makeViewAction(tr("&Direita"), "actionVistaDireita");
+    m_actViewIso   = makeViewAction(tr("&Isométrica"), "actionVistaIsometrica");
+
+    // Ajuda
+    m_actAbout = new QAction(tr("&Sobre o CAD Mecânico"), this);
+    m_actAbout->setObjectName("actionSobre");
+    connect(m_actAbout, &QAction::triggered, this, &MainWindow::showAbout);
+}
+
+void MainWindow::createMenus()
+{
+    QMenu* menuFile = menuBar()->addMenu(tr("&Arquivo"));
+    menuFile->setObjectName("menuArquivo");
+    menuFile->addAction(m_actNew);
+    menuFile->addAction(m_actOpen);
+    menuFile->addSeparator();
+    menuFile->addAction(m_actExportStep);
+    menuFile->addSeparator();
+    menuFile->addAction(m_actQuit);
+
+    QMenu* menuEdit = menuBar()->addMenu(tr("&Editar"));
+    menuEdit->setObjectName("menuEditar");
+    menuEdit->addAction(m_actUndo);
+    menuEdit->addAction(m_actRedo);
+
+    QMenu* menuView = menuBar()->addMenu(tr("&Visualizar"));
+    menuView->setObjectName("menuVisualizar");
+    menuView->addAction(m_actFitAll);
+    m_menuStandardViews = menuView->addMenu(tr("&Vistas padrão"));
+    m_menuStandardViews->setObjectName("menuVistasPadrao");
+    m_menuStandardViews->addAction(m_actViewFront);
+    m_menuStandardViews->addAction(m_actViewTop);
+    m_menuStandardViews->addAction(m_actViewRight);
+    m_menuStandardViews->addAction(m_actViewIso);
+    m_menuStandardViews->setEnabled(false);
+    menuView->addSeparator();
+    // A ação de mostrar/ocultar o painel é adicionada em createDocks().
+
+    QMenu* menuHelp = menuBar()->addMenu(tr("A&juda"));
+    menuHelp->setObjectName("menuAjuda");
+    menuHelp->addAction(m_actAbout);
+}
+
+void MainWindow::createToolBars()
+{
+    m_toolBarFile = addToolBar(tr("Arquivo"));
+    m_toolBarFile->setObjectName("toolBarArquivo");
+    m_toolBarFile->addAction(m_actExportStep);
+    m_toolBarFile->addAction(m_actQuit);
+
+    // Reservada para as ferramentas de modelagem (esboço, extrusão, furo...).
+    m_toolBarModeling = addToolBar(tr("Modelagem"));
+    m_toolBarModeling->setObjectName("toolBarModelagem");
+}
+
+void MainWindow::createDocks()
+{
+    m_operationsTree = new QTreeWidget;
+    m_operationsTree->setObjectName("arvoreOperacoes");
+    m_operationsTree->setHeaderHidden(true);
+
+    // Apenas visual nesta etapa; a árvore paramétrica vem na E5.
+    auto* item = new QTreeWidgetItem(m_operationsTree, QStringList(tr("Peça de teste")));
+    item->setIcon(0, style()->standardIcon(QStyle::SP_FileIcon));
+    m_operationsTree->expandAll();
+
+    m_dockOperations = new QDockWidget(tr("Árvore de Operações"), this);
+    m_dockOperations->setObjectName("dockArvoreOperacoes");
+    m_dockOperations->setAllowedAreas(Qt::LeftDockWidgetArea | Qt::RightDockWidgetArea);
+    m_dockOperations->setWidget(m_operationsTree);
+    addDockWidget(Qt::LeftDockWidgetArea, m_dockOperations);
+
+    if (auto* menuView = menuBar()->findChild<QMenu*>("menuVisualizar"))
+        menuView->addAction(m_dockOperations->toggleViewAction());
+}
+
+void MainWindow::createCentralArea()
+{
+    auto* placeholder = new QLabel(tr("Visualizador 3D\n\nSerá implementado na etapa E3."));
+    placeholder->setObjectName("areaCentral");
+    placeholder->setAlignment(Qt::AlignCenter);
+    placeholder->setFrameShape(QFrame::StyledPanel);
+    placeholder->setMinimumSize(400, 300);
+    setCentralWidget(placeholder);
+}
+
+void MainWindow::exportStep()
+{
+    const QString suggested = QDir(m_lastExportDir).filePath("peca_teste.step");
+    QString path = askExportPath(suggested);
+    if (path.isEmpty())
+    {
+        statusBar()->showMessage(tr("Exportação cancelada"), 5000);
+        return;
+    }
+
+    if (QFileInfo(path).suffix().isEmpty())
+        path += ".step";
+
+    if (exportStepTo(path))
+        m_lastExportDir = QFileInfo(path).absolutePath();
+}
+
+bool MainWindow::exportStepTo(const QString& filePath)
+{
+    const QString nativePath = QDir::toNativeSeparators(filePath);
+
+    if (QFileInfo::exists(filePath) && !confirmOverwrite(nativePath))
+    {
+        statusBar()->showMessage(tr("Exportação cancelada: arquivo existente mantido"), 5000);
+        return false;
+    }
+
+    QApplication::setOverrideCursor(Qt::WaitCursor);
+    const auto result = cad::io::StepExporter().write(m_part, std::filesystem::path(filePath.toStdWString()));
+    QApplication::restoreOverrideCursor();
+
+    if (!result.ok)
+    {
+        statusBar()->showMessage(tr("Falha na exportação STEP"), 5000);
+        reportError(tr("Exportar STEP"),
+                    tr("Não foi possível exportar o arquivo:\n%1\n\n%2")
+                        .arg(nativePath, QString::fromStdString(result.message)));
+        return false;
+    }
+
+    statusBar()->showMessage(tr("STEP exportado: %1").arg(nativePath), 5000);
+    reportInfo(tr("Exportar STEP"), tr("Arquivo exportado com sucesso:\n%1").arg(nativePath));
+    return true;
+}
+
+void MainWindow::showAbout()
+{
+    QMessageBox::about(this, tr("Sobre o CAD Mecânico"),
+                       tr("<h3>CAD Mecânico %1</h3>"
+                          "<p>Modelador CAD mecânico em desenvolvimento.</p>"
+                          "<p>Qt %2<br>Open CASCADE %3</p>")
+                           .arg(QApplication::applicationVersion(), qVersion(), OCC_VERSION_COMPLETE));
+}
+
+QString MainWindow::askExportPath(const QString& suggestedPath)
+{
+    // A confirmação de sobrescrita é feita em exportStepTo().
+    return QFileDialog::getSaveFileName(this, tr("Exportar STEP"), suggestedPath,
+                                        tr("Arquivos STEP (*.step *.stp)"), nullptr,
+                                        QFileDialog::DontConfirmOverwrite);
+}
+
+bool MainWindow::confirmOverwrite(const QString& filePath)
+{
+    return QMessageBox::question(this, tr("Exportar STEP"),
+                                 tr("O arquivo já existe:\n%1\n\nDeseja substituí-lo?").arg(filePath),
+                                 QMessageBox::Yes | QMessageBox::No, QMessageBox::No)
+           == QMessageBox::Yes;
+}
+
+void MainWindow::reportInfo(const QString& title, const QString& text)
+{
+    QMessageBox::information(this, title, text);
+}
+
+void MainWindow::reportError(const QString& title, const QString& text)
+{
+    QMessageBox::critical(this, title, text);
+}
+
+} // namespace cad::app

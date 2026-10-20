@@ -12,15 +12,23 @@ endif()
 
 find_package(Qt6 REQUIRED COMPONENTS Widgets OpenGLWidgets)
 find_package(OpenCASCADE CONFIG REQUIRED)
+if(CADMECANICO_BUILD_TESTS)
+    find_package(Qt6 REQUIRED COMPONENTS Test)
+endif()
 
 # Bibliotecas sem Qt
 add_subdirectory(src/modeling)
 add_subdirectory(src/io)
 
+# Interface gráfica
+add_subdirectory(src/app)
+
 qt_add_executable(CadMecanico src/main.cpp)
 set_target_properties(CadMecanico PROPERTIES AUTOMOC ON)
+target_compile_definitions(CadMecanico PRIVATE CADMECANICO_VERSION="${PROJECT_VERSION}")
 
 target_link_libraries(CadMecanico PRIVATE
+    cad_app
     cad_modeling
     cad_io
     Qt6::Widgets
