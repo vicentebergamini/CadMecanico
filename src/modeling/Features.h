@@ -1,11 +1,13 @@
 // Operações geométricas elementares usadas pelo documento paramétrico (sem dependência de Qt).
 #pragma once
 
+#include <TopoDS_Edge.hxx>
 #include <TopoDS_Face.hxx>
 #include <TopoDS_Shape.hxx>
 #include <gp_Vec.hxx>
 
 #include <string>
+#include <vector>
 
 namespace cad::modeling {
 
@@ -45,5 +47,12 @@ FeatureResult booleanOperation(BooleanKind kind, const TopoDS_Shape& a, const To
 
 // Número de sólidos (TopAbs_SOLID) contidos na forma.
 int countSolids(const TopoDS_Shape& shape);
+
+// Acabamentos 3D (E5.5B). Arredondamento de raio constante (BRepFilletAPI_MakeFillet) ou chanfro
+// simétrico de distância d medida em cada face (BRepFilletAPI_MakeChamfer::Add(d, aresta)) nas
+// arestas dadas de 'solid'. Recusa valor não positivo/não finito, arestas que não pertencem ao
+// sólido e valores inviáveis (algoritmo não concluído, resultado inválido ou sem volume).
+FeatureResult filletEdges(const TopoDS_Shape& solid, const std::vector<TopoDS_Edge>& edges, double radius);
+FeatureResult chamferEdges(const TopoDS_Shape& solid, const std::vector<TopoDS_Edge>& edges, double distance);
 
 } // namespace cad::modeling

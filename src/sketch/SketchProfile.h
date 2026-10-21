@@ -3,7 +3,12 @@
 // Perfis suportados (exatamente UM contorno fechado por esboço):
 //   - um retângulo;
 //   - um círculo;
-//   - segmentos de linha conectados formando um polígono simples.
+//   - segmentos de linha conectados formando um polígono simples;
+//   - (E5.5) contornos de segmentos e arcos circulares, incluindo cantos com Fillet 2D e
+//     Chamfer 2D (o esboço é resolvido por SketchResolver antes do reconhecimento). Arcos viram
+//     arestas circulares exatas do OCCT (GC_MakeArcOfCircle pelos nós do contorno), nunca
+//     polilinhas; a área do contorno é exata (polígono das cordas + segmentos circulares). A
+//     verificação de autointerseção usa uma amostragem dos arcos (passo ≤ 2°), só para validar.
 // Extremidades de linhas são consideradas coincidentes quando a distância entre elas é no
 // máximo kClosureTolerance (mm). São rejeitados, com mensagem: esboço sem entidades, perfis
 // abertos (extremidade livre), segmentos degenerados ou duplicados, nós com mais de dois

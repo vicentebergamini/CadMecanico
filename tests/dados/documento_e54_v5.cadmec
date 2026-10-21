@@ -1,0 +1,74 @@
+{
+    "document": {
+        "name": "Sem título",
+        "nextOperationNumber": 4,
+        "nextSketchNumber": 3,
+        "operations": [
+            {
+                "id": "op-1",
+                "name": "Extrusão 1",
+                "parameters": {
+                    "depth": 20
+                },
+                "reversed": false,
+                "sketchId": "sk-1",
+                "type": "extrude"
+            },
+            {
+                "id": "op-2",
+                "name": "Extrusão 2",
+                "parameters": {
+                    "depth": 30
+                },
+                "reversed": false,
+                "sketchId": "sk-2",
+                "type": "extrude"
+            },
+            {
+                "id": "op-3",
+                "name": "Subtração 1",
+                "operandA": "op-1",
+                "operandB": "op-2",
+                "operation": "cut",
+                "type": "boolean"
+            }
+        ],
+        "sketches": [
+            {
+                "entities": [
+                    {
+                        "height": 48.6,
+                        "id": "e-1",
+                        "type": "rectangle",
+                        "width": 76.5,
+                        "x": 13.7,
+                        "y": 28.4
+                    }
+                ],
+                "id": "sk-1",
+                "name": "Esboço 1",
+                "nextEntityNumber": 2,
+                "plane": "XY"
+            },
+            {
+                "entities": [
+                    {
+                        "cx": 51.9,
+                        "cy": 52.7,
+                        "id": "e-1",
+                        "radius": 8.6,
+                        "type": "circle"
+                    }
+                ],
+                "id": "sk-2",
+                "name": "Esboço 2",
+                "nextEntityNumber": 2,
+                "plane": "XY"
+            }
+        ],
+        "unit": "mm"
+    },
+    "format": "cadmec",
+    "generator": "CadMecanico",
+    "schemaVersion": 5
+}

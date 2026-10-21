@@ -232,6 +232,22 @@ bool CadDocument::fromData(const Data& data, CadDocument& out, std::string& erro
         {
             ops.push_back(makeBoolean(f.id, BooleanParameters{f.name, f.booleanKind, f.operandA, f.operandB}));
         }
+        else if (f.type == OperationType::Fillet3D || f.type == OperationType::Chamfer3D)
+        {
+            const char* key = f.type == OperationType::Fillet3D ? "radius" : "distance";
+            const double value = f.parameter(key);
+            if (!std::isfinite(value) || value <= 0.0 || value > kMaxDimension)
+            {
+                error = "Operação " + f.id + ": " + (f.type == OperationType::Fillet3D ? "raio" : "distância") + " inválido";
+                return false;
+            }
+            if (f.edges.empty())
+            {
+                error = "Operação " + f.id + ": nenhuma aresta referenciada";
+                return false;
+            }
+            ops.push_back(makeFinish(f.id, f.type, FinishParameters{f.name, f.sourceId, value, f.edges}));
+        }
         else
         {
             error = "Operação " + f.id + ": tipo não permitido após a peça";
@@ -614,7 +630,8 @@ Operation CadDocument::makeExtrusion(const std::string& id, const ExtrudeParamet
 
 bool CadDocument::producesBody(OperationType type)
 {
-    return type == OperationType::ThroughHole || type == OperationType::Extrude || type == OperationType::Boolean;
+    return type == OperationType::ThroughHole || type == OperationType::Extrude || type == OperationType::Boolean
+           || type == OperationType::Fillet3D || type == OperationType::Chamfer3D;
 }
 
 bool CadDocument::checkReferences(std::vector<Operation>& operations, std::string& error)
@@ -631,22 +648,33 @@ bool CadDocument::checkReferences(std::vector<Operation>& operations, std::strin
     };
     for (Operation& op : operations)
     {
-        if (op.type == OperationType::Boolean)
+        const bool finish = op.type == OperationType::Fillet3D || op.type == OperationType::Chamfer3D;
+        if (op.type == OperationType::Boolean || finish)
         {
             const std::string label = op.name + " (" + op.id + ")";
-            if (op.operandA.empty() || op.operandB.empty())
+            if (finish && op.sourceId.empty())
+            {
+                error = label + ": selecione o corpo de origem";
+                return false;
+            }
+            if (!finish && (op.operandA.empty() || op.operandB.empty()))
             {
                 error = label + ": selecione os corpos A e B";
                 return false;
             }
-            if (op.operandA == op.operandB)
+            if (!finish && op.operandA == op.operandB)
             {
                 error = label + ": os corpos A e B devem ser diferentes";
                 return false;
             }
-            for (const std::string* operand : {&op.operandA, &op.operandB})
+            std::vector<const std::string*> refs;
+            if (finish)
+                refs = {&op.sourceId};
+            else
+                refs = {&op.operandA, &op.operandB};
+            for (const std::string* operand : refs)
             {
-                const char* which = operand == &op.operandA ? "A" : "B";
+                const char* which = finish ? "de origem" : operand == &op.operandA ? "A" : "B";
                 if (*operand == op.id)
                 {
                     error = label + ": a operação não pode usar o próprio resultado (dependência circular)";
@@ -741,6 +769,11 @@ bool CadDocument::rebuild(std::vector<Operation>& operations, const std::vector<
         }
         case OperationType::Boolean:
             r = cad::modeling::booleanOperation(op.booleanKind, resultOf(op.operandA), resultOf(op.operandB));
+            break;
+        case OperationType::Fillet3D:
+        case OperationType::Chamfer3D:
+            r = computeFinish(op.type, resultOf(op.sourceId),
+                              op.parameter(op.type == OperationType::Fillet3D ? "radius" : "distance"), op.edges);
             break;
         }
         op.status = r.ok ? OperationStatus::Valid : OperationStatus::Invalid;
@@ -861,6 +894,166 @@ cad::modeling::FeatureResult CadDocument::previewBoolean(const BooleanParameters
             return r;
         }
     return cad::modeling::booleanOperation(parameters.kind, a->result, b->result);
+}
+
+// --- Acabamentos 3D -----------------------------------------------------------
+
+cad::modeling::FeatureResult CadDocument::computeFinish(OperationType type, const TopoDS_Shape& source, double value,
+                                                        std::vector<cad::modeling::EdgeSignature>& edges)
+{
+    cad::modeling::FeatureResult r;
+    std::vector<TopoDS_Edge> found;
+    for (size_t i = 0; i < edges.size(); ++i)
+    {
+        const cad::modeling::EdgeMatch m = cad::modeling::resolveEdge(source, edges[i]);
+        if (!m.ok)
+        {
+            r.message = "aresta " + std::to_string(i + 1) + " — " + m.message;
+            return r;
+        }
+        for (const TopoDS_Edge& e : found)
+            if (e.IsSame(m.edge))
+            {
+                r.message = "aresta " + std::to_string(i + 1) + " repetida na seleção";
+                return r;
+            }
+        found.push_back(m.edge);
+    }
+    r = type == OperationType::Fillet3D ? cad::modeling::filletEdges(source, found, value)
+                                        : cad::modeling::chamferEdges(source, found, value);
+    if (r.ok)
+        for (size_t i = 0; i < edges.size(); ++i)
+            edges[i] = cad::modeling::describeEdge(source, found[i]); // referência acompanha a geometria
+    return r;
+}
+
+std::string CadDocument::defaultFinishName(OperationType type) const
+{
+    int n = 1;
+    for (const Operation& op : m_operations)
+        if (op.type == type)
+            ++n;
+    return std::string(type == OperationType::Fillet3D ? "Fillet 3D " : "Chamfer 3D ") + std::to_string(n);
+}
+
+Operation CadDocument::makeFinish(const std::string& id, OperationType type, const FinishParameters& parameters)
+{
+    Operation op;
+    op.id = id;
+    op.type = type;
+    op.name = trim(parameters.name);
+    op.sourceId = parameters.sourceId;
+    op.edges = parameters.edges;
+    op.parameters = {{type == OperationType::Fillet3D ? "radius" : "distance", parameters.value}};
+    return op;
+}
+
+std::vector<cad::modeling::EdgeSignature> CadDocument::edgeSignatures(const std::string& bodyId,
+                                                                      const std::vector<TopoDS_Edge>& edges) const
+{
+    std::vector<cad::modeling::EdgeSignature> signatures;
+    const Operation* body = findOperation(bodyId);
+    if (!body)
+        return signatures;
+    for (const TopoDS_Edge& e : edges)
+        signatures.push_back(cad::modeling::describeEdge(body->result, e));
+    return signatures;
+}
+
+std::string CadDocument::bodyContaining(const TopoDS_Shape& edge) const
+{
+    for (const Operation& op : m_operations)
+        if (producesBody(op.type) && op.consumedBy.empty() && cad::modeling::containsEdge(op.result, edge))
+            return op.id;
+    return {};
+}
+
+cad::modeling::FeatureResult CadDocument::previewFinish(OperationType type, const FinishParameters& parameters) const
+{
+    cad::modeling::FeatureResult r;
+    const Operation* source = findOperation(parameters.sourceId);
+    if (!source || !producesBody(source->type))
+    {
+        r.message = "Corpo de origem inexistente: " + parameters.sourceId;
+        return r;
+    }
+    std::vector<cad::modeling::EdgeSignature> edges = parameters.edges;
+    return computeFinish(type, source->result, parameters.value, edges);
+}
+
+ValidationResult CadDocument::addFinish(OperationType type, const FinishParameters& parameters, std::string* newId)
+{
+    if (type != OperationType::Fillet3D && type != OperationType::Chamfer3D)
+        return ValidationResult{false, "", "Tipo de acabamento inválido"};
+    if (trim(parameters.name).size() > kMaxNameLength)
+        return ValidationResult{false, "name", "Nome longo demais"};
+    if (!std::isfinite(parameters.value) || parameters.value > kMaxDimension)
+        return ValidationResult{false, "value", type == OperationType::Fillet3D ? "Raio inválido" : "Distância inválida"};
+    if (parameters.edges.empty())
+        return ValidationResult{false, "edges", "Selecione pelo menos uma aresta"};
+    FinishParameters p = parameters;
+    if (trim(p.name).empty())
+        p.name = defaultFinishName(type);
+    const std::string id = "op-" + std::to_string(m_nextOperationNumber);
+    std::vector<Operation> ops = m_operations;
+    ops.push_back(makeFinish(id, type, p));
+    const ValidationResult v = applyOperations(std::move(ops), "value");
+    if (!v.ok)
+        return v;
+    ++m_nextOperationNumber;
+    if (newId)
+        *newId = id;
+    return {};
+}
+
+ValidationResult CadDocument::updateFinish(const std::string& id, const FinishParameters& parameters)
+{
+    std::vector<Operation> ops = m_operations;
+    auto it = std::find_if(ops.begin(), ops.end(), [&](const Operation& op) { return op.id == id; });
+    if (it == ops.end() || (it->type != OperationType::Fillet3D && it->type != OperationType::Chamfer3D))
+        return ValidationResult{false, "", "Acabamento inexistente: " + id};
+    if (trim(parameters.name).size() > kMaxNameLength)
+        return ValidationResult{false, "name", "Nome longo demais"};
+    if (!std::isfinite(parameters.value) || parameters.value > kMaxDimension)
+        return ValidationResult{false, "value", "Valor inválido"};
+    if (parameters.edges.empty())
+        return ValidationResult{false, "edges", "Selecione pelo menos uma aresta"};
+    FinishParameters p = parameters;
+    p.sourceId = it->sourceId;
+    if (trim(p.name).empty())
+        p.name = it->name;
+    *it = makeFinish(id, it->type, p);
+    return applyOperations(std::move(ops), "value");
+}
+
+FinishParameters CadDocument::finishParameters(const std::string& id) const
+{
+    FinishParameters p;
+    if (const Operation* op = findOperation(id);
+        op && (op->type == OperationType::Fillet3D || op->type == OperationType::Chamfer3D))
+    {
+        p.name = op->name;
+        p.sourceId = op->sourceId;
+        p.value = op->parameter(op->type == OperationType::Fillet3D ? "radius" : "distance");
+        p.edges = op->edges;
+    }
+    return p;
+}
+
+std::vector<TopoDS_Edge> CadDocument::resolvedFinishEdges(const std::string& id) const
+{
+    std::vector<TopoDS_Edge> edges;
+    const Operation* op = findOperation(id);
+    const Operation* source = op ? findOperation(op->sourceId) : nullptr;
+    if (!source)
+        return edges;
+    for (const auto& s : op->edges)
+    {
+        const cad::modeling::EdgeMatch m = cad::modeling::resolveEdge(source->result, s);
+        if (m.ok)
+            edges.push_back(m.edge);
+    }
+    return edges;
 }
 
 ValidationResult CadDocument::applyOperations(std::vector<Operation> operations, const char* field)

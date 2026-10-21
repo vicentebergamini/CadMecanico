@@ -26,8 +26,112 @@ const char* typeName(OperationType t)
     case OperationType::ThroughHole: return "throughHole";
     case OperationType::Extrude:     return "extrude";
     case OperationType::Boolean:     return "boolean";
+    case OperationType::Fillet3D:    return "fillet3d";
+    case OperationType::Chamfer3D:   return "chamfer3d";
     }
     return "";
+}
+
+QJsonArray vec3(double x, double y, double z)
+{
+    return QJsonArray{x, y, z};
+}
+
+QJsonObject edgeToJson(const cad::modeling::EdgeSignature& s)
+{
+    QJsonArray normals;
+    for (const gp_Dir& n : s.normals)
+        normals.append(vec3(n.X(), n.Y(), n.Z()));
+    return QJsonObject{
+        {"curve", QString::fromLatin1(cad::modeling::curveName(s.curve))},
+        {"mid", vec3(s.mid.X(), s.mid.Y(), s.mid.Z())},
+        {"direction", vec3(s.direction.X(), s.direction.Y(), s.direction.Z())},
+        {"length", s.length},
+        {"radius", s.radius},
+        {"normals", normals},
+    };
+}
+
+bool readVec3(const QJsonValue& v, double out[3])
+{
+    if (!v.isArray() || v.toArray().size() != 3)
+        return false;
+    for (int i = 0; i < 3; ++i)
+    {
+        const QJsonValue c = v.toArray().at(i);
+        if (!c.isDouble() || !std::isfinite(c.toDouble()))
+            return false;
+        out[i] = c.toDouble();
+    }
+    return true;
+}
+
+// Referência persistente de aresta (assinatura geométrica, ver EdgeNaming).
+bool readEdge(const QJsonValue& value, cad::modeling::EdgeSignature& s, QString& message)
+{
+    if (!value.isObject())
+    {
+        message = QStringLiteral("referência de aresta não é um objeto");
+        return false;
+    }
+    const QJsonObject o = value.toObject();
+    const QStringList allowed{"curve", "mid", "direction", "length", "radius", "normals"};
+    for (auto it = o.begin(); it != o.end(); ++it)
+        if (!allowed.contains(it.key()))
+        {
+            message = QStringLiteral("campo desconhecido \"%1\" na referência de aresta").arg(it.key());
+            return false;
+        }
+    const QString curve = o.value("curve").toString();
+    if (curve == QLatin1String("line"))
+        s.curve = cad::modeling::EdgeSignature::Curve::Line;
+    else if (curve == QLatin1String("circle"))
+        s.curve = cad::modeling::EdgeSignature::Curve::Circle;
+    else if (curve == QLatin1String("other"))
+        s.curve = cad::modeling::EdgeSignature::Curve::Other;
+    else
+    {
+        message = QStringLiteral("tipo de curva da aresta inválido");
+        return false;
+    }
+    double mid[3], dir[3];
+    if (!readVec3(o.value("mid"), mid) || !readVec3(o.value("direction"), dir))
+    {
+        message = QStringLiteral("ponto médio ou direção da aresta inválidos");
+        return false;
+    }
+    if (std::sqrt(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]) < 1e-9)
+    {
+        message = QStringLiteral("direção da aresta nula");
+        return false;
+    }
+    for (const char* key : {"length", "radius"})
+        if (!o.value(key).isDouble() || !std::isfinite(o.value(key).toDouble()) || o.value(key).toDouble() < 0.0)
+        {
+            message = QStringLiteral("campo \"%1\" da aresta inválido").arg(key);
+            return false;
+        }
+    if (!o.value("normals").isArray() || o.value("normals").toArray().isEmpty() || o.value("normals").toArray().size() > 2)
+    {
+        message = QStringLiteral("normais das faces adjacentes inválidas");
+        return false;
+    }
+    s.mid = gp_Pnt(mid[0], mid[1], mid[2]);
+    s.direction = gp_Dir(dir[0], dir[1], dir[2]);
+    s.length = o.value("length").toDouble();
+    s.radius = o.value("radius").toDouble();
+    s.normals.clear();
+    for (const QJsonValue& n : o.value("normals").toArray())
+    {
+        double d[3];
+        if (!readVec3(n, d) || std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]) < 1e-9)
+        {
+            message = QStringLiteral("normal de face inválida");
+            return false;
+        }
+        s.normals.emplace_back(d[0], d[1], d[2]);
+    }
+    return true;
 }
 
 const char* booleanName(BooleanKind k)
@@ -86,7 +190,7 @@ bool readInt(const QJsonObject& o, const char* key, int minimum, int& value)
 }
 
 // Lê um esboço (esquema 2). Chaves desconhecidas são recusadas.
-bool readSketch(const QJsonValue& value, int index, cad::sketch::Sketch& out, QString& message)
+bool readSketch(const QJsonValue& value, int index, int schema, cad::sketch::Sketch& out, QString& message)
 {
     using namespace cad::sketch;
     const QString where = QStringLiteral("Esboço %1").arg(index + 1);
@@ -154,34 +258,83 @@ bool readSketch(const QJsonValue& value, int index, cad::sketch::Sketch& out, QS
             message = ewhere + QStringLiteral(": tipo desconhecido \"%1\"").arg(e.value("type").toString());
             return false;
         }
-        const QStringList keys = *type == EntityType::Line        ? QStringList{"x1", "y1", "x2", "y2"}
-                                 : *type == EntityType::Rectangle ? QStringList{"x", "y", "width", "height"}
-                                                                  : QStringList{"cx", "cy", "radius"};
+        const bool e55 = *type == EntityType::Arc || *type == EntityType::Fillet || *type == EntityType::Chamfer;
+        if (e55 && schema < 6)
+        {
+            message = ewhere + QStringLiteral(": tipo \"%1\" não pertence ao esquema %2")
+                                   .arg(e.value("type").toString())
+                                   .arg(schema);
+            return false;
+        }
+        // Campos numéricos, de texto (referências) e lógicos de cada tipo.
+        QStringList numbers, texts, flags;
+        switch (*type)
+        {
+        case EntityType::Line:      numbers = {"x1", "y1", "x2", "y2"}; break;
+        case EntityType::Rectangle: numbers = {"x", "y", "width", "height"}; break;
+        case EntityType::Circle:    numbers = {"cx", "cy", "radius"}; break;
+        case EntityType::Arc:
+            numbers = {"cx", "cy", "radius", "startAngle", "endAngle"};
+            flags = {"clockwise"};
+            break;
+        case EntityType::Fillet:
+        case EntityType::Chamfer:
+            numbers = {"corner", *type == EntityType::Fillet ? "radius" : "distance"};
+            texts = {"entityA", "entityB"};
+            break;
+        }
         for (auto it = e.begin(); it != e.end(); ++it)
-            if (it.key() != "id" && it.key() != "type" && !keys.contains(it.key()))
+            if (it.key() != "id" && it.key() != "type" && !numbers.contains(it.key()) && !texts.contains(it.key())
+                && !flags.contains(it.key()))
             {
                 message = ewhere + QStringLiteral(": campo desconhecido \"%1\"").arg(it.key());
                 return false;
             }
-        double v[4] = {0, 0, 0, 0};
-        for (int k = 0; k < keys.size(); ++k)
+        double v[5] = {0, 0, 0, 0, 0};
+        for (int k = 0; k < numbers.size(); ++k)
         {
-            const QJsonValue x = e.value(keys[k]);
+            const QJsonValue x = e.value(numbers[k]);
             if (!x.isDouble() || !std::isfinite(x.toDouble()))
             {
-                message = ewhere + QStringLiteral(": campo \"%1\" ausente ou não numérico").arg(keys[k]);
+                message = ewhere + QStringLiteral(": campo \"%1\" ausente ou não numérico").arg(numbers[k]);
                 return false;
             }
             v[k] = x.toDouble();
         }
+        std::string refs[2];
+        for (int k = 0; k < texts.size(); ++k)
+        {
+            if (!e.value(texts[k]).isString())
+            {
+                message = ewhere + QStringLiteral(": referência \"%1\" ausente ou inválida").arg(texts[k]);
+                return false;
+            }
+            refs[k] = e.value(texts[k]).toString().toStdString();
+        }
+        for (const QString& f : flags)
+            if (!e.value(f).isBool())
+            {
+                message = ewhere + QStringLiteral(": campo \"%1\" ausente ou inválido").arg(f);
+                return false;
+            }
+        if (!texts.isEmpty() && v[0] != std::floor(v[0]))
+        {
+            message = ewhere + QStringLiteral(": \"corner\" deve ser inteiro");
+            return false;
+        }
         SketchEntity entity;
         entity.id = e.value("id").toString().toStdString();
-        if (*type == EntityType::Line)
-            entity.geometry = SketchLine{v[0], v[1], v[2], v[3]};
-        else if (*type == EntityType::Rectangle)
-            entity.geometry = SketchRectangle{v[0], v[1], v[2], v[3]};
-        else
-            entity.geometry = SketchCircle{v[0], v[1], v[2]};
+        switch (*type)
+        {
+        case EntityType::Line:      entity.geometry = SketchLine{v[0], v[1], v[2], v[3]}; break;
+        case EntityType::Rectangle: entity.geometry = SketchRectangle{v[0], v[1], v[2], v[3]}; break;
+        case EntityType::Circle:    entity.geometry = SketchCircle{v[0], v[1], v[2]}; break;
+        case EntityType::Arc:
+            entity.geometry = SketchArc{v[0], v[1], v[2], v[3], v[4], e.value("clockwise").toBool()};
+            break;
+        case EntityType::Fillet:    entity.geometry = SketchFillet{refs[0], refs[1], int(v[0]), v[1]}; break;
+        case EntityType::Chamfer:   entity.geometry = SketchChamfer{refs[0], refs[1], int(v[0]), v[1]}; break;
+        }
         entities.push_back(entity);
     }
 
@@ -216,12 +369,35 @@ QJsonObject sketchToJson(const cad::sketch::Sketch& sketch)
             o.insert("width", r->width);
             o.insert("height", r->height);
         }
+        else if (const auto* c = std::get_if<SketchCircle>(&e.geometry))
+        {
+            o.insert("cx", c->cx);
+            o.insert("cy", c->cy);
+            o.insert("radius", c->radius);
+        }
+        else if (const auto* a = std::get_if<SketchArc>(&e.geometry))
+        {
+            o.insert("cx", a->cx);
+            o.insert("cy", a->cy);
+            o.insert("radius", a->radius);
+            o.insert("startAngle", a->startAngle);
+            o.insert("endAngle", a->endAngle);
+            o.insert("clockwise", a->clockwise);
+        }
+        else if (const auto* f = std::get_if<SketchFillet>(&e.geometry))
+        {
+            o.insert("entityA", QString::fromStdString(f->entityA));
+            o.insert("entityB", QString::fromStdString(f->entityB));
+            o.insert("corner", f->corner);
+            o.insert("radius", f->radius);
+        }
         else
         {
-            const auto& c = std::get<SketchCircle>(e.geometry);
-            o.insert("cx", c.cx);
-            o.insert("cy", c.cy);
-            o.insert("radius", c.radius);
+            const auto& c = std::get<SketchChamfer>(e.geometry);
+            o.insert("entityA", QString::fromStdString(c.entityA));
+            o.insert("entityB", QString::fromStdString(c.entityB));
+            o.insert("corner", c.corner);
+            o.insert("distance", c.distance);
         }
         entities.append(o);
     }
@@ -262,6 +438,14 @@ QByteArray DocumentFile::toJson(const CadDocument& document)
         else
         {
             o.insert("parameters", params);
+        }
+        if (op.type == OperationType::Fillet3D || op.type == OperationType::Chamfer3D)
+        {
+            o.insert("sourceId", QString::fromStdString(op.sourceId));
+            QJsonArray edges;
+            for (const auto& e : op.edges)
+                edges.append(edgeToJson(e));
+            o.insert("edges", edges);
         }
         if (op.type == OperationType::Extrude)
         {
@@ -395,13 +579,16 @@ FileResult DocumentFile::fromJson(const QByteArray& json, CadDocument& out)
         const QJsonObject op = ops.at(i).toObject();
         const QString type = op.value("type").toString();
         const bool isBoolean = type == QLatin1String("boolean") && schema >= 5;
-        if (type != QLatin1String("extrude") && !isBoolean)
+        const bool isFinish = (type == QLatin1String("fillet3d") || type == QLatin1String("chamfer3d")) && schema >= 6;
+        if (type != QLatin1String("extrude") && !isBoolean && !isFinish)
             return error(QStringLiteral("Operação %1: tipo inesperado \"%2\" (esperado %3)")
                              .arg(i + 1)
-                             .arg(type, schema >= 5 ? QStringLiteral("\"extrude\" ou \"boolean\"")
-                                                    : QStringLiteral("\"extrude\"")));
-        const QStringList allowed = isBoolean ? QStringList{"id", "type", "name", "operation", "operandA", "operandB"}
-                                              : QStringList{"id", "type", "name", "sketchId", "reversed", "parameters"};
+                             .arg(type, schema >= 6   ? QStringLiteral("\"extrude\", \"boolean\", \"fillet3d\" ou \"chamfer3d\"")
+                                        : schema >= 5 ? QStringLiteral("\"extrude\" ou \"boolean\"")
+                                                      : QStringLiteral("\"extrude\"")));
+        const QStringList allowed = isBoolean  ? QStringList{"id", "type", "name", "operation", "operandA", "operandB"}
+                                    : isFinish ? QStringList{"id", "type", "name", "sourceId", "parameters", "edges"}
+                                               : QStringList{"id", "type", "name", "sketchId", "reversed", "parameters"};
         for (auto it = op.begin(); it != op.end(); ++it)
             if (!allowed.contains(it.key()))
                 return error(QStringLiteral("Operação %1: campo desconhecido \"%2\"").arg(i + 1).arg(it.key()));
@@ -432,6 +619,33 @@ FileResult DocumentFile::fromJson(const QByteArray& json, CadDocument& out)
             b.operandA = op.value("operandA").toString().toStdString();
             b.operandB = op.value("operandB").toString().toStdString();
             data.features.push_back(b);
+            continue;
+        }
+        if (isFinish)
+        {
+            Operation f;
+            f.id = id.toString().toStdString();
+            f.type = type == QLatin1String("fillet3d") ? OperationType::Fillet3D : OperationType::Chamfer3D;
+            f.name = op.value("name").toString().toStdString();
+            if (!op.value("sourceId").isString() || !isValidIdentifier(op.value("sourceId").toString().toStdString()))
+                return error(QStringLiteral("Operação %1: referência \"sourceId\" ausente ou inválida").arg(i + 1));
+            f.sourceId = op.value("sourceId").toString().toStdString();
+            const char* key = f.type == OperationType::Fillet3D ? "radius" : "distance";
+            QList<double> values;
+            QString message;
+            if (!readParameters(op, QStringList{QString::fromLatin1(key)}, values, message))
+                return error(QStringLiteral("Operação %1: %2").arg(i + 1).arg(message));
+            f.parameters = {{key, values[0]}};
+            if (!op.value("edges").isArray() || op.value("edges").toArray().isEmpty())
+                return error(QStringLiteral("Operação %1: lista \"edges\" ausente ou vazia").arg(i + 1));
+            for (const QJsonValue& ev : op.value("edges").toArray())
+            {
+                cad::modeling::EdgeSignature s;
+                if (!readEdge(ev, s, message))
+                    return error(QStringLiteral("Operação %1: %2").arg(i + 1).arg(message));
+                f.edges.push_back(s);
+            }
+            data.features.push_back(f);
             continue;
         }
         if (!op.value("sketchId").isString())
@@ -481,7 +695,7 @@ FileResult DocumentFile::fromJson(const QByteArray& json, CadDocument& out)
         {
             cad::sketch::Sketch sketch;
             QString message;
-            if (!readSketch(array.at(i), i, sketch, message))
+            if (!readSketch(array.at(i), i, schema, sketch, message))
                 return error(message);
             sketches.push_back(sketch);
         }

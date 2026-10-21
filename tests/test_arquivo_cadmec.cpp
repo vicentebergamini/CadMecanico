@@ -11,6 +11,10 @@
 #include <QTemporaryDir>
 #include <QTest>
 
+#include <BRepAdaptor_Curve.hxx>
+#include <TopExp_Explorer.hxx>
+#include <TopoDS.hxx>
+
 using namespace cad::document;
 using cad::modeling::ShapeInspector;
 
@@ -101,6 +105,11 @@ private slots:
     void arquivoE53Esquema4();
     void rejeitaBooleanaInvalida_data();
     void rejeitaBooleanaInvalida();
+    // E5.5
+    void salvarEAbrirE55();
+    void arquivoE54Esquema5();
+    void rejeitaE55Invalido_data();
+    void rejeitaE55Invalido();
 
 private:
     QTemporaryDir* m_dir = nullptr;
@@ -917,6 +926,214 @@ void TestArquivoCadmec::rejeitaBooleanaInvalida()
     QVERIFY(!r.message.isEmpty());
     QVERIFY(active.shape().IsSame(before));
     QCOMPARE(active.operations().size(), size_t(5));
+}
+
+namespace {
+
+// Esboço XY com retângulo + Fillet 2D R10 (canto 2) + Chamfer 2D 5 (canto 0); esboço separado com
+// um arco; extrusão 20 mm; Fillet 3D R3 na aresta superior frontal; Chamfer 3D 2 na aresta
+// inferior frontal do resultado.
+CadDocument documentE55()
+{
+    using namespace cad::sketch;
+    CadDocument doc("Acabamentos");
+    std::string error;
+    Sketch s = doc.createSketch(PlaneType::XY);
+    s.addEntity(SketchRectangle{0.0, 0.0, 100.0, 60.0});
+    s.addEntity(SketchFillet{"e-1", "e-1", 2, 10.0});
+    s.addEntity(SketchChamfer{"e-1", "e-1", 0, 5.0});
+    doc.commitSketch(s, error);
+    Sketch arc = doc.createSketch(PlaneType::XZ);
+    arc.addEntity(SketchArc{150.0, 10.0, 8.0, 30.0, 200.0, true});
+    doc.commitSketch(arc, error);
+    std::string ext, fil, cha;
+    doc.addExtrusion({"Bloco", s.id(), 20.0, false}, &ext);
+    auto edgeAt = [](const TopoDS_Shape& shape, double x, double y, double z) {
+        for (TopExp_Explorer ex(shape, TopAbs_EDGE); ex.More(); ex.Next())
+        {
+            BRepAdaptor_Curve c(TopoDS::Edge(ex.Current()));
+            if (c.Value(0.5 * (c.FirstParameter() + c.LastParameter())).Distance(gp_Pnt(x, y, z)) < 1e-6)
+                return TopoDS::Edge(ex.Current());
+        }
+        return TopoDS_Edge();
+    };
+    // Aresta superior frontal: de x = 5 (chanfro 2D) a x = 100.
+    doc.addFinish(OperationType::Fillet3D,
+                  {"", ext, 3.0, doc.edgeSignatures(ext, {edgeAt(doc.shape(), 52.5, 0.0, 20.0)})}, &fil);
+    // Aresta inferior frontal (x de 5 a 100), sem arestas tangentes encadeadas.
+    doc.addFinish(OperationType::Chamfer3D,
+                  {"", fil, 2.0, doc.edgeSignatures(fil, {edgeAt(doc.shape(), 52.5, 0.0, 0.0)})}, &cha);
+    return doc;
+}
+
+template <typename F>
+QByteArray e55Modified(F edit)
+{
+    QJsonObject root = QJsonDocument::fromJson(DocumentFile::toJson(documentE55())).object();
+    edit(root);
+    return QJsonDocument(root).toJson();
+}
+
+QJsonObject entityAt(QJsonObject& root, int sketch, int i)
+{
+    return sketchObject(root, sketch)["entities"].toArray()[i].toObject();
+}
+
+void setEntity(QJsonObject& root, int sketch, int i, const QJsonObject& value)
+{
+    QJsonObject s = sketchObject(root, sketch);
+    QJsonArray e = s["entities"].toArray();
+    e[i] = value;
+    s["entities"] = e;
+    setSketch(root, sketch, s);
+}
+
+} // namespace
+
+void TestArquivoCadmec::salvarEAbrirE55()
+{
+    const CadDocument original = documentE55();
+    QCOMPARE(original.operations().size(), size_t(3));
+    QCOMPARE(original.activeBodies(), std::vector<std::string>{"op-3"});
+    const QString path = m_dir->filePath("e55.cadmec");
+    QVERIFY(DocumentFile::save(original, path).ok);
+
+    QJsonObject root = QJsonDocument::fromJson(readFile(path)).object();
+    QCOMPARE(root["schemaVersion"].toInt(), 6);
+    const QJsonObject fillet = entityAt(root, 0, 1);
+    QCOMPARE(fillet["type"].toString(), QStringLiteral("fillet"));
+    QCOMPARE(fillet["entityA"].toString(), QStringLiteral("e-1"));
+    QCOMPARE(fillet["corner"].toInt(), 2);
+    QCOMPARE(fillet["radius"].toDouble(), 10.0);
+    QCOMPARE(entityAt(root, 0, 2)["type"].toString(), QStringLiteral("chamfer"));
+    QCOMPARE(entityAt(root, 0, 2)["distance"].toDouble(), 5.0);
+    const QJsonObject arc = entityAt(root, 1, 0);
+    QCOMPARE(arc["type"].toString(), QStringLiteral("arc"));
+    QCOMPARE(arc["startAngle"].toDouble(), 30.0);
+    QCOMPARE(arc["endAngle"].toDouble(), 200.0);
+    QCOMPARE(arc["clockwise"].toBool(), true);
+    const QJsonObject f3 = opAt(root, 1);
+    QCOMPARE(f3["type"].toString(), QStringLiteral("fillet3d"));
+    QCOMPARE(f3["sourceId"].toString(), QStringLiteral("op-1"));
+    QCOMPARE(f3["parameters"].toObject()["radius"].toDouble(), 3.0);
+    const QJsonObject edge = f3["edges"].toArray()[0].toObject();
+    QCOMPARE(edge["curve"].toString(), QStringLiteral("line"));
+    QCOMPARE(edge["normals"].toArray().size(), 2);
+    QCOMPARE(opAt(root, 2)["type"].toString(), QStringLiteral("chamfer3d"));
+    QCOMPARE(opAt(root, 2)["parameters"].toObject()["distance"].toDouble(), 2.0);
+    QVERIFY(!readFile(path).contains("triang"));
+
+    CadDocument doc;
+    const FileResult r = DocumentFile::load(path, doc);
+    QVERIFY2(r.ok, qPrintable(r.message));
+    QCOMPARE(doc.operations().size(), size_t(3));
+    QCOMPARE(doc.activeBodies(), std::vector<std::string>{"op-3"});
+    QVERIFY(qAbs(ShapeInspector::volume(doc.shape()) - ShapeInspector::volume(original.shape())) < 1e-6);
+    QVERIFY(ShapeInspector::isValid(doc.shape()));
+    QCOMPARE(doc.sketches()[0].entities().size(), size_t(3));
+    QCOMPARE(DocumentFile::toJson(doc), DocumentFile::toJson(original));
+    qInfo("volume reconstruido: %.4f", ShapeInspector::volume(doc.shape()));
+}
+
+void TestArquivoCadmec::arquivoE54Esquema5()
+{
+    const QString path = QStringLiteral(CADMEC_TEST_DATA_DIR "/documento_e54_v5.cadmec");
+    const QByteArray original = readFile(path);
+    QCOMPARE(QJsonDocument::fromJson(original).object()["schemaVersion"].toInt(), 5);
+    CadDocument doc;
+    const FileResult r = DocumentFile::load(path, doc);
+    QVERIFY2(r.ok, qPrintable(r.message));
+    QCOMPARE(doc.operations().size(), size_t(3));
+    QCOMPARE(doc.operations()[2].type, OperationType::Boolean);
+    QCOMPARE(doc.solidCount(), 1);
+    QVERIFY(qAbs(ShapeInspector::volume(doc.shape()) - 69710.96) < 0.01);
+    QCOMPARE(readFile(path), original);
+}
+
+void TestArquivoCadmec::rejeitaE55Invalido_data()
+{
+    QTest::addColumn<QByteArray>("content");
+    auto setEntityField = [](QJsonObject& r, int sk, int i, const char* key, const QJsonValue& v) {
+        QJsonObject e = entityAt(r, sk, i);
+        if (v.isUndefined())
+            e.remove(key);
+        else
+            e[key] = v;
+        setEntity(r, sk, i, e);
+    };
+    auto setOpField = [](QJsonObject& r, int i, const char* key, const QJsonValue& v) {
+        QJsonObject o = opAt(r, i);
+        if (v.isUndefined())
+            o.remove(key);
+        else
+            o[key] = v;
+        setOp(r, i, o);
+    };
+    auto setEdgeField = [](QJsonObject& r, int i, const char* key, const QJsonValue& v) {
+        QJsonObject o = opAt(r, i);
+        QJsonArray edges = o["edges"].toArray();
+        QJsonObject e = edges[0].toObject();
+        if (v.isUndefined())
+            e.remove(key);
+        else
+            e[key] = v;
+        edges[0] = e;
+        o["edges"] = edges;
+        setOp(r, i, o);
+    };
+    QTest::newRow("arco no esquema 5") << e55Modified([](QJsonObject& r) {
+        // Só a extrusão permanece: o motivo da recusa é a entidade "arc"/"fillet" no esquema 5.
+        r["schemaVersion"] = 5;
+        QJsonObject d = r["document"].toObject();
+        QJsonArray ops = d["operations"].toArray();
+        while (ops.size() > 1)
+            ops.removeLast();
+        d["operations"] = ops;
+        r["document"] = d; });
+    QTest::newRow("arco varredura nula") << e55Modified([&](QJsonObject& r) { setEntityField(r, 1, 0, "endAngle", 30.0); });
+    QTest::newRow("arco raio zero") << e55Modified([&](QJsonObject& r) { setEntityField(r, 1, 0, "radius", 0.0); });
+    QTest::newRow("arco sentido texto") << e55Modified([&](QJsonObject& r) { setEntityField(r, 1, 0, "clockwise", "sim"); });
+    QTest::newRow("fillet referencia inexistente") << e55Modified([&](QJsonObject& r) {
+        setEntityField(r, 0, 1, "entityA", "e-9");
+        setEntityField(r, 0, 1, "entityB", "e-9"); });
+    QTest::newRow("fillet raio inviavel") << e55Modified([&](QJsonObject& r) { setEntityField(r, 0, 1, "radius", 80.0); });
+    QTest::newRow("fillet canto fracionario") << e55Modified([&](QJsonObject& r) { setEntityField(r, 0, 1, "corner", 1.5); });
+    QTest::newRow("fillet canto fora") << e55Modified([&](QJsonObject& r) { setEntityField(r, 0, 1, "corner", 7); });
+    QTest::newRow("chamfer sem distancia") << e55Modified([&](QJsonObject& r) { setEntityField(r, 0, 2, "distance", QJsonValue(QJsonValue::Undefined)); });
+    QTest::newRow("chamfer mesmo canto do fillet") << e55Modified([&](QJsonObject& r) { setEntityField(r, 0, 2, "corner", 2); });
+    QTest::newRow("fillet3d no esquema 5") << e55Modified([](QJsonObject& r) {
+        r["schemaVersion"] = 5;
+        // Remove as entidades E5.5 para que só a operação seja o problema.
+        QJsonObject d = r["document"].toObject();
+        d["sketches"] = QJsonArray{};
+        r["document"] = d; });
+    QTest::newRow("fillet3d raio zero") << e55Modified([&](QJsonObject& r) {
+        QJsonObject o = opAt(r, 1); o["parameters"] = QJsonObject{{"radius", 0.0}}; setOp(r, 1, o); });
+    QTest::newRow("fillet3d raio excessivo") << e55Modified([&](QJsonObject& r) {
+        QJsonObject o = opAt(r, 1); o["parameters"] = QJsonObject{{"radius", 40.0}}; setOp(r, 1, o); });
+    QTest::newRow("fillet3d sem arestas") << e55Modified([&](QJsonObject& r) { setOpField(r, 1, "edges", QJsonArray{}); });
+    QTest::newRow("fillet3d origem inexistente") << e55Modified([&](QJsonObject& r) { setOpField(r, 1, "sourceId", "op-9"); });
+    QTest::newRow("chamfer3d origem consumida") << e55Modified([&](QJsonObject& r) { setOpField(r, 2, "sourceId", "op-1"); });
+    QTest::newRow("aresta curva invalida") << e55Modified([&](QJsonObject& r) { setEdgeField(r, 1, "curve", "spline"); });
+    QTest::newRow("aresta sem normais") << e55Modified([&](QJsonObject& r) { setEdgeField(r, 1, "normals", QJsonArray{}); });
+    QTest::newRow("aresta campo desconhecido") << e55Modified([&](QJsonObject& r) { setEdgeField(r, 1, "index", 3); });
+    QTest::newRow("aresta nao remapeavel") << e55Modified([&](QJsonObject& r) {
+        // Direção vertical com as normais da aresta superior frontal: nenhuma aresta tem esse papel.
+        setEdgeField(r, 1, "direction", QJsonArray{0.0, 0.0, 1.0}); });
+    QTest::newRow("aresta ponto medio nao numerico") << e55Modified([&](QJsonObject& r) { setEdgeField(r, 1, "mid", QJsonArray{1.0, "x", 0.0}); });
+}
+
+void TestArquivoCadmec::rejeitaE55Invalido()
+{
+    QFETCH(QByteArray, content);
+    CadDocument active = documentE55();
+    const TopoDS_Shape before = active.shape();
+    const FileResult r = DocumentFile::fromJson(content, active);
+    qInfo("%s -> %s", QTest::currentDataTag(), qPrintable(r.message));
+    QVERIFY(!r.ok);
+    QVERIFY(!r.message.isEmpty());
+    QVERIFY(active.shape().IsSame(before));
+    QCOMPARE(active.operations().size(), size_t(3));
 }
 
 QTEST_GUILESS_MAIN(TestArquivoCadmec)

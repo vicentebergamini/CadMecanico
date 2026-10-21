@@ -9,10 +9,14 @@
 // pode ser consumido uma vez e só por uma operação posterior (a ordem da lista impede ciclos).
 // O resultado do documento são os corpos ativos (não consumidos): o sólido único ou um
 // TopoDS_Compound com os corpos lado a lado (sem união implícita).
+// Fillet 3D e Chamfer 3D (E5.5B) também consomem o corpo de origem e referenciam as arestas por
+// assinaturas geométricas persistentes (EdgeNaming), remapeadas a cada reconstrução; aresta não
+// identificável com segurança invalida a operação (a alteração que a causou é recusada).
 // Toda alteração recalcula as operações em ordem de dependência numa cópia; o documento só muda
 // se tudo for válido.
 #pragma once
 
+#include "modeling/EdgeNaming.h"
 #include "modeling/Features.h"
 #include "sketch/Sketch.h"
 
@@ -47,7 +51,9 @@ enum class OperationType
     Block,       // bloco base
     ThroughHole, // furo passante
     Extrude,     // extrusão de esboço (E5.3)
-    Boolean      // união, subtração ou interseção de dois corpos (E5.4)
+    Boolean,     // união, subtração ou interseção de dois corpos (E5.4)
+    Fillet3D,    // arredondamento de arestas de um corpo (E5.5B)
+    Chamfer3D    // chanfro simétrico de arestas de um corpo (E5.5B)
 };
 
 using cad::modeling::BooleanKind;
@@ -83,6 +89,11 @@ struct Operation
     std::string operandA;
     std::string operandB;
 
+    // Fillet 3D / Chamfer 3D: corpo de origem (consumido) e arestas (assinaturas persistentes,
+    // ver EdgeNaming). Parâmetro "radius" ou "distance".
+    std::string sourceId;
+    std::vector<cad::modeling::EdgeSignature> edges;
+
     // Geometria resultante da operação (calculada; não persistida).
     TopoDS_Shape result;
     // Operação posterior que consome este corpo (calculado; vazio = corpo ativo).
@@ -108,6 +119,15 @@ struct BooleanParameters
     BooleanKind kind = BooleanKind::Fuse;
     std::string operandA;
     std::string operandB;
+};
+
+// Parâmetros de Fillet 3D (value = raio) ou Chamfer 3D (value = distância).
+struct FinishParameters
+{
+    std::string name;     // vazio = nome padrão ("Fillet 3D N", "Chamfer 3D N")
+    std::string sourceId; // corpo de origem
+    double value = 1.0;   // mm, > 0
+    std::vector<cad::modeling::EdgeSignature> edges;
 };
 
 struct ValidationResult
@@ -151,7 +171,8 @@ public:
         std::string blockId = "op-1";
         std::string holeId = "op-2";
         // Operações após a peça, em ordem: id, tipo, nome e campos de definição (extrusão:
-        // sketchId/reversed/"depth"; booleana: booleanKind/operandA/operandB).
+        // sketchId/reversed/"depth"; booleana: booleanKind/operandA/operandB; acabamento 3D:
+        // sourceId/edges/"radius" ou "distance").
         std::vector<Operation> features;
         std::vector<cad::sketch::Sketch> sketches;
         int nextSketchNumber = 1;
@@ -216,6 +237,21 @@ public:
     BooleanParameters booleanParameters(const std::string& id) const;
     std::string defaultBooleanName(BooleanKind kind) const;
 
+    // --- Acabamentos 3D (E5.5B) ---------------------------------------------------
+    // Assinaturas das arestas (do corpo ativo 'bodyId') para usar em FinishParameters.
+    std::vector<cad::modeling::EdgeSignature> edgeSignatures(const std::string& bodyId,
+                                                            const std::vector<TopoDS_Edge>& edges) const;
+    // Corpo ativo que contém a aresta (vazio se nenhum).
+    std::string bodyContaining(const TopoDS_Shape& edge) const;
+    cad::modeling::FeatureResult previewFinish(OperationType type, const FinishParameters& parameters) const;
+    ValidationResult addFinish(OperationType type, const FinishParameters& parameters, std::string* newId = nullptr);
+    // Altera valor, arestas e nome (o tipo e o corpo de origem são mantidos).
+    ValidationResult updateFinish(const std::string& id, const FinishParameters& parameters);
+    FinishParameters finishParameters(const std::string& id) const;
+    std::string defaultFinishName(OperationType type) const;
+    // Arestas atuais do corpo de origem correspondentes às referências da operação.
+    std::vector<TopoDS_Edge> resolvedFinishEdges(const std::string& id) const;
+
     // Geometria resultante do último recálculo válido (nula em documento sem sólidos).
     const TopoDS_Shape& shape() const { return m_shape; }
 
@@ -245,6 +281,11 @@ private:
                                                  const std::string& holeId);
     static Operation makeExtrusion(const std::string& id, const ExtrudeParameters& parameters);
     static Operation makeBoolean(const std::string& id, const BooleanParameters& parameters);
+    static Operation makeFinish(const std::string& id, OperationType type, const FinishParameters& parameters);
+    // Calcula um acabamento a partir do sólido de origem e das assinaturas (atualizadas para as
+    // arestas encontradas).
+    static cad::modeling::FeatureResult computeFinish(OperationType type, const TopoDS_Shape& source, double value,
+                                                      std::vector<cad::modeling::EdgeSignature>& edges);
     // Referências entre operações: operandos existentes, anteriores, de corpos, distintos e
     // consumidos uma única vez. Preenche consumedBy.
     static bool checkReferences(std::vector<Operation>& operations, std::string& error);

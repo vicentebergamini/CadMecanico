@@ -8,6 +8,7 @@
 #include <QMap>
 
 class QDialogButtonBox;
+class QCheckBox;
 class QDoubleSpinBox;
 class QLabel;
 
@@ -33,6 +34,7 @@ private:
     cad::sketch::SketchEntity m_entity;
     QMap<QString, QDoubleSpinBox*> m_fields;
     QMap<QString, QLabel*> m_computed;
+    QMap<QString, QCheckBox*> m_flags;
     QLabel* m_message = nullptr;
     QDialogButtonBox* m_buttons = nullptr;
 };

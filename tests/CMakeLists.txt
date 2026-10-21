@@ -32,7 +32,15 @@ add_executable(test_booleanas test_booleanas.cpp TestCheck.h)
 target_link_libraries(test_booleanas PRIVATE cad_document cad_io)
 add_test(NAME booleanas COMMAND test_booleanas)
 
-set_tests_properties(geometria step_roundtrip selecao_info documento esboco extrusao stl booleanas PROPERTIES LABELS "core")
+add_executable(test_arcos_cantos2d test_arcos_cantos2d.cpp TestCheck.h)
+target_link_libraries(test_arcos_cantos2d PRIVATE cad_document)
+add_test(NAME arcos_cantos2d COMMAND test_arcos_cantos2d)
+
+add_executable(test_acabamentos3d test_acabamentos3d.cpp TestCheck.h)
+target_link_libraries(test_acabamentos3d PRIVATE cad_document cad_io)
+add_test(NAME acabamentos3d COMMAND test_acabamentos3d)
+
+set_tests_properties(geometria step_roundtrip selecao_info documento esboco extrusao stl booleanas arcos_cantos2d acabamentos3d PROPERTIES LABELS "core")
 
 # Formato .cadmec (QtCore, sem interface gráfica).
 qt_add_executable(test_arquivo_cadmec test_arquivo_cadmec.cpp)
@@ -96,6 +104,10 @@ qt_add_executable(test_booleanas_ui test_booleanas_ui.cpp ViewerTestUtils.h StlT
 set_target_properties(test_booleanas_ui PROPERTIES AUTOMOC ON WIN32_EXECUTABLE OFF)
 target_link_libraries(test_booleanas_ui PRIVATE cad_app cad_viewer cad_document_io cad_io cad_modeling Qt6::Test)
 
+qt_add_executable(test_e55_ui test_e55_ui.cpp ViewerTestUtils.h StlTestUtils.h)
+set_target_properties(test_e55_ui PROPERTIES AUTOMOC ON WIN32_EXECUTABLE OFF)
+target_link_libraries(test_e55_ui PRIVATE cad_app cad_viewer cad_document_io cad_io cad_modeling Qt6::Test)
+
 add_test(NAME viewer COMMAND test_viewer)
 add_test(NAME viewer_escala COMMAND test_viewer)
 add_test(NAME app_viewer COMMAND test_app_viewer)
@@ -106,9 +118,10 @@ add_test(NAME esboco_ui_escala COMMAND test_esboco_ui)
 add_test(NAME documento_vazio COMMAND test_documento_vazio)
 add_test(NAME extrusao_ui COMMAND test_extrusao_ui)
 add_test(NAME booleanas_ui COMMAND test_booleanas_ui)
+add_test(NAME e55_ui COMMAND test_e55_ui)
 
 set(_cad_gl_env "QT_QPA_PLATFORM=windows;QT_PLUGIN_PATH=${QT6_INSTALL_PREFIX}/${QT6_INSTALL_PLUGINS}")
-set_tests_properties(viewer app_viewer interacao esboco_ui documento_vazio extrusao_ui booleanas_ui PROPERTIES
+set_tests_properties(viewer app_viewer interacao esboco_ui documento_vazio extrusao_ui booleanas_ui e55_ui PROPERTIES
     LABELS "gui;opengl"
     TIMEOUT 300
     ENVIRONMENT "${_cad_gl_env}"

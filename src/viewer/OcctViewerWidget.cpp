@@ -31,7 +31,12 @@
 #include <Geom_Axis2Placement.hxx>
 #include <Prs3d_DatumParts.hxx>
 #include <BRepBuilderAPI_MakeEdge.hxx>
+#include <BRep_Builder.hxx>
+#include <TopoDS_Compound.hxx>
 #include <Quantity_Color.hxx>
+#include <SelectMgr_Selection.hxx>
+#include <SelectMgr_SensitiveEntity.hxx>
+#include <Select3D_SensitiveEntity.hxx>
 #include <StdSelect_BRepOwner.hxx>
 
 #include "modeling/ShapeInspector.h"
@@ -107,12 +112,20 @@ cad::sketch::SketchGeometry snapGeometry(cad::sketch::SketchGeometry g)
         r->width = snapValue(r->width);
         r->height = snapValue(r->height);
     }
-    else
+    else if (auto* c = std::get_if<cad::sketch::SketchCircle>(&g))
     {
-        auto& c = std::get<cad::sketch::SketchCircle>(g);
-        c.cx = snapValue(c.cx);
-        c.cy = snapValue(c.cy);
-        c.radius = snapValue(c.radius);
+        c->cx = snapValue(c->cx);
+        c->cy = snapValue(c->cy);
+        c->radius = snapValue(c->radius);
+    }
+    else if (auto* a = std::get_if<cad::sketch::SketchArc>(&g))
+    {
+        // Centro e raio a 0,1 mm; ângulos a 0,1°.
+        a->cx = snapValue(a->cx);
+        a->cy = snapValue(a->cy);
+        a->radius = snapValue(a->radius);
+        a->startAngle = snapValue(a->startAngle);
+        a->endAngle = snapValue(a->endAngle);
     }
     return g;
 }
@@ -420,8 +433,7 @@ void OcctViewerWidget::setShape(const TopoDS_Shape& shape)
     // Seleção de faces, arestas e vértices (a peça inteira não é selecionável). O objeto
     // precisa ser exibido já com um modo de seleção: com -1 ele não é carregado no seletor.
     m_context->Display(m_shape, AIS_Shaded, AIS_Shape::SelectionMode(TopAbs_FACE), false);
-    for (TopAbs_ShapeEnum type : {TopAbs_EDGE, TopAbs_VERTEX})
-        m_context->Activate(m_shape, AIS_Shape::SelectionMode(type));
+    activateSelectionModes();
     if (isSketchMode())
         m_context->Erase(m_shape, false); // oculto durante a edição do esboço
 
@@ -441,6 +453,75 @@ QList<TopoDS_Shape> OcctViewerWidget::selectedShapes() const
             shapes << owner->Shape();
     }
     return shapes;
+}
+
+void OcctViewerWidget::activateSelectionModes()
+{
+    if (m_shape.IsNull() || m_context.IsNull())
+        return;
+    // A peça é exibida com o modo de faces; os demais são ativados conforme o modo atual.
+    for (TopAbs_ShapeEnum type : {TopAbs_FACE, TopAbs_EDGE, TopAbs_VERTEX})
+    {
+        const int mode = AIS_Shape::SelectionMode(type);
+        if (m_edgesOnly && type != TopAbs_EDGE)
+            m_context->Deactivate(m_shape, mode);
+        else
+            m_context->Activate(m_shape, mode);
+    }
+}
+
+void OcctViewerWidget::setEdgeSelectionMode(bool edgesOnly)
+{
+    if (m_edgesOnly == edgesOnly)
+        return;
+    m_edgesOnly = edgesOnly;
+    if (m_context.IsNull())
+        return;
+    if (edgesOnly)
+    {
+        // Mantém apenas as arestas já selecionadas.
+        QList<TopoDS_Shape> edges;
+        for (const TopoDS_Shape& s : selectedShapes())
+            if (s.ShapeType() == TopAbs_EDGE)
+                edges << s;
+        activateSelectionModes();
+        selectSubShapes(edges);
+    }
+    else
+    {
+        activateSelectionModes();
+    }
+    m_context->ClearDetected(false);
+    ResetPreviousMoveTo();
+    redrawScene();
+    emit selectionChanged();
+}
+
+void OcctViewerWidget::selectSubShapes(const QList<TopoDS_Shape>& shapes)
+{
+    if (m_context.IsNull() || m_shape.IsNull())
+        return;
+    m_context->ClearSelected(false);
+    for (const TopoDS_Shape& target : shapes)
+    {
+        const int mode = AIS_Shape::SelectionMode(target.ShapeType());
+        const occ::handle<SelectMgr_Selection>& selection = m_shape->Selection(mode);
+        if (selection.IsNull())
+            continue;
+        for (const occ::handle<SelectMgr_SensitiveEntity>& entity : selection->Entities())
+        {
+            const occ::handle<StdSelect_BRepOwner> owner =
+                occ::down_cast<StdSelect_BRepOwner>(entity->BaseSensitive()->OwnerId());
+            if (!owner.IsNull() && owner->Shape().IsSame(target))
+            {
+                if (!m_context->IsSelected(owner))
+                    m_context->AddOrRemoveSelected(owner, false);
+                break;
+            }
+        }
+    }
+    redrawScene();
+    emit selectionChanged();
 }
 
 void OcctViewerWidget::clearSelection()
@@ -829,6 +910,7 @@ void OcctViewerWidget::enterSketchMode(const cad::sketch::Sketch& sketch)
     m_sketchPlane = sketch.plane();
     m_sketchTool = SketchTool::Select;
     m_pendingPoint.reset();
+    m_arcStart.reset();
 
     // Somente o esboço ativo: sólidos, outros esboços, eixos globais e ViewCube ficam ocultos
     // (sem rotação no esboço) e voltam em exitSketchMode().
@@ -886,12 +968,13 @@ void OcctViewerWidget::updateEditingSketch(const cad::sketch::Sketch& sketch, co
     if (!isSketchMode())
         return;
     clearEditShapes();
-    for (const cad::sketch::SketchEntity& e : sketch.entities())
+    // Geometria resolvida: lados recortados por fillets/chanfros e o arco/segmento de cada
+    // modificador como objeto próprio (selecionável).
+    for (const auto& [entityId, shape] : cad::sketch::buildResolvedShapes(sketch))
     {
-        const TopoDS_Shape shape = cad::sketch::buildEntityShape(*m_sketchPlane, e);
         if (shape.IsNull())
             continue;
-        const QString id = QString::fromStdString(e.id);
+        const QString id = QString::fromStdString(entityId);
         occ::handle<AIS_Shape> prs = new AIS_Shape(shape);
         const bool selected = id == selectedEntityId;
         prs->SetColor(selected ? kSelectionColor : kSketchEditColor);
@@ -921,6 +1004,7 @@ void OcctViewerWidget::exitSketchMode()
     m_sketchDecorations.clear();
     m_sketchPlane.reset();
     m_pendingPoint.reset();
+    m_arcStart.reset();
     m_leftPressed = false;
     m_sketchTool = SketchTool::Select;
 
@@ -928,8 +1012,7 @@ void OcctViewerWidget::exitSketchMode()
     if (!m_shape.IsNull())
     {
         m_context->Display(m_shape, AIS_Shaded, AIS_Shape::SelectionMode(TopAbs_FACE), false);
-        for (TopAbs_ShapeEnum type : {TopAbs_EDGE, TopAbs_VERTEX})
-            m_context->Activate(m_shape, AIS_Shape::SelectionMode(type));
+        activateSelectionModes();
     }
     for (const auto& s : m_documentSketchShapes)
     {
@@ -949,9 +1032,25 @@ void OcctViewerWidget::setSketchTool(SketchTool tool)
     cancelSketchInput();
 }
 
+void OcctViewerWidget::setArcClockwise(bool clockwise)
+{
+    m_arcClockwise = clockwise;
+    if (m_pendingPoint && m_arcStart)
+        redrawScene();
+}
+
+double OcctViewerWidget::sketchDistanceForPixels(double pixels) const
+{
+    const QPointF c(width() / 2.0, height() / 2.0);
+    const auto a = rawSketchPointAt(c);
+    const auto b = rawSketchPointAt(c + QPointF(pixels, 0.0));
+    return a && b ? a->Distance(*b) : 0.0;
+}
+
 void OcctViewerWidget::cancelSketchInput()
 {
     m_pendingPoint.reset();
+    m_arcStart.reset();
     removePreview();
     redrawScene();
 }
@@ -962,6 +1061,14 @@ occ::handle<AIS_Shape> OcctViewerWidget::sketchEntityPresentation(const QString&
 }
 
 std::optional<gp_Pnt2d> OcctViewerWidget::sketchPointAt(const QPointF& logicalPos) const
+{
+    const auto p = rawSketchPointAt(logicalPos);
+    if (!p)
+        return std::nullopt;
+    return gp_Pnt2d(snapValue(p->X()), snapValue(p->Y()));
+}
+
+std::optional<gp_Pnt2d> OcctViewerWidget::rawSketchPointAt(const QPointF& logicalPos) const
 {
     if (!isSketchMode() || !m_initialized || m_view.IsNull())
         return std::nullopt;
@@ -975,8 +1082,7 @@ std::optional<gp_Pnt2d> OcctViewerWidget::sketchPointAt(const QPointF& logicalPo
     if (std::fabs(denom) < 1e-9)
         return std::nullopt;
     const double t = -m_sketchPlane->distance(origin) / denom;
-    const gp_Pnt2d local = m_sketchPlane->toLocal(origin.Translated(ray * t));
-    return gp_Pnt2d(snapValue(local.X()), snapValue(local.Y()));
+    return m_sketchPlane->toLocal(origin.Translated(ray * t));
 }
 
 void OcctViewerWidget::removePreview()
@@ -996,6 +1102,44 @@ void OcctViewerWidget::updatePreview(const gp_Pnt2d& current)
         return;
     const gp_Pnt2d& a = *m_pendingPoint;
     cad::sketch::SketchEntity e;
+    if (m_sketchTool == SketchTool::Arc)
+    {
+        // Antes do ponto inicial: circunferência e raio até o cursor. Depois: arco do ponto
+        // inicial até a projeção do cursor na circunferência, com o raio auxiliar até ela.
+        BRep_Builder builder;
+        TopoDS_Compound compound;
+        builder.MakeCompound(compound);
+        const double r = m_arcStart ? a.Distance(*m_arcStart) : a.Distance(current);
+        if (r < cad::sketch::kMinSize)
+            return;
+        gp_Pnt2d endPoint = current;
+        if (m_arcStart)
+        {
+            const auto arc = cad::sketch::SketchArc::fromCenterStartEnd(a, *m_arcStart, current, m_arcClockwise);
+            cad::sketch::SketchEntity ae;
+            ae.geometry = arc;
+            const TopoDS_Shape arcShape = cad::sketch::buildEntityShape(*m_sketchPlane, ae);
+            if (!arcShape.IsNull())
+                builder.Add(compound, arcShape);
+            endPoint = arc.endPoint();
+        }
+        else
+        {
+            e.geometry = cad::sketch::SketchCircle{a.X(), a.Y(), r};
+            const TopoDS_Shape circle = cad::sketch::buildEntityShape(*m_sketchPlane, e);
+            if (!circle.IsNull())
+                builder.Add(compound, circle);
+        }
+        if (a.Distance(endPoint) > 1e-9)
+            builder.Add(compound, BRepBuilderAPI_MakeEdge(m_sketchPlane->toGlobal(a), m_sketchPlane->toGlobal(endPoint)).Edge());
+        m_preview = new AIS_Shape(compound);
+        m_preview->SetColor(kSketchPreviewColor);
+        m_preview->SetWidth(1.0);
+        m_context->Display(m_preview, AIS_WireFrame, -1, false);
+        m_context->SetZLayer(m_preview, Graphic3d_ZLayerId_Topmost);
+        m_view->Invalidate();
+        return;
+    }
     switch (m_sketchTool)
     {
     case SketchTool::Line:
@@ -1007,7 +1151,7 @@ void OcctViewerWidget::updatePreview(const gp_Pnt2d& current)
     case SketchTool::Circle:
         e.geometry = cad::sketch::SketchCircle{a.X(), a.Y(), a.Distance(current)};
         break;
-    case SketchTool::Select:
+    default:
         return;
     }
     const TopoDS_Shape shape = cad::sketch::buildEntityShape(*m_sketchPlane, e);
@@ -1041,6 +1185,14 @@ void OcctViewerWidget::handleSketchClick(const QPointF& pos)
         return;
     }
 
+    if (m_sketchTool == SketchTool::Fillet2D || m_sketchTool == SketchTool::Chamfer2D)
+    {
+        if (const auto raw = rawSketchPointAt(pos))
+            emit sketchCornerPicked(m_sketchTool, raw->X(), raw->Y(), sketchDistanceForPixels(10.0));
+        updateView();
+        return;
+    }
+
     const auto p = sketchPointAt(pos);
     if (!p)
         return;
@@ -1051,6 +1203,23 @@ void OcctViewerWidget::handleSketchClick(const QPointF& pos)
         return;
     }
     const gp_Pnt2d a = *m_pendingPoint;
+    if (m_sketchTool == SketchTool::Arc)
+    {
+        if (!m_arcStart)
+        {
+            if (a.Distance(*p) >= cad::sketch::kMinSize)
+                m_arcStart = *p; // raio definido; falta o ponto final
+            updateView();
+            return;
+        }
+        const auto arc = cad::sketch::SketchArc::fromCenterStartEnd(a, *m_arcStart, *p, m_arcClockwise);
+        m_pendingPoint.reset();
+        m_arcStart.reset();
+        removePreview();
+        emit sketchGeometryRequested(snapGeometry(arc));
+        updateView();
+        return;
+    }
     cad::sketch::SketchGeometry geometry;
     switch (m_sketchTool)
     {
@@ -1063,7 +1232,7 @@ void OcctViewerWidget::handleSketchClick(const QPointF& pos)
     case SketchTool::Circle:
         geometry = cad::sketch::SketchCircle{a.X(), a.Y(), a.Distance(*p)};
         break;
-    case SketchTool::Select:
+    default:
         return;
     }
     m_pendingPoint.reset();

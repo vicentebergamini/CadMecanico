@@ -38,7 +38,10 @@ enum class SketchTool
     Select,
     Line,
     Rectangle,
-    Circle
+    Circle,
+    Arc,      // E5.5: centro -> ponto inicial -> ponto final
+    Fillet2D, // E5.5: clique em um canto
+    Chamfer2D // E5.5: clique em um canto
 };
 
 // Navegação: botão central gira, Ctrl + botão central desloca, roda aproxima no cursor,
@@ -48,8 +51,11 @@ enum class SketchTool
 // sólidos, outros esboços e eixos globais ficam ocultos até sair do modo.
 //   Botão esquerdo: ferramenta ativa. Selecionar = clique sobre uma entidade 2D; Linha e
 //   Retângulo = clique no primeiro ponto e clique no segundo (pré-visualização entre eles);
-//   Círculo = clique no centro e clique em um ponto da circunferência. Esc cancela o ponto
-//   pendente. Botão central (com ou sem Ctrl) desloca; roda aproxima no cursor; F ajusta.
+//   Círculo = clique no centro e clique em um ponto da circunferência. Arco (E5.5) = clique no
+//   centro, no ponto inicial (define o raio) e no ponto final (projetado na circunferência,
+//   indicado por um raio auxiliar), no sentido escolhido em setArcClockwise (anti-horário por
+//   padrão). Fillet 2D / Chamfer 2D = clique perto de um canto (sketchCornerPicked). Esc cancela
+//   os pontos pendentes. Botão central (com ou sem Ctrl) desloca; roda aproxima no cursor; F ajusta.
 //   Somente o esboço ativo e seus eixos locais H/V são exibidos.
 class OcctViewerWidget : public QOpenGLWidget, public AIS_ViewController
 {
@@ -65,6 +71,14 @@ public:
 
     // Sub-shapes (faces, arestas, vértices) da peça atualmente selecionados.
     QList<TopoDS_Shape> selectedShapes() const;
+    // Seleciona exatamente as sub-shapes dadas (pertencentes à peça exibida).
+    void selectSubShapes(const QList<TopoDS_Shape>& shapes);
+
+    // Modo de seleção somente de arestas (Fillet 3D / Chamfer 3D, E5.5B): faces e vértices
+    // deixam de ser selecionáveis e seleções que não sejam arestas são descartadas. Ao desligar,
+    // os modos de face, aresta e vértice anteriores são restaurados.
+    void setEdgeSelectionMode(bool edgesOnly);
+    bool edgeSelectionMode() const { return m_edgesOnly; }
 
     // true após a criação bem-sucedida do contexto OpenGL e da janela OCCT.
     bool isViewerInitialized() const { return m_initialized; }
@@ -108,6 +122,11 @@ public:
     bool isSketchMode() const { return m_sketchPlane.has_value(); }
     void setSketchTool(SketchTool tool);
     SketchTool sketchTool() const { return m_sketchTool; }
+    // Sentido dos arcos criados com o mouse (false = anti-horário).
+    void setArcClockwise(bool clockwise);
+    bool arcClockwise() const { return m_arcClockwise; }
+    // Distância no plano do esboço (mm) correspondente a 'pixels' lógicos na tela.
+    double sketchDistanceForPixels(double pixels) const;
     // Ponto do plano do esboço sob a posição lógica do mouse (coordenadas locais, mm,
     // arredondadas a 0,1 mm). Vazio fora do modo de esboço.
     std::optional<gp_Pnt2d> sketchPointAt(const QPointF& logicalPos) const;
@@ -132,6 +151,9 @@ signals:
     void sketchGeometryRequested(const cad::sketch::SketchGeometry& geometry);
     // Clique com a ferramenta Selecionar: id da entidade ou vazio (clique fora das entidades).
     void sketchEntityClicked(const QString& entityId);
+    // Clique com Fillet 2D / Chamfer 2D: ponto local (mm, sem arredondamento) e tolerância de
+    // proximidade do canto (mm).
+    void sketchCornerPicked(cad::viewer::SketchTool tool, double u, double v, double tolerance);
 
 protected:
     void initializeGL() override;
@@ -169,6 +191,8 @@ private:
     void updatePreview(const gp_Pnt2d& current);
     void removePreview();
     void handleSketchClick(const QPointF& pos);
+    // Ponto local sob o mouse, sem arredondamento.
+    std::optional<gp_Pnt2d> rawSketchPointAt(const QPointF& logicalPos) const;
 
     occ::handle<V3d_Viewer> m_viewer;
     occ::handle<V3d_View> m_view;
@@ -195,8 +219,13 @@ private:
     std::optional<cad::sketch::SketchPlane> m_sketchPlane;
     SketchTool m_sketchTool = SketchTool::Select;
     std::optional<gp_Pnt2d> m_pendingPoint;
+    std::optional<gp_Pnt2d> m_arcStart; // arco: ponto inicial já definido (centro = m_pendingPoint)
+    bool m_arcClockwise = false;
     QPointF m_leftPressPos;
     bool m_leftPressed = false;
+    bool m_edgesOnly = false;
+    // Ativa no objeto da peça os modos de seleção correspondentes ao modo atual.
+    void activateSelectionModes();
 };
 
 } // namespace cad::viewer

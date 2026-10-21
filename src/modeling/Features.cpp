@@ -5,6 +5,9 @@
 #include <BRepAlgoAPI_Common.hxx>
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepAlgoAPI_Fuse.hxx>
+#include <BRepFilletAPI_MakeChamfer.hxx>
+#include <BRepFilletAPI_MakeFillet.hxx>
+#include "modeling/EdgeNaming.h"
 #include <BRep_Builder.hxx>
 #include <TopoDS_Compound.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
@@ -290,6 +293,95 @@ FeatureResult booleanOperation(BooleanKind kind, const TopoDS_Shape& a, const To
     }
     r.ok = true;
     return r;
+}
+
+namespace {
+
+template <typename Builder, typename AddFn>
+FeatureResult finishEdges(const TopoDS_Shape& solid, const std::vector<TopoDS_Edge>& edges, double value,
+                          const char* what, const char* valueLabel, AddFn add)
+{
+    FeatureResult r;
+    if (!std::isfinite(value))
+    {
+        r.message = std::string(valueLabel) + ": valor não numérico";
+        return r;
+    }
+    if (value <= 0.0)
+    {
+        r.message = std::string(valueLabel) + " deve ser maior que zero";
+        return r;
+    }
+    if (solid.IsNull() || countSolids(solid) == 0)
+    {
+        r.message = std::string(what) + " sem sólido de origem";
+        return r;
+    }
+    if (edges.empty())
+    {
+        r.message = std::string(what) + ": selecione pelo menos uma aresta";
+        return r;
+    }
+    for (const TopoDS_Edge& e : edges)
+        if (!containsEdge(solid, e))
+        {
+            r.message = std::string(what) + ": aresta não pertence ao sólido de origem";
+            return r;
+        }
+    const double before = ShapeInspector::volume(solid);
+    try
+    {
+        Builder builder(solid);
+        for (const TopoDS_Edge& e : edges)
+            add(builder, e);
+        builder.Build();
+        if (!builder.IsDone())
+        {
+            r.message = std::string(valueLabel) + " inviável para as arestas selecionadas (o " + what
+                        + " não pôde ser construído)";
+            return r;
+        }
+        r.shape = builder.Shape();
+    }
+    catch (const Standard_Failure& e)
+    {
+        r.message = std::string(valueLabel) + " inviável para as arestas selecionadas: " + e.what();
+        return r;
+    }
+    if (countSolids(r.shape) != countSolids(solid))
+    {
+        r.message = std::string(what) + " alterou o número de sólidos (geometria inviável)";
+        return r;
+    }
+    if (!ShapeInspector::isValid(r.shape))
+    {
+        r.message = std::string(what) + " produziu topologia inválida (BRepCheck): " + valueLabel + " inviável";
+        return r;
+    }
+    const double after = ShapeInspector::volume(r.shape);
+    if (after <= 0.0 || after >= before)
+    {
+        r.message = std::string(what) + " sem remoção de material (geometria inviável)";
+        return r;
+    }
+    r.ok = true;
+    return r;
+}
+
+} // namespace
+
+FeatureResult filletEdges(const TopoDS_Shape& solid, const std::vector<TopoDS_Edge>& edges, double radius)
+{
+    return finishEdges<BRepFilletAPI_MakeFillet>(solid, edges, radius, "fillet 3D", "Raio",
+                                                 [radius](BRepFilletAPI_MakeFillet& b, const TopoDS_Edge& e) { b.Add(radius, e); });
+}
+
+FeatureResult chamferEdges(const TopoDS_Shape& solid, const std::vector<TopoDS_Edge>& edges, double distance)
+{
+    return finishEdges<BRepFilletAPI_MakeChamfer>(solid, edges, distance, "chanfro 3D", "Distância",
+                                                  [distance](BRepFilletAPI_MakeChamfer& b, const TopoDS_Edge& e) {
+                                                      b.Add(distance, e);
+                                                  });
 }
 
 } // namespace cad::modeling

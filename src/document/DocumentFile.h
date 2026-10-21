@@ -49,7 +49,21 @@
 // (permanecem no histórico, mas não são exibidos nem exportados); cada corpo só pode ser
 // consumido uma vez e só por uma operação posterior.
 //
-// Arquivos das versões 1 a 4 continuam sendo lidos sem alteração; a gravação usa sempre a
+// Esquema versão 6 (E5.5): entidades de esboço novas —
+//     { "id": "e-4", "type": "arc", "cx": 0, "cy": 0, "radius": 10, "startAngle": 0,
+//       "endAngle": 90, "clockwise": false }                        (ângulos em graus)
+//     { "id": "e-5", "type": "fillet",  "entityA": "e-1", "entityB": "e-1", "corner": 2, "radius": 10 }
+//     { "id": "e-6", "type": "chamfer", "entityA": "e-2", "entityB": "e-3", "corner": -1, "distance": 5 }
+// (modificador de canto: retângulo = mesma entidade e índice do canto; duas linhas = canto -1)
+// e operações de acabamento 3D, que consomem o corpo de origem:
+//     { "id": "op-4", "type": "fillet3d", "name": "Fillet 3D 1", "sourceId": "op-3",
+//       "parameters": { "radius": 3 },            ("chamfer3d": { "distance": 2 })
+//       "edges": [ { "curve": "line", "mid": [50, 0, 20], "direction": [1, 0, 0],
+//                    "length": 100, "radius": 0, "normals": [[0, -1, 0], [0, 0, 1]] } ] }
+// Cada aresta é guardada pela assinatura geométrica (EdgeNaming) e remapeada ao abrir; aresta
+// não identificável com segurança torna o arquivo inválido (a operação não é aplicada).
+//
+// Arquivos das versões 1 a 5 continuam sendo lidos sem alteração; a gravação usa sempre a
 // versão atual.
 #pragma once
 
@@ -69,7 +83,7 @@ struct FileResult
 class DocumentFile
 {
 public:
-    static constexpr int kSchemaVersion = 5;
+    static constexpr int kSchemaVersion = 6;
     static constexpr qint64 kMaxFileSize = 4 * 1024 * 1024;
     static constexpr const char* kFormat = "cadmec";
     static constexpr const char* kExtension = "cadmec";

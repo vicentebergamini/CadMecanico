@@ -1,6 +1,13 @@
 // Entidades geométricas 2D dos esboços (coordenadas locais do plano, em mm) e dimensões
 // editáveis. Sem dependência de Qt. Não há solucionador de restrições: cada dimensão edita
 // diretamente o parâmetro correspondente da entidade.
+//
+// E5.5: arco circular exato (centro, raio, ângulos inicial e final em graus no sistema local,
+// sentido anti-horário ou horário) e os modificadores de canto Fillet 2D e Chamfer 2D. Um
+// modificador referencia dois lados retos que se encontram num canto (duas linhas com uma
+// extremidade comum, ou um canto de retângulo) e guarda só o raio/distância: os lados
+// continuam com a geometria original no esboço e são recortados ao resolver o esboço
+// (SketchResolver), de modo que o raio ou a distância podem ser editados depois.
 #pragma once
 
 #include <array>
@@ -16,12 +23,17 @@ namespace cad::sketch {
 inline constexpr double kMaxCoordinate = 10000.0; // |coordenada| máxima (mm)
 inline constexpr double kMinSize = 0.01;          // comprimento, lado ou raio mínimo (mm)
 inline constexpr double kMaxSize = 20000.0;
+inline constexpr double kMinArcSweep = 0.1;     // varredura mínima do arco (graus)
+inline constexpr double kMaxAngle = 720.0;      // |ângulo| máximo aceito (graus)
 
 enum class EntityType
 {
     Line,
     Rectangle,
-    Circle
+    Circle,
+    Arc,     // E5.5
+    Fillet,  // E5.5: arredondamento de canto
+    Chamfer  // E5.5: chanfro simétrico de canto
 };
 
 struct SketchLine
@@ -50,7 +62,60 @@ struct SketchCircle
     double diameter() const { return 2.0 * radius; }
 };
 
-using SketchGeometry = std::variant<SketchLine, SketchRectangle, SketchCircle>;
+// Arco circular: centro, raio e ângulos (graus, medidos a partir do eixo horizontal local, no
+// sentido anti-horário). O arco vai de startAngle a endAngle no sentido indicado: anti-horário
+// (clockwise = false, padrão) ou horário. A varredura é sempre menor que 360° (circunferência
+// completa = SketchCircle).
+struct SketchArc
+{
+    double cx = 0.0, cy = 0.0, radius = 0.0;
+    double startAngle = 0.0, endAngle = 90.0;
+    bool clockwise = false;
+
+    // Varredura no sentido de percurso, em graus, no intervalo [0, 360).
+    double sweep() const;
+    // Varredura com sinal em radianos (positiva = anti-horária).
+    double signedSweepRadians() const;
+    double length() const;
+    gp_Pnt2d pointAt(double t) const; // t em [0, 1] ao longo do percurso
+    gp_Pnt2d startPoint() const { return pointAt(0.0); }
+    gp_Pnt2d endPoint() const { return pointAt(1.0); }
+
+    // Centro -> ponto inicial (define o raio) -> ponto final (projetado na circunferência).
+    static SketchArc fromCenterStartEnd(const gp_Pnt2d& center, const gp_Pnt2d& start, const gp_Pnt2d& end,
+                                        bool clockwise);
+};
+
+// Modificador de canto. Duas linhas: entityA/entityB = ids das linhas e corner = -1 (o canto é
+// a extremidade comum). Retângulo: entityA = entityB = id do retângulo e corner = índice do
+// canto (0 a 3, na ordem de SketchRectangle::corners()).
+struct SketchFillet
+{
+    std::string entityA, entityB;
+    int corner = -1;
+    double radius = 0.0;
+};
+
+struct SketchChamfer
+{
+    std::string entityA, entityB;
+    int corner = -1;
+    double distance = 0.0; // medida a partir do vértice original, ao longo de cada lado
+};
+
+using SketchGeometry =
+    std::variant<SketchLine, SketchRectangle, SketchCircle, SketchArc, SketchFillet, SketchChamfer>;
+
+// true para Fillet 2D e Chamfer 2D (dependem de outras entidades do esboço).
+bool isCornerModifier(const SketchGeometry& geometry);
+
+// Natureza da dimensão: comprimento/coordenada (mm), ângulo (graus) ou opção sim/não.
+enum class DimensionKind
+{
+    Length,
+    Angle,
+    Flag
+};
 
 // Dimensão (coordenada ou medida) de uma entidade. Valores calculados (comprimento da linha,
 // diâmetro) são apenas informativos.
@@ -61,6 +126,7 @@ struct SketchDimension
     std::string label; // "X inicial", "Largura"...
     double value = 0.0;
     bool editable = true;
+    DimensionKind kind = DimensionKind::Length;
 };
 
 struct EntityValidation
@@ -82,7 +148,7 @@ struct SketchEntity
     static EntityValidation validate(const SketchGeometry& geometry);
 };
 
-const char* typeName(EntityType type);                 // "line", "rectangle", "circle"
+const char* typeName(EntityType type); // "line", "rectangle", "circle", "arc", "fillet", "chamfer"
 std::optional<EntityType> typeFromName(const std::string& name);
 
 // Dimensões da entidade, na ordem de exibição.

@@ -18,6 +18,12 @@ std::string mm(double v)
     return text + " mm";
 }
 
+std::string deg(double v)
+{
+    std::string text = mm(v);
+    return text.substr(0, text.size() - 3) + "°";
+}
+
 EntityValidation fail(const char* field, const std::string& message)
 {
     return EntityValidation{false, field, message};
@@ -52,7 +58,82 @@ EntityValidation firstFailure(const R&... results)
     return {};
 }
 
+constexpr double kPi = 3.14159265358979323846;
+constexpr double kDeg = kPi / 180.0;
+
+EntityValidation checkAngle(const char* field, const char* label, double v)
+{
+    if (!std::isfinite(v))
+        return fail(field, std::string(label) + ": valor não numérico");
+    if (std::fabs(v) > kMaxAngle)
+        return fail(field, std::string(label) + " fora dos limites (±720°)");
+    return {};
+}
+
+// Referências de um modificador de canto.
+EntityValidation checkCornerRefs(const std::string& a, const std::string& b, int corner, const char* what)
+{
+    if (a.empty() || b.empty())
+        return fail("entityA", std::string(what) + " sem as entidades do canto");
+    if (a == b && (corner < 0 || corner > 3))
+        return fail("corner", std::string(what) + ": canto do retângulo inválido (esperado 0 a 3)");
+    if (a != b && corner != -1)
+        return fail("corner", std::string(what) + ": o índice de canto só se aplica a retângulos");
+    return {};
+}
+
+// Ângulo normalizado em [0, 360).
+double normalized(double deg)
+{
+    double a = std::fmod(deg, 360.0);
+    if (a < 0.0)
+        a += 360.0;
+    return a;
+}
+
 } // namespace
+
+double SketchArc::sweep() const
+{
+    const double ccw = normalized(endAngle - startAngle);
+    if (ccw == 0.0)
+        return 0.0;
+    return clockwise ? 360.0 - ccw : ccw;
+}
+
+double SketchArc::signedSweepRadians() const
+{
+    return (clockwise ? -sweep() : sweep()) * kDeg;
+}
+
+double SketchArc::length() const
+{
+    return radius * sweep() * kDeg;
+}
+
+gp_Pnt2d SketchArc::pointAt(double t) const
+{
+    const double a = startAngle * kDeg + t * signedSweepRadians();
+    return gp_Pnt2d(cx + radius * std::cos(a), cy + radius * std::sin(a));
+}
+
+SketchArc SketchArc::fromCenterStartEnd(const gp_Pnt2d& center, const gp_Pnt2d& start, const gp_Pnt2d& end,
+                                        bool clockwise)
+{
+    SketchArc a;
+    a.cx = center.X();
+    a.cy = center.Y();
+    a.radius = center.Distance(start);
+    a.startAngle = normalized(std::atan2(start.Y() - center.Y(), start.X() - center.X()) / kDeg);
+    a.endAngle = normalized(std::atan2(end.Y() - center.Y(), end.X() - center.X()) / kDeg);
+    a.clockwise = clockwise;
+    return a;
+}
+
+bool isCornerModifier(const SketchGeometry& geometry)
+{
+    return std::holds_alternative<SketchFillet>(geometry) || std::holds_alternative<SketchChamfer>(geometry);
+}
 
 double SketchLine::length() const
 {
@@ -84,11 +165,15 @@ SketchRectangle SketchRectangle::fromCorners(double xa, double ya, double xb, do
 
 EntityType SketchEntity::type() const
 {
-    if (std::holds_alternative<SketchLine>(geometry))
-        return EntityType::Line;
-    if (std::holds_alternative<SketchRectangle>(geometry))
-        return EntityType::Rectangle;
-    return EntityType::Circle;
+    switch (geometry.index())
+    {
+    case 0: return EntityType::Line;
+    case 1: return EntityType::Rectangle;
+    case 2: return EntityType::Circle;
+    case 3: return EntityType::Arc;
+    case 4: return EntityType::Fillet;
+    default: return EntityType::Chamfer;
+    }
 }
 
 EntityValidation SketchEntity::validate(const SketchGeometry& geometry)
@@ -117,9 +202,33 @@ EntityValidation SketchEntity::validate(const SketchGeometry& geometry)
             return fail("width", "Retângulo ultrapassa os limites do esboço (±" + mm(kMaxCoordinate) + ")");
         return {};
     }
-    const auto& c = std::get<SketchCircle>(geometry);
-    return firstFailure(checkCoordinate("cx", "X do centro", c.cx), checkCoordinate("cy", "Y do centro", c.cy),
-                        checkSize("radius", "Raio", c.radius));
+    if (const auto* c = std::get_if<SketchCircle>(&geometry))
+        return firstFailure(checkCoordinate("cx", "X do centro", c->cx), checkCoordinate("cy", "Y do centro", c->cy),
+                            checkSize("radius", "Raio", c->radius));
+    if (const auto* a = std::get_if<SketchArc>(&geometry))
+    {
+        const EntityValidation v = firstFailure(checkCoordinate("cx", "X do centro", a->cx),
+                                                checkCoordinate("cy", "Y do centro", a->cy),
+                                                checkSize("radius", "Raio", a->radius),
+                                                checkAngle("startAngle", "Ângulo inicial", a->startAngle),
+                                                checkAngle("endAngle", "Ângulo final", a->endAngle));
+        if (!v.ok)
+            return v;
+        const double s = a->sweep();
+        if (s < kMinArcSweep || s > 360.0 - kMinArcSweep)
+            return fail("endAngle", "Varredura angular inválida (" + deg(s)
+                                        + "): o arco deve ter entre 0,1° e 359,9° — para a circunferência completa "
+                                          "use Círculo");
+        if (a->length() < kMinSize)
+            return fail("radius", "Arco degenerado (comprimento menor que " + mm(kMinSize) + ")");
+        return {};
+    }
+    if (const auto* f = std::get_if<SketchFillet>(&geometry))
+        return firstFailure(checkCornerRefs(f->entityA, f->entityB, f->corner, "Fillet 2D"),
+                            checkSize("radius", "Raio do fillet", f->radius));
+    const auto& c = std::get<SketchChamfer>(geometry);
+    return firstFailure(checkCornerRefs(c.entityA, c.entityB, c.corner, "Chamfer 2D"),
+                        checkSize("distance", "Distância do chanfro", c.distance));
 }
 
 const char* typeName(EntityType type)
@@ -129,6 +238,9 @@ const char* typeName(EntityType type)
     case EntityType::Line:      return "line";
     case EntityType::Rectangle: return "rectangle";
     case EntityType::Circle:    return "circle";
+    case EntityType::Arc:       return "arc";
+    case EntityType::Fillet:    return "fillet";
+    case EntityType::Chamfer:   return "chamfer";
     }
     return "";
 }
@@ -138,13 +250,17 @@ std::optional<EntityType> typeFromName(const std::string& name)
     if (name == "line") return EntityType::Line;
     if (name == "rectangle") return EntityType::Rectangle;
     if (name == "circle") return EntityType::Circle;
+    if (name == "arc") return EntityType::Arc;
+    if (name == "fillet") return EntityType::Fillet;
+    if (name == "chamfer") return EntityType::Chamfer;
     return std::nullopt;
 }
 
 std::vector<SketchDimension> dimensionsOf(const SketchEntity& e)
 {
-    auto d = [&e](const char* key, const char* label, double value, bool editable = true) {
-        return SketchDimension{e.id, key, label, value, editable};
+    auto d = [&e](const char* key, const char* label, double value, bool editable = true,
+                  DimensionKind kind = DimensionKind::Length) {
+        return SketchDimension{e.id, key, label, value, editable, kind};
     };
     if (const auto* l = std::get_if<SketchLine>(&e.geometry))
         return {d("x1", "X inicial", l->x1), d("y1", "Y inicial", l->y1), d("x2", "X final", l->x2),
@@ -152,9 +268,22 @@ std::vector<SketchDimension> dimensionsOf(const SketchEntity& e)
     if (const auto* r = std::get_if<SketchRectangle>(&e.geometry))
         return {d("x", "X do canto", r->x), d("y", "Y do canto", r->y), d("width", "Largura", r->width),
                 d("height", "Altura", r->height)};
-    const auto& c = std::get<SketchCircle>(e.geometry);
-    return {d("cx", "X do centro", c.cx), d("cy", "Y do centro", c.cy), d("radius", "Raio", c.radius),
-            d("diameter", "Diâmetro", c.diameter(), false)};
+    if (const auto* c = std::get_if<SketchCircle>(&e.geometry))
+        return {d("cx", "X do centro", c->cx), d("cy", "Y do centro", c->cy), d("radius", "Raio", c->radius),
+                d("diameter", "Diâmetro", c->diameter(), false)};
+    if (const auto* a = std::get_if<SketchArc>(&e.geometry))
+        return {d("cx", "X do centro", a->cx),
+                d("cy", "Y do centro", a->cy),
+                d("radius", "Raio", a->radius),
+                d("startAngle", "Ângulo inicial", a->startAngle, true, DimensionKind::Angle),
+                d("endAngle", "Ângulo final", a->endAngle, true, DimensionKind::Angle),
+                d("clockwise", "Sentido horário", a->clockwise ? 1.0 : 0.0, true, DimensionKind::Flag),
+                d("sweep", "Varredura", a->sweep(), false, DimensionKind::Angle),
+                d("length", "Comprimento do arco", a->length(), false)};
+    if (const auto* f = std::get_if<SketchFillet>(&e.geometry))
+        return {d("radius", "Raio", f->radius)};
+    const auto& c = std::get<SketchChamfer>(e.geometry);
+    return {d("distance", "Distância", c.distance)};
 }
 
 bool applyDimension(SketchGeometry& geometry, const std::string& key, double value)
@@ -176,11 +305,39 @@ bool applyDimension(SketchGeometry& geometry, const std::string& key, double val
         *field = value;
         return true;
     }
-    auto& c = std::get<SketchCircle>(geometry);
-    double* field = key == "cx" ? &c.cx : key == "cy" ? &c.cy : key == "radius" ? &c.radius : nullptr;
-    if (!field)
+    if (auto* c = std::get_if<SketchCircle>(&geometry))
+    {
+        double* field = key == "cx" ? &c->cx : key == "cy" ? &c->cy : key == "radius" ? &c->radius : nullptr;
+        if (!field)
+            return false;
+        *field = value;
+        return true;
+    }
+    if (auto* a = std::get_if<SketchArc>(&geometry))
+    {
+        if (key == "clockwise")
+        {
+            a->clockwise = value != 0.0;
+            return true;
+        }
+        double* field = key == "cx" ? &a->cx : key == "cy" ? &a->cy : key == "radius" ? &a->radius
+                        : key == "startAngle" ? &a->startAngle : key == "endAngle" ? &a->endAngle : nullptr;
+        if (!field)
+            return false;
+        *field = value;
+        return true;
+    }
+    if (auto* f = std::get_if<SketchFillet>(&geometry))
+    {
+        if (key != "radius")
+            return false;
+        f->radius = value;
+        return true;
+    }
+    auto& c = std::get<SketchChamfer>(geometry);
+    if (key != "distance")
         return false;
-    *field = value;
+    c.distance = value;
     return true;
 }
 

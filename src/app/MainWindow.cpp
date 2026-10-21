@@ -2,11 +2,13 @@
 
 #include "app/BooleanDialog.h"
 #include "app/ExtrusionDialog.h"
+#include "app/FinishDialog.h"
 #include "app/ParametersDialog.h"
 #include "app/SketchEntityDialog.h"
 #include "app/StlExportDialog.h"
 #include "modeling/ShapeInspector.h"
 #include "sketch/SketchProfile.h"
+#include "sketch/SketchResolver.h"
 #include "document/DocumentFile.h"
 #include "io/StepExporter.h"
 #include "modeling/SubShapeInfo.h"
@@ -32,7 +34,10 @@
 #include <QToolBar>
 #include <QTreeWidget>
 
+#include <BRep_Builder.hxx>
 #include <Standard_Version.hxx>
+#include <TopoDS.hxx>
+#include <TopoDS_Compound.hxx>
 
 #include <filesystem>
 
@@ -81,8 +86,19 @@ QString entityTypeName(EntityType type)
     case EntityType::Line:      return MainWindow::tr("Linha");
     case EntityType::Rectangle: return MainWindow::tr("Retângulo");
     case EntityType::Circle:    return MainWindow::tr("Círculo");
+    case EntityType::Arc:       return MainWindow::tr("Arco");
+    case EntityType::Fillet:    return MainWindow::tr("Fillet 2D");
+    case EntityType::Chamfer:   return MainWindow::tr("Chamfer 2D");
     }
     return QString();
+}
+
+// Canto referenciado por um modificador: "e-1, canto 2" (retângulo) ou "e-1 / e-2" (linhas).
+QString cornerText(const std::string& a, const std::string& b, int corner)
+{
+    if (a == b)
+        return MainWindow::tr("%1, canto %2").arg(QString::fromStdString(a)).arg(corner);
+    return MainWindow::tr("%1 / %2").arg(QString::fromStdString(a), QString::fromStdString(b));
 }
 
 // Resumo de uma entidade para a árvore.
@@ -95,8 +111,16 @@ QString entitySummary(const SketchEntity& e)
     if (const auto* r = std::get_if<cad::sketch::SketchRectangle>(&e.geometry))
         return MainWindow::tr("Retângulo %1: canto (%2; %3), %4 x %5 mm")
             .arg(id, num(r->x), num(r->y), num(r->width), num(r->height));
-    const auto& c = std::get<cad::sketch::SketchCircle>(e.geometry);
-    return MainWindow::tr("Círculo %1: centro (%2; %3), R %4 mm").arg(id, num(c.cx), num(c.cy), num(c.radius));
+    if (const auto* c = std::get_if<cad::sketch::SketchCircle>(&e.geometry))
+        return MainWindow::tr("Círculo %1: centro (%2; %3), R %4 mm").arg(id, num(c->cx), num(c->cy), num(c->radius));
+    if (const auto* a = std::get_if<cad::sketch::SketchArc>(&e.geometry))
+        return MainWindow::tr("Arco %1: centro (%2; %3), R %4 mm, %5° → %6° (%7)")
+            .arg(id, num(a->cx), num(a->cy), num(a->radius), num(a->startAngle), num(a->endAngle),
+                 a->clockwise ? MainWindow::tr("horário") : MainWindow::tr("anti-horário"));
+    if (const auto* f = std::get_if<cad::sketch::SketchFillet>(&e.geometry))
+        return MainWindow::tr("Fillet 2D %1: R %2 mm (%3)").arg(id, num(f->radius), cornerText(f->entityA, f->entityB, f->corner));
+    const auto& c = std::get<cad::sketch::SketchChamfer>(e.geometry);
+    return MainWindow::tr("Chamfer 2D %1: %2 mm (%3)").arg(id, num(c.distance), cornerText(c.entityA, c.entityB, c.corner));
 }
 
 QString mm(double v)
@@ -111,6 +135,7 @@ QString parameterLabel(const std::string& key)
     if (key == "height") return MainWindow::tr("Altura");
     if (key == "radius") return MainWindow::tr("Raio");
     if (key == "depth")  return MainWindow::tr("Profundidade");
+    if (key == "distance") return MainWindow::tr("Distância");
     return QString::fromStdString(key);
 }
 
@@ -122,6 +147,8 @@ QString operationTypeName(OperationType type)
     case OperationType::ThroughHole: return MainWindow::tr("Furo passante");
     case OperationType::Extrude:     return MainWindow::tr("Extrusão");
     case OperationType::Boolean:     return MainWindow::tr("Operação booleana");
+    case OperationType::Fillet3D:    return MainWindow::tr("Fillet 3D");
+    case OperationType::Chamfer3D:   return MainWindow::tr("Chamfer 3D");
     }
     return QString();
 }
@@ -246,6 +273,16 @@ void MainWindow::createActions()
     m_actCommon = makeBoolean(tr("&Interseção..."), "actionIntersecao", cad::modeling::BooleanKind::Common,
                               tr("Interseção de dois corpos (A ∩ B)"));
 
+    m_actFillet3D = new QAction(tr("&Fillet 3D..."), this);
+    m_actFillet3D->setObjectName("actionFillet3D");
+    m_actFillet3D->setStatusTip(tr("Arredonda arestas de um corpo: selecione as arestas no visualizador e informe o raio"));
+    connect(m_actFillet3D, &QAction::triggered, this, [this] { finishCommand(OperationType::Fillet3D); });
+    m_actChamfer3D = new QAction(tr("C&hamfer 3D..."), this);
+    m_actChamfer3D->setObjectName("actionChamfer3D");
+    m_actChamfer3D->setStatusTip(tr("Chanfra arestas de um corpo (distância simétrica): selecione as arestas e informe "
+                                    "a distância"));
+    connect(m_actChamfer3D, &QAction::triggered, this, [this] { finishCommand(OperationType::Chamfer3D); });
+
     m_actEditOperation = new QAction(tr("Editar &operação..."), this);
     m_actEditOperation->setObjectName("actionEditarOperacao");
     m_actEditOperation->setStatusTip(tr("Edita os parâmetros da operação selecionada na árvore"));
@@ -307,6 +344,21 @@ void MainWindow::createActions()
                                   tr("Retângulo: clique em um canto e depois no canto oposto (Esc cancela)"));
     m_actToolCircle = makeTool(tr("&Círculo"), "actionFerramentaCirculo", cad::viewer::SketchTool::Circle,
                                tr("Círculo: clique no centro e depois em um ponto da circunferência (Esc cancela)"));
+    m_actToolArc = makeTool(tr("Arco circ&ular"), "actionFerramentaArco", cad::viewer::SketchTool::Arc,
+                            tr("Arco: clique no centro, no ponto inicial (raio) e no ponto final; sentido conforme "
+                               "\"Sentido horário do arco\" (Esc cancela)"));
+    m_actToolFillet2D = makeTool(tr("&Fillet 2D"), "actionFerramentaFillet2D", cad::viewer::SketchTool::Fillet2D,
+                                 tr("Fillet 2D: clique em um canto entre dois segmentos retos e informe o raio"));
+    m_actToolChamfer2D = makeTool(tr("C&hamfer 2D"), "actionFerramentaChamfer2D", cad::viewer::SketchTool::Chamfer2D,
+                                  tr("Chamfer 2D: clique em um canto entre dois segmentos retos e informe a distância"));
+    m_actArcClockwise = new QAction(tr("Sen&tido horário do arco"), this);
+    m_actArcClockwise->setObjectName("actionArcoHorario");
+    m_actArcClockwise->setCheckable(true);
+    m_actArcClockwise->setStatusTip(tr("Desmarcado: arcos no sentido anti-horário (padrão); marcado: sentido horário"));
+    connect(m_actArcClockwise, &QAction::toggled, this, [this](bool cw) {
+        m_viewer->setArcClockwise(cw);
+        statusBar()->showMessage(cw ? tr("Arcos no sentido horário") : tr("Arcos no sentido anti-horário"), 5000);
+    });
     m_actToolSelect->setChecked(true);
 
     m_actEntityDimensions = new QAction(tr("&Dimensões..."), this);
@@ -386,6 +438,9 @@ void MainWindow::createMenus()
     menuOperations->addAction(m_actCut);
     menuOperations->addAction(m_actCommon);
     menuOperations->addSeparator();
+    menuOperations->addAction(m_actFillet3D);
+    menuOperations->addAction(m_actChamfer3D);
+    menuOperations->addSeparator();
     menuOperations->addAction(m_actEditOperation);
 
     QMenu* menuSketch = menuBar()->addMenu(tr("E&sboço"));
@@ -397,6 +452,10 @@ void MainWindow::createMenus()
     menuSketch->addAction(m_actToolLine);
     menuSketch->addAction(m_actToolRectangle);
     menuSketch->addAction(m_actToolCircle);
+    menuSketch->addAction(m_actToolArc);
+    menuSketch->addAction(m_actArcClockwise);
+    menuSketch->addAction(m_actToolFillet2D);
+    menuSketch->addAction(m_actToolChamfer2D);
     menuSketch->addSeparator();
     menuSketch->addAction(m_actEntityDimensions);
     menuSketch->addAction(m_actDeleteEntity);
@@ -440,6 +499,8 @@ void MainWindow::createToolBars()
     m_toolBarModeling->addAction(m_actFuse);
     m_toolBarModeling->addAction(m_actCut);
     m_toolBarModeling->addAction(m_actCommon);
+    m_toolBarModeling->addAction(m_actFillet3D);
+    m_toolBarModeling->addAction(m_actChamfer3D);
 
     m_toolBarSketch = addToolBar(tr("Esboço"));
     m_toolBarSketch->setObjectName("toolBarEsboco");
@@ -447,6 +508,9 @@ void MainWindow::createToolBars()
     m_toolBarSketch->addAction(m_actToolLine);
     m_toolBarSketch->addAction(m_actToolRectangle);
     m_toolBarSketch->addAction(m_actToolCircle);
+    m_toolBarSketch->addAction(m_actToolArc);
+    m_toolBarSketch->addAction(m_actToolFillet2D);
+    m_toolBarSketch->addAction(m_actToolChamfer2D);
     m_toolBarSketch->addSeparator();
     m_toolBarSketch->addAction(m_actEntityDimensions);
     m_toolBarSketch->addAction(m_actDeleteEntity);
@@ -533,6 +597,26 @@ void MainWindow::createCentralArea()
     connect(m_viewer, &cad::viewer::OcctViewerWidget::sketchGeometryRequested, this,
             [this](const SketchGeometry& g) { addSketchGeometry(g); });
     connect(m_viewer, &cad::viewer::OcctViewerWidget::sketchEntityClicked, this, &MainWindow::selectSketchEntity);
+    connect(m_viewer, &cad::viewer::OcctViewerWidget::sketchCornerPicked, this,
+            [this](cad::viewer::SketchTool tool, double u, double v, double tolerance) {
+                const EntityType type = tool == cad::viewer::SketchTool::Fillet2D ? EntityType::Fillet : EntityType::Chamfer;
+                if (!isEditingSketch())
+                    return;
+                if (!cad::sketch::nearestCorner(*m_editSketch, gp_Pnt2d(u, v), tolerance))
+                {
+                    statusBar()->showMessage(tr("Clique próximo a um canto entre dois segmentos retos (linhas conectadas "
+                                                "ou canto de retângulo)"),
+                                             8000);
+                    return;
+                }
+                const auto value = askCornerValue(type, type == EntityType::Fillet ? 5.0 : 2.0);
+                if (!value)
+                {
+                    statusBar()->showMessage(tr("%1 cancelado").arg(entityTypeName(type)), 5000);
+                    return;
+                }
+                applyCornerModifier(type, u, v, tolerance, *value);
+            });
     setSketchModeUi(false);
 }
 
@@ -565,12 +649,32 @@ void MainWindow::updateActionStates()
     m_actExtrude->setToolTip(m_actExtrude->statusTip());
     m_actEditOperation->setEnabled(!editing && !selectedOperationId().isEmpty());
     // Booleanas: pelo menos dois corpos ativos.
-    const bool twoBodies = !editing && m_document.activeBodies().size() >= 2;
+    const bool finishing = m_finishDialog != nullptr;
+    const bool twoBodies = !editing && !finishing && m_document.activeBodies().size() >= 2;
     for (QAction* a : {m_actFuse, m_actCut, m_actCommon})
     {
         a->setEnabled(twoBodies);
         a->setToolTip(twoBodies ? a->statusTip()
                                 : tr("Operações booleanas exigem pelo menos dois corpos sólidos (ex.: duas extrusões)"));
+    }
+    // Acabamentos 3D: um corpo ativo; durante o comando os demais comandos de modelagem ficam
+    // indisponíveis até concluir ou cancelar.
+    const bool hasBody = !editing && !finishing && !m_document.activeBodies().empty();
+    for (QAction* a : {m_actFillet3D, m_actChamfer3D})
+    {
+        a->setEnabled(hasBody);
+        a->setToolTip(hasBody ? a->statusTip() : tr("Fillet 3D e Chamfer 3D exigem um corpo sólido"));
+    }
+    if (finishing)
+    {
+        for (QAction* a : {m_actExtrude, m_actEditOperation, m_actNewSketch, m_actEditSketch, m_actEditParameters, m_actNew,
+                           m_actOpen, m_actExampleBlock})
+            a->setEnabled(false);
+    }
+    else if (!editing)
+    {
+        for (QAction* a : {m_actNewSketch, m_actEditSketch, m_actNew, m_actOpen, m_actExampleBlock})
+            a->setEnabled(true);
     }
 }
 
@@ -632,7 +736,7 @@ void MainWindow::rebuildTree()
 
     for (const Operation& op : m_document.operations())
     {
-        if (op.type == OperationType::Extrude || op.type == OperationType::Boolean)
+        if (!(op.type == OperationType::Block || op.type == OperationType::ThroughHole))
             continue; // listadas depois dos esboços de que dependem
         const QString id = QString::fromStdString(op.id);
         auto* item = new QTreeWidgetItem(root);
@@ -693,7 +797,7 @@ void MainWindow::rebuildTree()
     // uma booleana continuam listados, marcados como consumidos.
     for (const Operation& op : m_document.operations())
     {
-        if (op.type != OperationType::Extrude && op.type != OperationType::Boolean)
+        if (op.type == OperationType::Block || op.type == OperationType::ThroughHole)
             continue;
         const QString id = QString::fromStdString(op.id);
         auto* item = new QTreeWidgetItem(root);
@@ -716,7 +820,8 @@ void MainWindow::rebuildTree()
         item->setText(0, text);
         const QStyle::StandardPixmap icon = op.status != OperationStatus::Valid ? QStyle::SP_MessageBoxWarning
                                             : op.type == OperationType::Boolean ? QStyle::SP_BrowserReload
-                                                                                : QStyle::SP_ArrowUp;
+                                            : op.type == OperationType::Extrude ? QStyle::SP_ArrowUp
+                                                                                : QStyle::SP_DialogResetButton;
         item->setIcon(0, st->standardIcon(icon));
         item->setData(0, kItemKindRole, QStringLiteral("operacao"));
         item->setData(0, kItemIdRole, id);
@@ -747,6 +852,15 @@ void MainWindow::rebuildTree()
             }
             addChild(tr("Sentido: %1 %2").arg(op.reversed ? tr("oposto à normal") : tr("normal do plano"), direction),
                      "parametro");
+        }
+        else if (op.type == OperationType::Fillet3D || op.type == OperationType::Chamfer3D)
+        {
+            addChild(tr("Corpo de origem: %1").arg(bodyDescription(op.sourceId)), "referencia");
+            const char* key = op.type == OperationType::Fillet3D ? "radius" : "distance";
+            addChild(tr("%1: %2").arg(op.type == OperationType::Fillet3D ? tr("Raio") : tr("Distância"),
+                                      mm(op.parameter(key))),
+                     "parametro");
+            addChild(op.edges.size() == 1 ? tr("Arestas: 1") : tr("Arestas: %1").arg(op.edges.size()), "parametro");
         }
         else
         {
@@ -866,6 +980,11 @@ void MainWindow::showItemProperties(QTreeWidgetItem* item)
                              BooleanDialog::operandLabel(op->booleanKind, false), bodyDescription(op->operandB).toHtmlEscaped(),
                              solidsText(op->result), num(cad::modeling::ShapeInspector::volume(op->result)));
         }
+        if (op->type == OperationType::Fillet3D || op->type == OperationType::Chamfer3D)
+            html += tr("<br>Corpo de origem: %1<br>Arestas: %2<br>Volume: %3 mm³")
+                        .arg(bodyDescription(op->sourceId).toHtmlEscaped())
+                        .arg(op->edges.size())
+                        .arg(num(cad::modeling::ShapeInspector::volume(op->result)));
         if (!op->consumedBy.empty())
             html += tr("<br><i>Consumido por %1: oculto no visualizador e na exportação (mantido no histórico)</i>")
                         .arg(bodyDescription(op->consumedBy).toHtmlEscaped());
@@ -1244,6 +1363,11 @@ void MainWindow::editOperation()
     const Operation* op = m_document.findOperation(id.toStdString());
     if (!op)
         return;
+    if (op->type == OperationType::Fillet3D || op->type == OperationType::Chamfer3D)
+    {
+        startFinish(op->type, id);
+        return;
+    }
     if (op->type == OperationType::Boolean)
     {
         const auto parameters = askBoolean(m_document.booleanParameters(id.toStdString()), id);
@@ -1292,13 +1416,238 @@ bool MainWindow::updateExtrusion(const QString& operationId, const cad::document
     return true;
 }
 
+// --- Acabamentos 3D ----------------------------------------------------------
+
+bool MainWindow::addFinish(OperationType type, const QString& sourceId, const QList<TopoDS_Shape>& edges, double value)
+{
+    std::vector<TopoDS_Edge> list;
+    for (const TopoDS_Shape& s : edges)
+        if (!s.IsNull() && s.ShapeType() == TopAbs_EDGE)
+            list.push_back(TopoDS::Edge(s));
+    cad::document::FinishParameters p;
+    p.sourceId = sourceId.toStdString();
+    p.value = value;
+    p.edges = m_document.edgeSignatures(p.sourceId, list);
+    std::string newId;
+    const auto result = m_document.addFinish(type, p, &newId);
+    if (!result.ok)
+    {
+        statusBar()->showMessage(tr("%1 recusado: %2").arg(operationTypeName(type), QString::fromStdString(result.message)), 8000);
+        reportError(operationTypeName(type), tr("A operação não foi criada:\n%1\n\nO documento foi mantido.")
+                                                 .arg(QString::fromStdString(result.message)));
+        return false;
+    }
+    refreshDocumentViews(true);
+    selectTreeItem(QString::fromStdString(newId));
+    statusBar()->showMessage(tr("%1 criado: volume %2 mm³")
+                                 .arg(QString::fromStdString(m_document.findOperation(newId)->name),
+                                      num(cad::modeling::ShapeInspector::volume(m_document.shape()))),
+                             8000);
+    return true;
+}
+
+FinishDialog* MainWindow::finishDialog() const
+{
+    return m_finishDialog.data();
+}
+
+void MainWindow::finishCommand(OperationType type)
+{
+    startFinish(type, QString());
+}
+
+void MainWindow::startFinish(OperationType type, const QString& editId)
+{
+    if (isEditingSketch())
+        return;
+    if (m_finishDialog)
+    {
+        m_finishDialog->raise();
+        m_finishDialog->activateWindow();
+        return;
+    }
+    if (editId.isEmpty() && m_document.activeBodies().empty())
+    {
+        reportError(operationTypeName(type), tr("O documento não contém corpo sólido.\n\nCrie uma extrusão (ou abra uma "
+                                                "peça) e acione o comando novamente."));
+        return;
+    }
+    const bool editing = !editId.isEmpty();
+    m_finishEditId = editId;
+    m_finishSource.clear();
+    QString name = QString::fromStdString(m_document.defaultFinishName(type));
+    double value = type == OperationType::Fillet3D ? 3.0 : 2.0;
+    if (editing)
+    {
+        const cad::document::FinishParameters p = m_document.finishParameters(editId.toStdString());
+        name = QString::fromStdString(p.name);
+        value = p.value;
+        m_finishSource = QString::fromStdString(p.sourceId);
+        // Exibe o corpo de origem no lugar do resultado (e dos acabamentos seguintes da mesma
+        // cadeia) para selecionar as arestas sobre a geometria de origem.
+        std::string descendant = editId.toStdString();
+        while (const Operation* op = m_document.findOperation(descendant))
+        {
+            if (op->consumedBy.empty())
+                break;
+            descendant = op->consumedBy;
+        }
+        BRep_Builder builder;
+        TopoDS_Compound compound;
+        builder.MakeCompound(compound);
+        for (const std::string& body : m_document.activeBodies())
+            if (body != descendant)
+                builder.Add(compound, m_document.findOperation(body)->result);
+        builder.Add(compound, m_document.findOperation(p.sourceId)->result);
+        m_viewer->setShape(compound);
+    }
+    m_viewer->clearOperandHighlight();
+    m_finishDialog = new FinishDialog(type, name, value, editing, this);
+    connect(m_finishDialog, &FinishDialog::previewChanged, this, [this](const cad::modeling::FeatureResult& r, bool show) {
+        m_viewer->setPreviewShape(show && r.ok ? r.shape : TopoDS_Shape());
+    });
+    connect(m_finishDialog, &FinishDialog::clearSelectionRequested, m_viewer, &cad::viewer::OcctViewerWidget::clearSelection);
+    connect(m_finishDialog, &QDialog::accepted, this, &MainWindow::applyFinishDialog);
+    connect(m_finishDialog, &QDialog::finished, this, &MainWindow::endFinish);
+    m_viewer->setEdgeSelectionMode(true);
+    if (editing)
+    {
+        QList<TopoDS_Shape> edges;
+        for (const TopoDS_Edge& e : m_document.resolvedFinishEdges(editId.toStdString()))
+            edges << e;
+        m_viewer->selectSubShapes(edges);
+    }
+    m_finishDialog->setEvaluator([this](double v) { return evaluateFinish(v); });
+    updateFinishSelection();
+    updateActionStates();
+    m_finishDialog->show();
+    // Ao lado do visualizador, sem cobrir o centro da peça.
+    const QPoint corner = m_viewer->mapToGlobal(QPoint(m_viewer->width() - m_finishDialog->width() - 20, 20));
+    m_finishDialog->move(corner);
+    statusBar()->showMessage(tr("%1: selecione as arestas no visualizador (Shift + clique adiciona ou remove)")
+                                 .arg(operationTypeName(type)));
+}
+
+std::vector<TopoDS_Edge> MainWindow::finishSelection(QString* problem) const
+{
+    std::vector<TopoDS_Edge> edges;
+    QString body = m_finishEditId.isEmpty() ? QString() : m_finishSource;
+    for (const TopoDS_Shape& s : m_viewer->selectedShapes())
+    {
+        if (s.ShapeType() != TopAbs_EDGE)
+            continue;
+        const TopoDS_Edge e = TopoDS::Edge(s);
+        if (!m_finishEditId.isEmpty())
+        {
+            const Operation* source = m_document.findOperation(m_finishSource.toStdString());
+            if (!source || !cad::modeling::containsEdge(source->result, e))
+            {
+                if (problem)
+                    *problem = tr("Selecione arestas do corpo de origem (%1)").arg(bodyDescription(m_finishSource.toStdString()));
+                continue;
+            }
+        }
+        else
+        {
+            const QString owner = QString::fromStdString(m_document.bodyContaining(e));
+            if (body.isEmpty())
+                body = owner;
+            else if (owner != body && problem)
+                *problem = tr("As arestas devem pertencer a um mesmo corpo");
+        }
+        edges.push_back(e);
+    }
+    if (m_finishEditId.isEmpty())
+        m_finishSource = body;
+    return edges;
+}
+
+void MainWindow::updateFinishSelection()
+{
+    if (!m_finishDialog)
+        return;
+    QString problem;
+    const std::vector<TopoDS_Edge> edges = finishSelection(&problem);
+    m_finishDialog->setSelectionInfo(int(edges.size()),
+                                     m_finishSource.isEmpty() ? QString() : bodyDescription(m_finishSource.toStdString()),
+                                     problem);
+}
+
+cad::modeling::FeatureResult MainWindow::evaluateFinish(double value) const
+{
+    QString problem;
+    const std::vector<TopoDS_Edge> edges = finishSelection(&problem);
+    cad::modeling::FeatureResult r;
+    if (!problem.isEmpty())
+    {
+        r.message = problem.toStdString();
+        return r;
+    }
+    cad::document::FinishParameters p;
+    p.sourceId = m_finishSource.toStdString();
+    p.value = value;
+    p.edges = m_document.edgeSignatures(p.sourceId, edges);
+    return m_document.previewFinish(m_finishDialog->type(), p);
+}
+
+void MainWindow::applyFinishDialog()
+{
+    if (!m_finishDialog)
+        return;
+    const OperationType type = m_finishDialog->type();
+    QString problem;
+    const std::vector<TopoDS_Edge> edges = finishSelection(&problem);
+    cad::document::FinishParameters p;
+    p.name = m_finishDialog->name().toStdString();
+    p.sourceId = m_finishSource.toStdString();
+    p.value = m_finishDialog->value();
+    p.edges = m_document.edgeSignatures(p.sourceId, edges);
+    std::string id = m_finishEditId.toStdString();
+    const auto result = m_finishEditId.isEmpty() ? m_document.addFinish(type, p, &id)
+                                                 : m_document.updateFinish(id, p);
+    if (!result.ok)
+    {
+        reportError(operationTypeName(type), tr("A operação não foi aplicada:\n%1\n\nO documento foi mantido no último "
+                                                "estado válido.")
+                                                 .arg(QString::fromStdString(result.message)));
+        return;
+    }
+    m_finishEditId = QString::fromStdString(id); // selecionado após encerrar o comando
+    statusBar()->showMessage(tr("%1 aplicado: volume %2 mm³")
+                                 .arg(QString::fromStdString(m_document.findOperation(id)->name),
+                                      num(cad::modeling::ShapeInspector::volume(m_document.shape()))),
+                             8000);
+}
+
+void MainWindow::endFinish()
+{
+    if (!m_finishDialog)
+        return;
+    FinishDialog* dialog = m_finishDialog;
+    m_finishDialog = nullptr;
+    dialog->deleteLater();
+    const QString select = dialog->result() == QDialog::Accepted ? m_finishEditId : QString();
+    m_finishEditId.clear();
+    m_finishSource.clear();
+    m_viewer->clearPreviewShape();
+    m_viewer->setEdgeSelectionMode(false); // modos de face, aresta e vértice restaurados
+    refreshDocumentViews(true);            // geometria do documento (e não a de origem) de volta
+    if (!select.isEmpty())
+        selectTreeItem(select);
+    else
+        statusBar()->showMessage(tr("Comando cancelado; documento mantido"), 5000);
+}
+
 // --- Esboços -----------------------------------------------------------------
 
 void MainWindow::setSketchModeUi(bool editing)
 {
-    for (QAction* a : {m_actToolSelect, m_actToolLine, m_actToolRectangle, m_actToolCircle, m_actFinishSketch,
-                       m_actCancelSketch})
+    for (QAction* a : {m_actToolSelect, m_actToolLine, m_actToolRectangle, m_actToolCircle, m_actToolArc,
+                       m_actArcClockwise, m_actToolFillet2D, m_actToolChamfer2D, m_actFinishSketch, m_actCancelSketch})
         a->setEnabled(editing);
+    // Ao sair do esboço a ferramenta ativa volta a Selecionar (navegação 3D normal).
+    if (!editing)
+        m_actToolSelect->setChecked(true);
     const bool hasEntity = editing && !m_selectedEntity.isEmpty();
     m_actEntityDimensions->setEnabled(hasEntity);
     m_actDeleteEntity->setEnabled(hasEntity);
@@ -1494,11 +1843,51 @@ void MainWindow::editEntityDimensions()
     updateSketchEntity(m_selectedEntity, *geometry);
 }
 
+bool MainWindow::applyCornerModifier(EntityType type, double u, double v, double tolerance, double value)
+{
+    if (!isEditingSketch())
+        return false;
+    const auto corner = cad::sketch::nearestCorner(*m_editSketch, gp_Pnt2d(u, v), tolerance);
+    if (!corner)
+    {
+        statusBar()->showMessage(tr("Nenhum canto livre entre segmentos retos nesse ponto"), 8000);
+        reportError(entityTypeName(type), tr("Não há canto livre entre dois segmentos retos conectados nesse ponto.\n\n"
+                                             "Clique sobre o vértice de um retângulo ou na extremidade comum de duas "
+                                             "linhas que ainda não tenha fillet ou chanfro."));
+        return false;
+    }
+    SketchGeometry g;
+    if (type == EntityType::Fillet)
+        g = cad::sketch::SketchFillet{corner->entityA, corner->entityB, corner->corner, value};
+    else
+        g = cad::sketch::SketchChamfer{corner->entityA, corner->entityB, corner->corner, value};
+    std::string newId;
+    const auto result = m_editSketch->addEntity(g, &newId);
+    if (!result.ok)
+    {
+        statusBar()->showMessage(tr("%1 recusado: %2").arg(entityTypeName(type), QString::fromStdString(result.message)), 8000);
+        reportError(entityTypeName(type), tr("O %1 não foi aplicado:\n%2\n\nO esboço foi mantido.")
+                                              .arg(entityTypeName(type), QString::fromStdString(result.message)));
+        return false;
+    }
+    m_selectedEntity = QString::fromStdString(newId);
+    refreshSketchViews();
+    if (const SketchEntity* e = m_editSketch->findEntity(newId))
+        statusBar()->showMessage(tr("Criado: %1").arg(entitySummary(*e)), 8000);
+    return true;
+}
+
 void MainWindow::deleteSelectedEntity()
 {
     if (!isEditingSketch() || m_selectedEntity.isEmpty())
         return;
-    m_editSketch->removeEntity(m_selectedEntity.toStdString());
+    std::string error;
+    if (!m_editSketch->removeEntity(m_selectedEntity.toStdString(), error))
+    {
+        statusBar()->showMessage(tr("Entidade não excluída: %1").arg(QString::fromStdString(error)), 8000);
+        reportError(tr("Excluir entidade"), QString::fromStdString(error));
+        return;
+    }
     statusBar()->showMessage(tr("Entidade %1 excluída").arg(m_selectedEntity), 5000);
     m_selectedEntity.clear();
     refreshSketchViews();
@@ -1538,19 +1927,30 @@ void MainWindow::updateSelectionStatus()
     const QList<TopoDS_Shape> selected = m_viewer->selectedShapes();
     if (selected.isEmpty())
     {
+        if (m_finishDialog)
+        {
+            updateFinishSelection();
+            statusBar()->showMessage(tr("Selecione as arestas no visualizador (Shift + clique adiciona ou remove)"));
+            return;
+        }
         statusBar()->showMessage(m_readyMessage);
         return;
     }
+    if (m_finishDialog)
+        updateFinishSelection();
     if (selected.size() > 1)
     {
-        statusBar()->showMessage(tr("%1 entidades selecionadas").arg(selected.size()));
+        const bool edges = std::all_of(selected.begin(), selected.end(),
+                                       [](const TopoDS_Shape& s) { return s.ShapeType() == TopAbs_EDGE; });
+        statusBar()->showMessage(edges ? tr("%1 arestas selecionadas").arg(selected.size())
+                                       : tr("%1 entidades selecionadas").arg(selected.size()));
         return;
     }
 
     const QLocale locale(QLocale::Portuguese, QLocale::Brazil);
     auto num = [&locale](double v) { return locale.toString(v, 'f', 2); };
 
-    const auto info = cad::modeling::describeSubShape(part(), selected.first());
+    const auto info = cad::modeling::describeSubShape(m_viewer->shape(), selected.first());
     QString geometry = geometryName(info.geometry);
     if (info.radius > 0.0)
         geometry += tr(" (R %1 mm)").arg(num(info.radius));
@@ -1850,6 +2250,18 @@ std::optional<PlaneType> MainWindow::askSketchPlane()
     if (!ok)
         return std::nullopt;
     return PlaneType(items.indexOf(choice));
+}
+
+std::optional<double> MainWindow::askCornerValue(EntityType type, double initial)
+{
+    bool ok = false;
+    const double value = QInputDialog::getDouble(
+        this, entityTypeName(type),
+        type == EntityType::Fillet ? tr("Raio do arredondamento (mm):") : tr("Distância do chanfro, medida em cada lado (mm):"),
+        initial, 0.0, cad::sketch::kMaxSize, 2, &ok);
+    if (!ok)
+        return std::nullopt;
+    return value;
 }
 
 std::optional<SketchGeometry> MainWindow::askEntityDimensions(const SketchEntity& entity)

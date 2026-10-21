@@ -28,13 +28,21 @@ public:
     // identificadores de entidades removidas não são reutilizados.
     int nextEntityNumber() const { return m_nextEntityNumber; }
 
-    // Acrescenta a entidade (validada). Retorna o novo id em 'newId'.
+    // Acrescenta a entidade (validada; modificadores de canto também precisam ser aplicáveis).
+    // Retorna o novo id em 'newId'.
     EntityValidation addEntity(const SketchGeometry& geometry, std::string* newId = nullptr);
     // Substitui a geometria (mesmo tipo), mantendo o id.
     EntityValidation updateEntity(const std::string& entityId, const SketchGeometry& geometry);
     // Altera uma dimensão editável.
     EntityValidation setDimension(const std::string& entityId, const std::string& key, double value);
+    // Recusado se a entidade for referenciada por um Fillet 2D ou Chamfer 2D.
     bool removeEntity(const std::string& entityId);
+    bool removeEntity(const std::string& entityId, std::string& error);
+    // Modificadores de canto que referenciam a entidade.
+    std::vector<std::string> modifiersUsing(const std::string& entityId) const;
+    // Modificadores de canto aplicáveis (referências existentes, cantos válidos, comprimentos
+    // suficientes). Toda alteração bem-sucedida mantém o esboço resolúvel.
+    EntityValidation checkResolvable() const;
 
     // Todas as dimensões das entidades, na ordem das entidades.
     std::vector<SketchDimension> dimensions() const;
