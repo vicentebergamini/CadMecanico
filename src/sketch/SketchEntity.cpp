@@ -130,6 +130,17 @@ SketchArc SketchArc::fromCenterStartEnd(const gp_Pnt2d& center, const gp_Pnt2d& 
     return a;
 }
 
+const char* chamferModeName(ChamferMode mode)
+{
+    switch (mode)
+    {
+    case ChamferMode::Equal:         return "equal";
+    case ChamferMode::TwoDistances:  return "twoDistances";
+    case ChamferMode::DistanceAngle: return "distanceAngle";
+    }
+    return "";
+}
+
 bool isCornerModifier(const SketchGeometry& geometry)
 {
     return std::holds_alternative<SketchFillet>(geometry) || std::holds_alternative<SketchChamfer>(geometry);
@@ -227,8 +238,19 @@ EntityValidation SketchEntity::validate(const SketchGeometry& geometry)
         return firstFailure(checkCornerRefs(f->entityA, f->entityB, f->corner, "Fillet 2D"),
                             checkSize("radius", "Raio do fillet", f->radius));
     const auto& c = std::get<SketchChamfer>(geometry);
-    return firstFailure(checkCornerRefs(c.entityA, c.entityB, c.corner, "Chamfer 2D"),
-                        checkSize("distance", "Distância do chanfro", c.distance));
+    const EntityValidation v = firstFailure(checkCornerRefs(c.entityA, c.entityB, c.corner, "Chamfer 2D"),
+                                            checkSize("distance", c.mode == ChamferMode::Equal ? "Distância do chanfro"
+                                                                                               : "Distância D1",
+                                                      c.distance));
+    if (!v.ok)
+        return v;
+    if (!std::isfinite(c.distance2) || !std::isfinite(c.angle))
+        return fail(!std::isfinite(c.distance2) ? "distance2" : "angle", "Chanfro: valor não numérico");
+    if (c.mode == ChamferMode::TwoDistances)
+        return checkSize("distance2", "Distância D2", c.distance2);
+    if (c.mode == ChamferMode::DistanceAngle && (c.angle < 0.1 || c.angle > 179.9))
+        return fail("angle", "Ângulo do chanfro deve estar entre 0,1° e 179,9°");
+    return {};
 }
 
 const char* typeName(EntityType type)
@@ -283,7 +305,13 @@ std::vector<SketchDimension> dimensionsOf(const SketchEntity& e)
     if (const auto* f = std::get_if<SketchFillet>(&e.geometry))
         return {d("radius", "Raio", f->radius)};
     const auto& c = std::get<SketchChamfer>(e.geometry);
-    return {d("distance", "Distância", c.distance)};
+    SketchDimension mode = d("mode", "Modo", double(int(c.mode)), true, DimensionKind::Choice);
+    mode.choices = {"Distâncias iguais", "Duas distâncias", "Distância e ângulo"};
+    return {mode,
+            d("distance", c.mode == ChamferMode::Equal ? "Distância" : "Distância D1 (lado de referência)", c.distance),
+            d("distance2", "Distância D2 (outro lado)", c.distance2),
+            d("angle", "Ângulo (lado de referência → chanfro)", c.angle, true, DimensionKind::Angle),
+            d("flip", "Referência no segundo lado", c.flip ? 1.0 : 0.0, true, DimensionKind::Flag)};
 }
 
 bool applyDimension(SketchGeometry& geometry, const std::string& key, double value)
@@ -335,9 +363,23 @@ bool applyDimension(SketchGeometry& geometry, const std::string& key, double val
         return true;
     }
     auto& c = std::get<SketchChamfer>(geometry);
-    if (key != "distance")
+    if (key == "distance")
+        c.distance = value;
+    else if (key == "distance2")
+        c.distance2 = value;
+    else if (key == "angle")
+        c.angle = value;
+    else if (key == "flip")
+        c.flip = value != 0.0;
+    else if (key == "mode")
+    {
+        const int m = int(value);
+        if (m < 0 || m > 2 || double(m) != value)
+            return false;
+        c.mode = ChamferMode(m);
+    }
+    else
         return false;
-    c.distance = value;
     return true;
 }
 

@@ -21,11 +21,13 @@
 #pragma once
 
 #include <TopoDS_Edge.hxx>
+#include <TopoDS_Face.hxx>
 #include <TopoDS_Shape.hxx>
 #include <gp_Dir.hxx>
 #include <gp_Pnt.hxx>
 
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace cad::modeling {
@@ -59,6 +61,11 @@ EdgeSignature describeEdge(const TopoDS_Shape& solid, const TopoDS_Edge& edge);
 
 // Localiza em 'solid' a aresta correspondente à assinatura (ver regras no início do arquivo).
 EdgeMatch resolveEdge(const TopoDS_Shape& solid, const EdgeSignature& signature);
+
+// Faces adjacentes à aresta com a normal externa no ponto médio da aresta, em ordem
+// determinística: maior componente Z da normal primeiro, depois Y, depois X (ex.: na aresta
+// superior frontal de um bloco, a face superior vem antes da frontal).
+std::vector<std::pair<TopoDS_Face, gp_Dir>> adjacentFaces(const TopoDS_Shape& solid, const TopoDS_Edge& edge);
 
 // true se 'edge' é uma aresta de 'shape'.
 bool containsEdge(const TopoDS_Shape& shape, const TopoDS_Shape& edge);

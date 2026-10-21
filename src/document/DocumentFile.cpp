@@ -189,6 +189,74 @@ bool readInt(const QJsonObject& o, const char* key, int minimum, int& value)
     return true;
 }
 
+QJsonArray dir3(const gp_XYZ& v)
+{
+    return QJsonArray{v.X(), v.Y(), v.Z()};
+}
+
+bool readXYZ(const QJsonValue& v, gp_XYZ& out, bool unit)
+{
+    if (!v.isArray() || v.toArray().size() != 3)
+        return false;
+    double c[3];
+    for (int i = 0; i < 3; ++i)
+    {
+        const QJsonValue x = v.toArray().at(i);
+        if (!x.isDouble() || !std::isfinite(x.toDouble()))
+            return false;
+        c[i] = x.toDouble();
+    }
+    out.SetCoord(c[0], c[1], c[2]);
+    return !unit || out.Modulus() > 1e-9;
+}
+
+// Suporte de esboço sobre face (esquema 7): corpo, assinatura da face e sistema local.
+bool readSupport(const QJsonValue& value, cad::sketch::SketchSupport& support, cad::sketch::SketchPlane& plane,
+                 QString& message)
+{
+    if (!value.isObject())
+    {
+        message = QStringLiteral("suporte da face ausente ou inválido");
+        return false;
+    }
+    const QJsonObject o = value.toObject();
+    for (auto it = o.begin(); it != o.end(); ++it)
+        if (it.key() != "bodyId" && it.key() != "face" && it.key() != "frame")
+        {
+            message = QStringLiteral("campo desconhecido \"%1\" no suporte").arg(it.key());
+            return false;
+        }
+    if (!o.value("bodyId").isString() || !isValidIdentifier(o.value("bodyId").toString().toStdString()))
+    {
+        message = QStringLiteral("corpo de suporte inválido");
+        return false;
+    }
+    support.bodyId = o.value("bodyId").toString().toStdString();
+    const QJsonObject f = o.value("face").toObject();
+    gp_XYZ normal, centroid, origin, xAxis, frameNormal;
+    if (!o.value("face").isObject() || !readXYZ(f.value("normal"), normal, true) || !readXYZ(f.value("centroid"), centroid, false)
+        || !f.value("offset").isDouble() || !std::isfinite(f.value("offset").toDouble()) || !f.value("area").isDouble()
+        || !(f.value("area").toDouble() > 0.0) || f.size() != 4)
+    {
+        message = QStringLiteral("assinatura da face de suporte inválida");
+        return false;
+    }
+    const QJsonObject fr = o.value("frame").toObject();
+    if (!o.value("frame").isObject() || fr.size() != 3 || !readXYZ(fr.value("origin"), origin, false)
+        || !readXYZ(fr.value("xAxis"), xAxis, true) || !readXYZ(fr.value("normal"), frameNormal, true)
+        || std::fabs(gp_Dir(xAxis).Dot(gp_Dir(frameNormal))) > 1e-6)
+    {
+        message = QStringLiteral("sistema local do esboço inválido");
+        return false;
+    }
+    support.face.normal = gp_Dir(normal);
+    support.face.centroid = gp_Pnt(centroid);
+    support.face.offset = f.value("offset").toDouble();
+    support.face.area = f.value("area").toDouble();
+    plane = cad::sketch::SketchPlane::fromFrame(gp_Pnt(origin), gp_Dir(frameNormal), gp_Dir(xAxis));
+    return true;
+}
+
 // Lê um esboço (esquema 2). Chaves desconhecidas são recusadas.
 bool readSketch(const QJsonValue& value, int index, int schema, cad::sketch::Sketch& out, QString& message)
 {
@@ -200,7 +268,7 @@ bool readSketch(const QJsonValue& value, int index, int schema, cad::sketch::Ske
         return false;
     }
     const QJsonObject o = value.toObject();
-    const QStringList allowed{"id", "name", "plane", "nextEntityNumber", "entities"};
+    const QStringList allowed{"id", "name", "plane", "nextEntityNumber", "entities", "support"};
     for (auto it = o.begin(); it != o.end(); ++it)
         if (!allowed.contains(it.key()))
         {
@@ -219,9 +287,29 @@ bool readSketch(const QJsonValue& value, int index, int schema, cad::sketch::Ske
         return false;
     }
     const auto plane = SketchPlane::fromName(o.value("plane").toString().toStdString());
-    if (!o.value("plane").isString() || !plane)
+    if (!o.value("plane").isString() || !plane || (*plane == PlaneType::Face && schema < 7))
     {
-        message = where + QStringLiteral(": plano inválido (esperado XY, XZ ou YZ)");
+        message = where + (schema >= 7 ? QStringLiteral(": plano inválido (esperado XY, XZ, YZ ou face)")
+                                       : QStringLiteral(": plano inválido (esperado XY, XZ ou YZ)"));
+        return false;
+    }
+    // Esboço sobre face (esquema 7): suporte obrigatório; nos planos padrão, proibido.
+    std::optional<SketchSupport> support;
+    SketchPlane facePlane;
+    if (*plane == PlaneType::Face)
+    {
+        SketchSupport s;
+        QString m;
+        if (!readSupport(o.value("support"), s, facePlane, m))
+        {
+            message = where + QStringLiteral(": ") + m;
+            return false;
+        }
+        support = s;
+    }
+    else if (o.contains("support"))
+    {
+        message = where + QStringLiteral(": \"support\" só se aplica a esboços sobre face");
         return false;
     }
     int nextEntity = 0;
@@ -281,6 +369,12 @@ bool readSketch(const QJsonValue& value, int index, int schema, cad::sketch::Ske
         case EntityType::Chamfer:
             numbers = {"corner", *type == EntityType::Fillet ? "radius" : "distance"};
             texts = {"entityA", "entityB"};
+            if (*type == EntityType::Chamfer && schema >= 7)
+            {
+                numbers << "distance2" << "angle";
+                texts << "mode";
+                flags << "flip";
+            }
             break;
         }
         for (auto it = e.begin(); it != e.end(); ++it)
@@ -290,7 +384,7 @@ bool readSketch(const QJsonValue& value, int index, int schema, cad::sketch::Ske
                 message = ewhere + QStringLiteral(": campo desconhecido \"%1\"").arg(it.key());
                 return false;
             }
-        double v[5] = {0, 0, 0, 0, 0};
+        double v[6] = {0, 0, 0, 0, 0, 0};
         for (int k = 0; k < numbers.size(); ++k)
         {
             const QJsonValue x = e.value(numbers[k]);
@@ -301,7 +395,7 @@ bool readSketch(const QJsonValue& value, int index, int schema, cad::sketch::Ske
             }
             v[k] = x.toDouble();
         }
-        std::string refs[2];
+        std::string refs[3];
         for (int k = 0; k < texts.size(); ++k)
         {
             if (!e.value(texts[k]).isString())
@@ -333,7 +427,29 @@ bool readSketch(const QJsonValue& value, int index, int schema, cad::sketch::Ske
             entity.geometry = SketchArc{v[0], v[1], v[2], v[3], v[4], e.value("clockwise").toBool()};
             break;
         case EntityType::Fillet:    entity.geometry = SketchFillet{refs[0], refs[1], int(v[0]), v[1]}; break;
-        case EntityType::Chamfer:   entity.geometry = SketchChamfer{refs[0], refs[1], int(v[0]), v[1]}; break;
+        case EntityType::Chamfer:
+        {
+            SketchChamfer c{refs[0], refs[1], int(v[0]), v[1]};
+            if (schema >= 7)
+            {
+                if (refs[2] == chamferModeName(ChamferMode::Equal))
+                    c.mode = ChamferMode::Equal;
+                else if (refs[2] == chamferModeName(ChamferMode::TwoDistances))
+                    c.mode = ChamferMode::TwoDistances;
+                else if (refs[2] == chamferModeName(ChamferMode::DistanceAngle))
+                    c.mode = ChamferMode::DistanceAngle;
+                else
+                {
+                    message = ewhere + QStringLiteral(": modo de chanfro inválido");
+                    return false;
+                }
+                c.distance2 = v[2];
+                c.angle = v[3];
+                c.flip = e.value("flip").toBool();
+            }
+            entity.geometry = c;
+            break;
+        }
         }
         entities.push_back(entity);
     }
@@ -344,6 +460,11 @@ bool readSketch(const QJsonValue& value, int index, int schema, cad::sketch::Ske
     {
         message = where + QStringLiteral(": ") + QString::fromStdString(error);
         return false;
+    }
+    if (support)
+    {
+        out.setPlane(facePlane);
+        out.setSupport(support);
     }
     return true;
 }
@@ -398,16 +519,34 @@ QJsonObject sketchToJson(const cad::sketch::Sketch& sketch)
             o.insert("entityB", QString::fromStdString(c.entityB));
             o.insert("corner", c.corner);
             o.insert("distance", c.distance);
+            o.insert("mode", QString::fromLatin1(chamferModeName(c.mode)));
+            o.insert("distance2", c.distance2);
+            o.insert("angle", c.angle);
+            o.insert("flip", c.flip);
         }
         entities.append(o);
     }
-    return QJsonObject{
+    QJsonObject result{
         {"id", QString::fromStdString(sketch.id())},
         {"name", QString::fromStdString(sketch.name())},
         {"plane", QString::fromLatin1(SketchPlane::name(sketch.plane().type()))},
         {"nextEntityNumber", sketch.nextEntityNumber()},
         {"entities", entities},
     };
+    if (const auto& s = sketch.support())
+    {
+        const SketchPlane& p = sketch.plane();
+        result.insert("support",
+                      QJsonObject{{"bodyId", QString::fromStdString(s->bodyId)},
+                                  {"face", QJsonObject{{"normal", dir3(s->face.normal.XYZ())},
+                                                       {"offset", s->face.offset},
+                                                       {"centroid", dir3(s->face.centroid.XYZ())},
+                                                       {"area", s->face.area}}},
+                                  {"frame", QJsonObject{{"origin", dir3(p.origin().XYZ())},
+                                                        {"xAxis", dir3(p.horizontalAxis().XYZ())},
+                                                        {"normal", dir3(p.normal().XYZ())}}}});
+    }
+    return result;
 }
 
 } // namespace
@@ -446,11 +585,30 @@ QByteArray DocumentFile::toJson(const CadDocument& document)
             for (const auto& e : op.edges)
                 edges.append(edgeToJson(e));
             o.insert("edges", edges);
+            if (op.type == OperationType::Chamfer3D)
+            {
+                o.insert("mode", QString::fromLatin1(op.chamferMode == Chamfer3DMode::TwoDistances    ? "twoDistances"
+                                                     : op.chamferMode == Chamfer3DMode::DistanceAngle ? "distanceAngle"
+                                                                                                      : "equal"));
+                if (op.chamferMode != Chamfer3DMode::Equal)
+                {
+                    QJsonArray normals;
+                    for (const gp_Dir& n : op.referenceNormals)
+                        normals.append(vec3(n.X(), n.Y(), n.Z()));
+                    o.insert("referenceNormals", normals);
+                }
+            }
         }
         if (op.type == OperationType::Extrude)
         {
             o.insert("sketchId", QString::fromStdString(op.sketchId));
             o.insert("reversed", op.reversed);
+            o.insert("mode", QString::fromLatin1(op.extrudeMode == ExtrudeMode::Boss  ? "boss"
+                                                 : op.extrudeMode == ExtrudeMode::Cut ? "cut"
+                                                                                      : "newBody"));
+            if (op.extrudeMode != ExtrudeMode::NewBody)
+                o.insert("targetId", QString::fromStdString(op.targetId));
+            o.insert("endCondition", QString::fromLatin1(op.endCondition == EndCondition::ThroughAll ? "throughAll" : "blind"));
         }
         operations.append(o);
     }
@@ -586,9 +744,17 @@ FileResult DocumentFile::fromJson(const QByteArray& json, CadDocument& out)
                              .arg(type, schema >= 6   ? QStringLiteral("\"extrude\", \"boolean\", \"fillet3d\" ou \"chamfer3d\"")
                                         : schema >= 5 ? QStringLiteral("\"extrude\" ou \"boolean\"")
                                                       : QStringLiteral("\"extrude\"")));
-        const QStringList allowed = isBoolean  ? QStringList{"id", "type", "name", "operation", "operandA", "operandB"}
-                                    : isFinish ? QStringList{"id", "type", "name", "sourceId", "parameters", "edges"}
-                                               : QStringList{"id", "type", "name", "sketchId", "reversed", "parameters"};
+        QStringList allowed = isBoolean  ? QStringList{"id", "type", "name", "operation", "operandA", "operandB"}
+                              : isFinish ? QStringList{"id", "type", "name", "sourceId", "parameters", "edges"}
+                                         : QStringList{"id", "type", "name", "sketchId", "reversed", "parameters"};
+        if (schema >= 7 && !isBoolean)
+        {
+            // Esquema 7: modo/destino/condição final da extrusão; modo e referências do Chamfer 3D.
+            if (isFinish && type == QLatin1String("chamfer3d"))
+                allowed << "mode" << "referenceNormals";
+            else if (!isFinish)
+                allowed << "mode" << "targetId" << "endCondition";
+        }
         for (auto it = op.begin(); it != op.end(); ++it)
             if (!allowed.contains(it.key()))
                 return error(QStringLiteral("Operação %1: campo desconhecido \"%2\"").arg(i + 1).arg(it.key()));
@@ -631,11 +797,44 @@ FileResult DocumentFile::fromJson(const QByteArray& json, CadDocument& out)
                 return error(QStringLiteral("Operação %1: referência \"sourceId\" ausente ou inválida").arg(i + 1));
             f.sourceId = op.value("sourceId").toString().toStdString();
             const char* key = f.type == OperationType::Fillet3D ? "radius" : "distance";
+            QStringList keys{QString::fromLatin1(key)};
+            if (f.type == OperationType::Chamfer3D && schema >= 7)
+            {
+                const QString mode = op.value("mode").toString();
+                if (mode == QLatin1String("equal"))
+                    f.chamferMode = Chamfer3DMode::Equal;
+                else if (mode == QLatin1String("twoDistances"))
+                    f.chamferMode = Chamfer3DMode::TwoDistances;
+                else if (mode == QLatin1String("distanceAngle"))
+                    f.chamferMode = Chamfer3DMode::DistanceAngle;
+                else
+                    return error(QStringLiteral("Operação %1: campo \"mode\" do chanfro inválido").arg(i + 1));
+                if (f.chamferMode == Chamfer3DMode::TwoDistances)
+                    keys << "distance2";
+                if (f.chamferMode == Chamfer3DMode::DistanceAngle)
+                    keys << "angle";
+                if (f.chamferMode != Chamfer3DMode::Equal)
+                {
+                    if (!op.value("referenceNormals").isArray())
+                        return error(QStringLiteral("Operação %1: lista \"referenceNormals\" ausente").arg(i + 1));
+                    for (const QJsonValue& n : op.value("referenceNormals").toArray())
+                    {
+                        gp_XYZ d;
+                        if (!readXYZ(n, d, true))
+                            return error(QStringLiteral("Operação %1: normal de referência inválida").arg(i + 1));
+                        f.referenceNormals.emplace_back(d);
+                    }
+                }
+                else if (op.contains("referenceNormals"))
+                    return error(QStringLiteral("Operação %1: \"referenceNormals\" só se aplica a chanfros assimétricos").arg(i + 1));
+            }
             QList<double> values;
             QString message;
-            if (!readParameters(op, QStringList{QString::fromLatin1(key)}, values, message))
+            if (!readParameters(op, keys, values, message))
                 return error(QStringLiteral("Operação %1: %2").arg(i + 1).arg(message));
-            f.parameters = {{key, values[0]}};
+            f.parameters.clear();
+            for (int k = 0; k < keys.size(); ++k)
+                f.parameters.push_back({keys[k].toStdString(), values[k]});
             if (!op.value("edges").isArray() || op.value("edges").toArray().isEmpty())
                 return error(QStringLiteral("Operação %1: lista \"edges\" ausente ou vazia").arg(i + 1));
             for (const QJsonValue& ev : op.value("edges").toArray())
@@ -657,6 +856,33 @@ FileResult DocumentFile::fromJson(const QByteArray& json, CadDocument& out)
         if (!readParameters(op, QStringList{"depth"}, values, message))
             return error(QStringLiteral("Operação %1: %2").arg(i + 1).arg(message));
         Operation e;
+        if (schema >= 7)
+        {
+            const QString mode = op.value("mode").toString();
+            if (mode == QLatin1String("newBody"))
+                e.extrudeMode = ExtrudeMode::NewBody;
+            else if (mode == QLatin1String("boss"))
+                e.extrudeMode = ExtrudeMode::Boss;
+            else if (mode == QLatin1String("cut"))
+                e.extrudeMode = ExtrudeMode::Cut;
+            else
+                return error(QStringLiteral("Operação %1: campo \"mode\" da extrusão inválido (newBody, boss ou cut)").arg(i + 1));
+            const QString end = op.value("endCondition").toString();
+            if (end == QLatin1String("blind"))
+                e.endCondition = EndCondition::Blind;
+            else if (end == QLatin1String("throughAll"))
+                e.endCondition = EndCondition::ThroughAll;
+            else
+                return error(QStringLiteral("Operação %1: campo \"endCondition\" inválido (blind ou throughAll)").arg(i + 1));
+            if (e.extrudeMode == ExtrudeMode::NewBody)
+            {
+                if (op.contains("targetId"))
+                    return error(QStringLiteral("Operação %1: \"targetId\" não se aplica a novo corpo").arg(i + 1));
+            }
+            else if (!op.value("targetId").isString() || !isValidIdentifier(op.value("targetId").toString().toStdString()))
+                return error(QStringLiteral("Operação %1: corpo de destino ausente ou inválido").arg(i + 1));
+            e.targetId = op.value("targetId").toString().toStdString();
+        }
         e.id = id.toString().toStdString();
         e.type = OperationType::Extrude;
         e.name = op.value("name").toString().toStdString();

@@ -8,4 +8,4 @@ add_library(cad_sketch STATIC
     SketchResolver.h SketchResolver.cpp
 )
 target_include_directories(cad_sketch PUBLIC ${PROJECT_SOURCE_DIR}/src)
-target_link_libraries(cad_sketch PUBLIC TKernel TKMath TKG2d TKG3d TKGeomBase TKBRep TKTopAlgo)
+target_link_libraries(cad_sketch PUBLIC cad_modeling TKernel TKMath TKG2d TKG3d TKGeomBase TKBRep TKTopAlgo)

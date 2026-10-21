@@ -1,0 +1,184 @@
+{
+    "document": {
+        "name": "Sem título",
+        "nextOperationNumber": 6,
+        "nextSketchNumber": 4,
+        "operations": [
+            {
+                "id": "op-1",
+                "name": "Extrusão 1",
+                "parameters": {
+                    "depth": 20
+                },
+                "reversed": false,
+                "sketchId": "sk-1",
+                "type": "extrude"
+            },
+            {
+                "id": "op-2",
+                "name": "Extrusão 2",
+                "parameters": {
+                    "depth": 30
+                },
+                "reversed": false,
+                "sketchId": "sk-3",
+                "type": "extrude"
+            },
+            {
+                "id": "op-3",
+                "name": "Subtração 1",
+                "operandA": "op-1",
+                "operandB": "op-2",
+                "operation": "cut",
+                "type": "boolean"
+            },
+            {
+                "edges": [
+                    {
+                        "curve": "line",
+                        "direction": [
+                            1,
+                            0,
+                            0
+                        ],
+                        "length": 71.5,
+                        "mid": [
+                            54.45,
+                            28.4,
+                            20
+                        ],
+                        "normals": [
+                            [
+                                0,
+                                -1,
+                                0
+                            ],
+                            [
+                                0,
+                                0,
+                                1
+                            ]
+                        ],
+                        "radius": 0
+                    }
+                ],
+                "id": "op-4",
+                "name": "Fillet 3D 1",
+                "parameters": {
+                    "radius": 3
+                },
+                "sourceId": "op-3",
+                "type": "fillet3d"
+            },
+            {
+                "edges": [
+                    {
+                        "curve": "line",
+                        "direction": [
+                            1,
+                            0,
+                            0
+                        ],
+                        "length": 71.5,
+                        "mid": [
+                            54.45,
+                            28.4,
+                            0
+                        ],
+                        "normals": [
+                            [
+                                0,
+                                -1,
+                                0
+                            ],
+                            [
+                                0,
+                                0,
+                                -1
+                            ]
+                        ],
+                        "radius": 0
+                    }
+                ],
+                "id": "op-5",
+                "name": "Chamfer 3D 1",
+                "parameters": {
+                    "distance": 2
+                },
+                "sourceId": "op-4",
+                "type": "chamfer3d"
+            }
+        ],
+        "sketches": [
+            {
+                "entities": [
+                    {
+                        "height": 48.6,
+                        "id": "e-1",
+                        "type": "rectangle",
+                        "width": 76.5,
+                        "x": 13.7,
+                        "y": 28.4
+                    },
+                    {
+                        "corner": 2,
+                        "entityA": "e-1",
+                        "entityB": "e-1",
+                        "id": "e-2",
+                        "radius": 10,
+                        "type": "fillet"
+                    },
+                    {
+                        "corner": 0,
+                        "distance": 5,
+                        "entityA": "e-1",
+                        "entityB": "e-1",
+                        "id": "e-3",
+                        "type": "chamfer"
+                    }
+                ],
+                "id": "sk-1",
+                "name": "Esboço 1",
+                "nextEntityNumber": 4,
+                "plane": "XY"
+            },
+            {
+                "entities": [
+                    {
+                        "clockwise": false,
+                        "cx": 51.9,
+                        "cy": 56.5,
+                        "endAngle": 90,
+                        "id": "e-1",
+                        "radius": 17,
+                        "startAngle": 0,
+                        "type": "arc"
+                    }
+                ],
+                "id": "sk-2",
+                "name": "Esboço 2",
+                "nextEntityNumber": 2,
+                "plane": "XZ"
+            },
+            {
+                "entities": [
+                    {
+                        "cx": 51.9,
+                        "cy": 52.7,
+                        "id": "e-1",
+                        "radius": 7.4,
+                        "type": "circle"
+                    }
+                ],
+                "id": "sk-3",
+                "name": "Esboço 3",
+                "nextEntityNumber": 2,
+                "plane": "XY"
+            }
+        ],
+        "unit": "mm"
+    },
+    "format": "cadmec",
+    "generator": "CadMecanico",
+    "schemaVersion": 6
+}

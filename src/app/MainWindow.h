@@ -86,6 +86,9 @@ public:
     const cad::sketch::Sketch* editingSketch() const { return m_editSketch ? &*m_editSketch : nullptr; }
     QString selectedSketchEntity() const { return m_selectedEntity; }
     bool startNewSketch(cad::sketch::PlaneType plane);
+    // Esboço sobre a face plana dada (E5.6): vista normal à face e eixos locais. Recusado com
+    // mensagem para faces curvas ou fora de um corpo.
+    bool startSketchOnFace(const TopoDS_Shape& face);
     bool editSketch(const QString& sketchId);
     bool finishSketch();
     void cancelSketch();
@@ -98,6 +101,8 @@ public:
     // raio/distância dado (E5.5). Retorna false (com mensagem) se não houver canto ou o
     // modificador for inviável.
     bool applyCornerModifier(cad::sketch::EntityType type, double u, double v, double tolerance, double value);
+    // Chamfer 2D com modo/distâncias/ângulo (E5.6) no canto mais próximo de (u, v).
+    bool applyChamfer2D(double u, double v, double tolerance, const cad::sketch::SketchChamfer& parameters);
 
     // --- Extrusões (E5.3) -----------------------------------------------------
     // Esboço/operação selecionados na árvore (vazio se nenhum).
@@ -139,6 +144,8 @@ public slots:
     void editParameters();
 
     void extrude();
+    void extrudeCommand(cad::document::ExtrudeMode mode);
+    void sketchOnSelectedFace();
     void booleanCommand(cad::modeling::BooleanKind kind);
     // Inicia o comando (seleção de arestas + diálogo não modal).
     void finishCommand(cad::document::OperationType type);
@@ -171,8 +178,12 @@ protected:
     virtual std::optional<cad::document::BooleanParameters> askBoolean(const cad::document::BooleanParameters& initial,
                                                                       const QString& operationId);
     virtual std::optional<cad::sketch::SketchGeometry> askEntityDimensions(const cad::sketch::SketchEntity& entity);
-    // Raio do Fillet 2D ou distância do Chamfer 2D; vazio = cancelado.
+    // Raio do Fillet 2D; vazio = cancelado.
     virtual std::optional<double> askCornerValue(cad::sketch::EntityType type, double initial);
+    // Parâmetros do Chamfer 2D (modo, D1, D2, ângulo, lado de referência); vazio = cancelado.
+    virtual std::optional<cad::sketch::SketchChamfer> askChamfer2D(const cad::sketch::SketchChamfer& initial);
+    // Saliência que não toca o corpo: perguntar se deve ser criada como novo corpo.
+    virtual bool askConvertToNewBody(const QString& message);
 
 private:
     void createActions();
@@ -196,11 +207,16 @@ private:
     void onTreeItemChanged(QTreeWidgetItem* item);
     // Esboços exibidos na árvore/visualizador: os do documento, com o esboço em edição substituído.
     std::vector<cad::sketch::Sketch> displayedSketches(bool includeEditing) const;
+    // Face plana selecionada no visualizador (nula se a seleção não for uma única face).
+    TopoDS_Shape selectedFace() const;
+    // Corpos disponíveis para saliência/corte (ativos; na edição, também o consumido pela operação).
+    std::vector<std::pair<std::string, QString>> extrusionTargets(const std::string& editingId) const;
     // Acabamentos 3D: sessão de seleção de arestas.
     void startFinish(cad::document::OperationType type, const QString& editId);
     void updateFinishSelection();
     std::vector<TopoDS_Edge> finishSelection(QString* problem) const;
     cad::modeling::FeatureResult evaluateFinish(double value) const;
+    void applyChamferOptions(cad::document::FinishParameters& p, const std::vector<TopoDS_Edge>& edges) const;
     void applyFinishDialog();
     void endFinish();
 
@@ -218,6 +234,9 @@ private:
     QAction* m_actExportStep = nullptr;
     QAction* m_actExportStl = nullptr;
     QAction* m_actExtrude = nullptr;
+    QAction* m_actExtrudeBoss = nullptr;
+    QAction* m_actExtrudeCut = nullptr;
+    QAction* m_actSketchOnFace = nullptr;
     QAction* m_actEditOperation = nullptr;
     QAction* m_actFuse = nullptr;
     QAction* m_actCut = nullptr;
@@ -255,6 +274,7 @@ private:
     bool m_editSketchIsNew = false;
     QString m_selectedEntity;
     bool m_updatingTree = false;
+    QString m_extrusionEditId; // extrusão em edição no diálogo
     QPointer<FinishDialog> m_finishDialog;
     QString m_finishEditId;          // acabamento em edição (vazio ao criar)
     mutable QString m_finishSource;  // corpo de origem das arestas selecionadas

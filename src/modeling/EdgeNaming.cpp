@@ -141,6 +141,50 @@ EdgeSignature describeEdge(const TopoDS_Shape& solid, const TopoDS_Edge& edge)
     }
 }
 
+std::vector<std::pair<TopoDS_Face, gp_Dir>> adjacentFaces(const TopoDS_Shape& solid, const TopoDS_Edge& edge)
+{
+    std::vector<std::pair<TopoDS_Face, gp_Dir>> result;
+    if (solid.IsNull() || edge.IsNull())
+        return result;
+    try
+    {
+        const EdgeFaceMap faces = edgeFaces(solid);
+        const NCollection_List<TopoDS_Shape>* adjacent = faces.Seek(edge);
+        if (!adjacent)
+            return result;
+        for (const TopoDS_Shape& fs : *adjacent)
+        {
+            const TopoDS_Face face = TopoDS::Face(fs);
+            if (std::any_of(result.begin(), result.end(), [&](const auto& r) { return r.first.IsSame(face); }))
+                continue;
+            double pf = 0.0, pl = 0.0;
+            const occ::handle<Geom2d_Curve> pcurve = BRep_Tool::CurveOnSurface(edge, face, pf, pl);
+            if (pcurve.IsNull())
+                continue;
+            const gp_Pnt2d uv = pcurve->Value(0.5 * (pf + pl));
+            gp_Pnt p;
+            gp_Vec n;
+            BRepGProp_Face(face).Normal(uv.X(), uv.Y(), p, n);
+            if (n.Magnitude() > 1e-12)
+                result.emplace_back(face, gp_Dir(n));
+        }
+    }
+    catch (const Standard_Failure&)
+    {
+        result.clear();
+    }
+    std::sort(result.begin(), result.end(), [](const auto& a, const auto& b) {
+        const gp_Dir& u = a.second;
+        const gp_Dir& v = b.second;
+        if (std::fabs(u.Z() - v.Z()) > 1e-9)
+            return u.Z() > v.Z();
+        if (std::fabs(u.Y() - v.Y()) > 1e-9)
+            return u.Y() > v.Y();
+        return u.X() > v.X();
+    });
+    return result;
+}
+
 bool containsEdge(const TopoDS_Shape& shape, const TopoDS_Shape& edge)
 {
     if (shape.IsNull() || edge.IsNull() || edge.ShapeType() != TopAbs_EDGE)

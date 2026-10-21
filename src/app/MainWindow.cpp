@@ -70,6 +70,7 @@ QString planeDescription(PlaneType plane)
     case PlaneType::XY: return MainWindow::tr("XY (vista Superior)");
     case PlaneType::XZ: return MainWindow::tr("XZ (vista Frente)");
     case PlaneType::YZ: return MainWindow::tr("YZ (vista Direita)");
+    case PlaneType::Face: return MainWindow::tr("face plana (vista normal à face)");
     }
     return QString();
 }
@@ -136,6 +137,7 @@ QString parameterLabel(const std::string& key)
     if (key == "radius") return MainWindow::tr("Raio");
     if (key == "depth")  return MainWindow::tr("Profundidade");
     if (key == "distance") return MainWindow::tr("Distância");
+    if (key == "distance2") return MainWindow::tr("Distância D2");
     return QString::fromStdString(key);
 }
 
@@ -255,9 +257,15 @@ void MainWindow::createActions()
     connect(m_actExportStl, &QAction::triggered, this, &MainWindow::exportStl);
 
     // Operações
-    m_actExtrude = new QAction(st->standardIcon(QStyle::SP_ArrowUp), tr("&Extrusão..."), this);
+    m_actExtrude = new QAction(st->standardIcon(QStyle::SP_ArrowUp), tr("Extrusão de &Novo Corpo..."), this);
     m_actExtrude->setObjectName("actionExtrusao");
     connect(m_actExtrude, &QAction::triggered, this, &MainWindow::extrude);
+    m_actExtrudeBoss = new QAction(st->standardIcon(QStyle::SP_ArrowUp), tr("Extrusão de Sa&liência..."), this);
+    m_actExtrudeBoss->setObjectName("actionExtrusaoSaliencia");
+    connect(m_actExtrudeBoss, &QAction::triggered, this, [this] { extrudeCommand(cad::document::ExtrudeMode::Boss); });
+    m_actExtrudeCut = new QAction(st->standardIcon(QStyle::SP_ArrowDown), tr("Extrusão de &Corte..."), this);
+    m_actExtrudeCut->setObjectName("actionExtrusaoCorte");
+    connect(m_actExtrudeCut, &QAction::triggered, this, [this] { extrudeCommand(cad::document::ExtrudeMode::Cut); });
 
     auto makeBoolean = [this](const QString& text, const char* name, cad::modeling::BooleanKind kind, const QString& tip) {
         auto* act = new QAction(text, this);
@@ -316,6 +324,10 @@ void MainWindow::createActions()
     m_actNewSketch->setObjectName("actionNovoEsboco");
     m_actNewSketch->setStatusTip(tr("Cria um esboço 2D no plano XY, XZ ou YZ"));
     connect(m_actNewSketch, &QAction::triggered, this, &MainWindow::newSketch);
+
+    m_actSketchOnFace = new QAction(tr("Criar Es&boço na Face"), this);
+    m_actSketchOnFace->setObjectName("actionEsbocoNaFace");
+    connect(m_actSketchOnFace, &QAction::triggered, this, &MainWindow::sketchOnSelectedFace);
 
     m_actEditSketch = new QAction(tr("&Editar esboço"), this);
     m_actEditSketch->setObjectName("actionEditarEsboco");
@@ -433,6 +445,8 @@ void MainWindow::createMenus()
     QMenu* menuOperations = menuBar()->addMenu(tr("&Operações"));
     menuOperations->setObjectName("menuOperacoes");
     menuOperations->addAction(m_actExtrude);
+    menuOperations->addAction(m_actExtrudeBoss);
+    menuOperations->addAction(m_actExtrudeCut);
     menuOperations->addSeparator();
     menuOperations->addAction(m_actFuse);
     menuOperations->addAction(m_actCut);
@@ -446,6 +460,7 @@ void MainWindow::createMenus()
     QMenu* menuSketch = menuBar()->addMenu(tr("E&sboço"));
     menuSketch->setObjectName("menuEsboco");
     menuSketch->addAction(m_actNewSketch);
+    menuSketch->addAction(m_actSketchOnFace);
     menuSketch->addAction(m_actEditSketch);
     menuSketch->addSeparator();
     menuSketch->addAction(m_actToolSelect);
@@ -495,7 +510,10 @@ void MainWindow::createToolBars()
     m_toolBarModeling->setObjectName("toolBarModelagem");
     m_toolBarModeling->addAction(m_actEditParameters);
     m_toolBarModeling->addAction(m_actNewSketch);
+    m_toolBarModeling->addAction(m_actSketchOnFace);
     m_toolBarModeling->addAction(m_actExtrude);
+    m_toolBarModeling->addAction(m_actExtrudeBoss);
+    m_toolBarModeling->addAction(m_actExtrudeCut);
     m_toolBarModeling->addAction(m_actFuse);
     m_toolBarModeling->addAction(m_actCut);
     m_toolBarModeling->addAction(m_actCommon);
@@ -609,7 +627,21 @@ void MainWindow::createCentralArea()
                                              8000);
                     return;
                 }
-                const auto value = askCornerValue(type, type == EntityType::Fillet ? 5.0 : 2.0);
+                if (type == EntityType::Chamfer)
+                {
+                    const auto corner = cad::sketch::nearestCorner(*m_editSketch, gp_Pnt2d(u, v), tolerance);
+                    cad::sketch::SketchChamfer initial{corner->entityA, corner->entityB, corner->corner, 2.0};
+                    initial.distance2 = 2.0;
+                    const auto chamfer = askChamfer2D(initial);
+                    if (!chamfer)
+                    {
+                        statusBar()->showMessage(tr("%1 cancelado").arg(entityTypeName(type)), 5000);
+                        return;
+                    }
+                    applyChamfer2D(u, v, tolerance, *chamfer);
+                    return;
+                }
+                const auto value = askCornerValue(type, 5.0);
                 if (!value)
                 {
                     statusBar()->showMessage(tr("%1 cancelado").arg(entityTypeName(type)), 5000);
@@ -644,9 +676,24 @@ void MainWindow::updateActionStates()
     // Extrusão: somente com um esboço concluído selecionado na árvore.
     const bool sketchSelected = !editing && !selectedSketchId().isEmpty();
     m_actExtrude->setEnabled(sketchSelected);
-    m_actExtrude->setStatusTip(sketchSelected ? tr("Extruda o esboço selecionado (perfil fechado)")
+    m_actExtrude->setStatusTip(sketchSelected ? tr("Extruda o esboço selecionado como novo corpo independente")
                                               : tr("Selecione na árvore um esboço concluído para extrudar"));
     m_actExtrude->setToolTip(m_actExtrude->statusTip());
+    const bool targetAvailable = sketchSelected && !m_document.activeBodies().empty();
+    for (QAction* a : {m_actExtrudeBoss, m_actExtrudeCut})
+    {
+        a->setEnabled(targetAvailable);
+        a->setToolTip(targetAvailable ? (a == m_actExtrudeBoss ? tr("Adiciona material ao corpo de destino (união)")
+                                                        : tr("Remove material do corpo de destino (subtração)"))
+                                      : tr("Selecione na árvore um esboço concluído; é necessário um corpo sólido"));
+        a->setStatusTip(a->toolTip());
+    }
+    // Esboço na face: uma face plana selecionada no visualizador.
+    const bool faceSelected = !editing && !selectedFace().IsNull();
+    m_actSketchOnFace->setEnabled(!editing);
+    m_actSketchOnFace->setToolTip(faceSelected ? tr("Cria um esboço sobre a face plana selecionada (vista normal à face)")
+                                               : tr("Selecione uma face plana de um sólido no visualizador"));
+    m_actSketchOnFace->setStatusTip(m_actSketchOnFace->toolTip());
     m_actEditOperation->setEnabled(!editing && !selectedOperationId().isEmpty());
     // Booleanas: pelo menos dois corpos ativos.
     const bool finishing = m_finishDialog != nullptr;
@@ -770,13 +817,22 @@ void MainWindow::rebuildTree()
         const QString id = QString::fromStdString(sketch.id());
         const bool editing = m_editSketch && sketch.id() == m_editSketch->id();
         auto* item = new QTreeWidgetItem(root);
+        const QString planeText = sketch.support() ? tr("sobre face de %1").arg(bodyDescription(sketch.support()->bodyId))
+                                                   : QString::fromLatin1(SketchPlane::name(sketch.plane().type()));
         item->setText(0, tr("%1 (%2)%3")
-                             .arg(QString::fromStdString(sketch.name()),
-                                  QString::fromLatin1(SketchPlane::name(sketch.plane().type())),
+                             .arg(QString::fromStdString(sketch.name()), planeText,
                                   editing ? tr(" — em edição") : QString()));
         item->setIcon(0, st->standardIcon(QStyle::SP_FileDialogContentsView));
         item->setData(0, kItemKindRole, QStringLiteral("esboco"));
         item->setData(0, kItemIdRole, id);
+        if (sketch.support())
+        {
+            auto* support = new QTreeWidgetItem(item);
+            support->setText(0, tr("Suporte: face plana de %1, normal %2")
+                                    .arg(bodyDescription(sketch.support()->bodyId), vectorText(sketch.plane().normal())));
+            support->setData(0, kItemKindRole, QStringLiteral("suporte"));
+            support->setData(0, kItemIdRole, id);
+        }
         for (const SketchEntity& e : sketch.entities())
         {
             auto* child = new QTreeWidgetItem(item);
@@ -820,8 +876,10 @@ void MainWindow::rebuildTree()
         item->setText(0, text);
         const QStyle::StandardPixmap icon = op.status != OperationStatus::Valid ? QStyle::SP_MessageBoxWarning
                                             : op.type == OperationType::Boolean ? QStyle::SP_BrowserReload
-                                            : op.type == OperationType::Extrude ? QStyle::SP_ArrowUp
-                                                                                : QStyle::SP_DialogResetButton;
+                                            : op.type == OperationType::Extrude
+                                                ? (op.extrudeMode == cad::document::ExtrudeMode::Cut ? QStyle::SP_ArrowDown
+                                                                                      : QStyle::SP_ArrowUp)
+                                                : QStyle::SP_DialogResetButton;
         item->setIcon(0, st->standardIcon(icon));
         item->setData(0, kItemKindRole, QStringLiteral("operacao"));
         item->setData(0, kItemIdRole, id);
@@ -839,19 +897,37 @@ void MainWindow::rebuildTree()
         if (op.type == OperationType::Extrude)
         {
             const Sketch* sketch = m_document.findSketch(op.sketchId);
+            using cad::document::EndCondition;
+            using cad::document::ExtrudeMode;
             addChild(tr("Esboço de origem: %1 (%2)")
                          .arg(sketch ? QString::fromStdString(sketch->name()) : tr("inexistente"),
                               QString::fromStdString(op.sketchId)),
                      "referencia");
-            addChild(tr("Profundidade: %1").arg(mm(op.parameter("depth"))), "parametro");
+            if (op.extrudeMode != ExtrudeMode::NewBody)
+            {
+                addChild(tr("Tipo: %1").arg(op.extrudeMode == ExtrudeMode::Boss ? tr("Saliência (une ao corpo)")
+                                                                                 : tr("Corte (remove do corpo)")),
+                         "parametro");
+                addChild(tr("Corpo de destino: %1").arg(bodyDescription(op.targetId)), "referencia");
+            }
+            if (op.endCondition == EndCondition::ThroughAll)
+                addChild(tr("Condição final: Atravessar tudo"), "parametro");
+            else
+                addChild(tr("Profundidade: %1").arg(mm(op.parameter("depth"))), "parametro");
             QString direction;
             if (sketch)
             {
-                const gp_Dir n = op.reversed ? sketch->plane().normal().Reversed() : sketch->plane().normal();
+                gp_Dir n = sketch->plane().normal();
+                if (op.extrudeMode == ExtrudeMode::Cut)
+                    n.Reverse();
+                if (op.reversed)
+                    n.Reverse();
                 direction = vectorText(n);
             }
-            addChild(tr("Sentido: %1 %2").arg(op.reversed ? tr("oposto à normal") : tr("normal do plano"), direction),
-                     "parametro");
+            const QString sense = op.extrudeMode == ExtrudeMode::Cut
+                                      ? (op.reversed ? tr("para fora da face") : tr("para dentro da face"))
+                                      : (op.reversed ? tr("oposto à normal") : tr("normal do plano"));
+            addChild(tr("Sentido: %1 %2").arg(sense, direction), "parametro");
         }
         else if (op.type == OperationType::Fillet3D || op.type == OperationType::Chamfer3D)
         {
@@ -860,6 +936,10 @@ void MainWindow::rebuildTree()
             addChild(tr("%1: %2").arg(op.type == OperationType::Fillet3D ? tr("Raio") : tr("Distância"),
                                       mm(op.parameter(key))),
                      "parametro");
+            if (op.type == OperationType::Chamfer3D && op.chamferMode == cad::document::Chamfer3DMode::TwoDistances)
+                addChild(tr("Modo: duas distâncias (D2 = %1)").arg(mm(op.parameter("distance2"))), "parametro");
+            else if (op.type == OperationType::Chamfer3D && op.chamferMode == cad::document::Chamfer3DMode::DistanceAngle)
+                addChild(tr("Modo: distância e ângulo (%1°)").arg(num(op.parameter("angle"))), "parametro");
             addChild(op.edges.size() == 1 ? tr("Arestas: 1") : tr("Arestas: %1").arg(op.edges.size()), "parametro");
         }
         else
@@ -943,9 +1023,12 @@ void MainWindow::showItemProperties(QTreeWidgetItem* item)
         else
         {
             const SketchPlane& plane = sketch->plane();
+            const QString planeText = sketch->support()
+                                          ? tr("face plana de %1").arg(bodyDescription(sketch->support()->bodyId))
+                                          : planeDescription(plane.type());
             html = tr("<b>%1</b><br>Identificador: %2<br>Plano: %3<br>Origem: (%4; %5; %6)"
                       "<br>Eixo horizontal: %7<br>Eixo vertical: %8<br>Normal: %9<br>Entidades: %10")
-                       .arg(QString::fromStdString(sketch->name()).toHtmlEscaped(), id, planeDescription(plane.type()),
+                       .arg(QString::fromStdString(sketch->name()).toHtmlEscaped(), id, planeText.toHtmlEscaped(),
                             num(plane.origin().X()), num(plane.origin().Y()), num(plane.origin().Z()),
                             vectorText(plane.horizontalAxis()), vectorText(plane.verticalAxis()),
                             vectorText(plane.normal()))
@@ -962,14 +1045,27 @@ void MainWindow::showItemProperties(QTreeWidgetItem* item)
         if (!op->statusMessage.empty())
             html += tr("<br>Mensagem: %1").arg(QString::fromStdString(op->statusMessage).toHtmlEscaped());
         for (const auto& p : op->parameters)
-            html += tr("<br>%1: %2").arg(parameterLabel(p.key), mm(p.value));
+        {
+            if (p.key == "depth" && op->endCondition == cad::document::EndCondition::ThroughAll)
+                continue; // ignorada em "atravessar tudo"
+            html += p.key == "angle" ? tr("<br>Ângulo: %1°").arg(num(p.value))
+                                     : tr("<br>%1: %2").arg(parameterLabel(p.key), mm(p.value));
+        }
+        if (op->type == OperationType::Extrude && op->extrudeMode != cad::document::ExtrudeMode::NewBody)
+            html += tr("<br>Modo: %1<br>Corpo de destino: %2<br>Condição final: %3")
+                        .arg(QString::fromUtf8(cad::document::extrudeModeLabel(op->extrudeMode)),
+                             bodyDescription(op->targetId).toHtmlEscaped(),
+                             op->endCondition == cad::document::EndCondition::ThroughAll ? tr("Atravessar tudo")
+                                                                                         : tr("Profundidade definida"));
         if (op->type == OperationType::Extrude)
         {
             const Sketch* sketch = m_document.findSketch(op->sketchId);
             html += tr("<br>Esboço de origem: %1 (%2)<br>Sentido: %3<br>Volume: %4 mm³")
                         .arg(sketch ? QString::fromStdString(sketch->name()).toHtmlEscaped() : tr("inexistente"),
                              QString::fromStdString(op->sketchId),
-                             op->reversed ? tr("oposto à normal do plano") : tr("normal do plano"),
+                             op->extrudeMode == cad::document::ExtrudeMode::Cut
+                                 ? (op->reversed ? tr("para fora da face") : tr("para dentro da face"))
+                                 : (op->reversed ? tr("oposto à normal do plano") : tr("normal do plano")),
                              num(cad::modeling::ShapeInspector::volume(op->result)));
         }
         if (op->type == OperationType::Boolean)
@@ -1218,14 +1314,40 @@ void MainWindow::selectTreeItem(const QString& id)
 
 void MainWindow::extrude()
 {
+    extrudeCommand(cad::document::ExtrudeMode::NewBody);
+}
+
+std::vector<std::pair<std::string, QString>> MainWindow::extrusionTargets(const std::string& editingId) const
+{
+    std::vector<std::pair<std::string, QString>> bodies;
+    for (const Operation& op : m_document.operations())
+    {
+        if (!editingId.empty() && op.id == editingId)
+            break;
+        if (CadDocument::producesBody(op.type) && (op.consumedBy.empty() || op.consumedBy == editingId))
+            bodies.emplace_back(op.id, bodyDescription(op.id));
+    }
+    return bodies;
+}
+
+void MainWindow::extrudeCommand(cad::document::ExtrudeMode mode)
+{
+    using cad::document::ExtrudeMode;
     if (isEditingSketch())
         return;
+    const QString title = ExtrusionDialog::modeTitle(mode, false);
     const QString sketchId = selectedSketchId();
     if (sketchId.isEmpty())
     {
         statusBar()->showMessage(tr("Selecione um esboço na árvore para extrudar"), 8000);
-        reportError(tr("Extrusão"), tr("Selecione na árvore de operações um esboço concluído com um perfil fechado "
-                                       "(retângulo, círculo ou contorno de linhas) e acione Extrusão novamente."));
+        reportError(title, tr("Selecione na árvore de operações um esboço concluído com um perfil fechado "
+                              "(retângulo, círculo ou contorno de linhas) e acione o comando novamente."));
+        return;
+    }
+    if (mode != ExtrudeMode::NewBody && m_document.activeBodies().empty())
+    {
+        reportError(title, tr("O documento não contém corpo sólido para %1.")
+                               .arg(mode == ExtrudeMode::Boss ? tr("receber a saliência") : tr("ser cortado")));
         return;
     }
     const Sketch* sketch = m_document.findSketch(sketchId.toStdString());
@@ -1238,11 +1360,34 @@ void MainWindow::extrude()
         return;
     }
     cad::document::ExtrudeParameters initial;
-    initial.name = m_document.defaultExtrusionName();
+    initial.mode = mode;
+    initial.name = m_document.defaultExtrusionName(mode);
     initial.sketchId = sketchId.toStdString();
     initial.depth = 10.0;
+    if (mode != ExtrudeMode::NewBody)
+    {
+        // Destino padrão: o corpo ativo que descende do corpo de suporte do esboço (esboço sobre
+        // face); senão, o corpo ativo selecionado ou o primeiro.
+        const auto bodies = m_document.activeBodies();
+        initial.targetId = bodies.front();
+        if (sketch->support())
+        {
+            std::string id = sketch->support()->bodyId;
+            while (const Operation* op = m_document.findOperation(id))
+            {
+                if (op->consumedBy.empty())
+                    break;
+                id = op->consumedBy;
+            }
+            if (std::find(bodies.begin(), bodies.end(), id) != bodies.end())
+                initial.targetId = id;
+        }
+        if (mode == ExtrudeMode::Cut)
+            initial.endCondition = cad::document::EndCondition::Blind;
+    }
     const auto parameters = askExtrusion(initial, false);
     m_viewer->clearPreviewShape();
+    m_viewer->clearOperandHighlight();
     if (!parameters)
     {
         statusBar()->showMessage(tr("Extrusão cancelada; documento mantido"), 5000);
@@ -1254,11 +1399,23 @@ void MainWindow::extrude()
 bool MainWindow::addExtrusion(const cad::document::ExtrudeParameters& parameters)
 {
     std::string newId;
-    const auto result = m_document.addExtrusion(parameters, &newId);
+    auto result = m_document.addExtrusion(parameters, &newId);
+    if (!result.ok && parameters.mode == cad::document::ExtrudeMode::Boss
+        && result.message.find("não toca") != std::string::npos
+        && askConvertToNewBody(QString::fromStdString(result.message)))
+    {
+        // Escolha explícita do usuário: o mesmo perfil como novo corpo independente.
+        cad::document::ExtrudeParameters asNew = parameters;
+        asNew.mode = cad::document::ExtrudeMode::NewBody;
+        asNew.targetId.clear();
+        asNew.name = m_document.defaultExtrusionName(asNew.mode);
+        result = m_document.addExtrusion(asNew, &newId);
+    }
     if (!result.ok)
     {
         statusBar()->showMessage(tr("Extrusão recusada: %1").arg(QString::fromStdString(result.message)), 8000);
-        reportError(tr("Extrusão"), tr("A extrusão não foi criada:\n%1").arg(QString::fromStdString(result.message)));
+        reportError(tr("Extrusão"), tr("A extrusão não foi criada:\n%1\n\nO documento foi mantido.")
+                                        .arg(QString::fromStdString(result.message)));
         return false;
     }
     refreshDocumentViews(true);
@@ -1385,8 +1542,11 @@ void MainWindow::editOperation()
         editParameters(); // bloco base / furo passante
         return;
     }
+    m_extrusionEditId = id;
     const auto parameters = askExtrusion(m_document.extrudeParameters(id.toStdString()), true);
+    m_extrusionEditId.clear();
     m_viewer->clearPreviewShape();
+    m_viewer->clearOperandHighlight();
     if (!parameters)
     {
         statusBar()->showMessage(tr("Edição da extrusão cancelada"), 5000);
@@ -1517,6 +1677,23 @@ void MainWindow::startFinish(OperationType type, const QString& editId)
             edges << e;
         m_viewer->selectSubShapes(edges);
     }
+    if (type == OperationType::Chamfer3D)
+    {
+        connect(m_finishDialog, &FinishDialog::chamferOptionsChanged, this, &MainWindow::updateFinishSelection);
+        if (editing)
+        {
+            const cad::document::FinishParameters p = m_document.finishParameters(editId.toStdString());
+            // Referência atual = segunda face adjacente (ordem padrão) → opção "outra face".
+            bool flip = false;
+            const auto edges = m_document.resolvedFinishEdges(editId.toStdString());
+            if (!edges.empty() && !p.referenceNormals.empty())
+            {
+                const auto alt = m_document.referenceNormals(p.sourceId, {edges.front()}, true);
+                flip = !alt.empty() && alt.front().Angle(p.referenceNormals.front()) < 1e-3;
+            }
+            m_finishDialog->setChamferOptions(p.chamferMode, p.value2, p.angle, flip);
+        }
+    }
     m_finishDialog->setEvaluator([this](double v) { return evaluateFinish(v); });
     updateFinishSelection();
     updateActionStates();
@@ -1568,6 +1745,33 @@ void MainWindow::updateFinishSelection()
         return;
     QString problem;
     const std::vector<TopoDS_Edge> edges = finishSelection(&problem);
+    // Chamfer 3D assimétrico: face de referência da primeira aresta descrita e destacada em azul.
+    if (m_finishDialog->type() == OperationType::Chamfer3D)
+    {
+        const bool asym = m_finishDialog->chamferMode() != cad::document::Chamfer3DMode::Equal;
+        TopoDS_Shape highlight;
+        QString info = tr("(selecione uma aresta)");
+        const Operation* body = m_document.findOperation(m_finishSource.toStdString());
+        if (asym && body && !edges.empty())
+        {
+            BRep_Builder builder;
+            TopoDS_Compound faces;
+            builder.MakeCompound(faces);
+            for (size_t i = 0; i < edges.size(); ++i)
+            {
+                const auto adjacent = cad::modeling::adjacentFaces(body->result, edges[i]);
+                if (adjacent.size() != 2)
+                    continue;
+                const auto& ref = adjacent[m_finishDialog->flipReference() ? 1 : 0];
+                builder.Add(faces, ref.first);
+                if (i == 0)
+                    info = tr("normal %1 (azul)").arg(vectorText(ref.second));
+            }
+            highlight = faces;
+        }
+        m_finishDialog->setReferenceInfo(asym ? info : tr("(não se aplica a distâncias iguais)"));
+        m_viewer->setOperandHighlight(highlight, TopoDS_Shape());
+    }
     m_finishDialog->setSelectionInfo(int(edges.size()),
                                      m_finishSource.isEmpty() ? QString() : bodyDescription(m_finishSource.toStdString()),
                                      problem);
@@ -1587,7 +1791,19 @@ cad::modeling::FeatureResult MainWindow::evaluateFinish(double value) const
     p.sourceId = m_finishSource.toStdString();
     p.value = value;
     p.edges = m_document.edgeSignatures(p.sourceId, edges);
+    applyChamferOptions(p, edges);
     return m_document.previewFinish(m_finishDialog->type(), p);
+}
+
+void MainWindow::applyChamferOptions(cad::document::FinishParameters& p, const std::vector<TopoDS_Edge>& edges) const
+{
+    if (!m_finishDialog || m_finishDialog->type() != OperationType::Chamfer3D)
+        return;
+    p.chamferMode = m_finishDialog->chamferMode();
+    p.value2 = m_finishDialog->value2();
+    p.angle = m_finishDialog->angle();
+    if (p.chamferMode != cad::document::Chamfer3DMode::Equal)
+        p.referenceNormals = m_document.referenceNormals(p.sourceId, edges, m_finishDialog->flipReference());
 }
 
 void MainWindow::applyFinishDialog()
@@ -1602,6 +1818,7 @@ void MainWindow::applyFinishDialog()
     p.sourceId = m_finishSource.toStdString();
     p.value = m_finishDialog->value();
     p.edges = m_document.edgeSignatures(p.sourceId, edges);
+    applyChamferOptions(p, edges);
     std::string id = m_finishEditId.toStdString();
     const auto result = m_finishEditId.isEmpty() ? m_document.addFinish(type, p, &id)
                                                  : m_document.updateFinish(id, p);
@@ -1630,6 +1847,7 @@ void MainWindow::endFinish()
     m_finishEditId.clear();
     m_finishSource.clear();
     m_viewer->clearPreviewShape();
+    m_viewer->clearOperandHighlight();
     m_viewer->setEdgeSelectionMode(false); // modos de face, aresta e vértice restaurados
     refreshDocumentViews(true);            // geometria do documento (e não a de origem) de volta
     if (!select.isEmpty())
@@ -1697,6 +1915,59 @@ bool MainWindow::startNewSketch(PlaneType plane)
     return true;
 }
 
+TopoDS_Shape MainWindow::selectedFace() const
+{
+    const QList<TopoDS_Shape> selected = m_viewer->selectedShapes();
+    if (selected.size() != 1 || selected.first().ShapeType() != TopAbs_FACE)
+        return TopoDS_Shape();
+    return selected.first();
+}
+
+void MainWindow::sketchOnSelectedFace()
+{
+    if (isEditingSketch())
+        return;
+    const TopoDS_Shape face = selectedFace();
+    if (face.IsNull())
+    {
+        statusBar()->showMessage(tr("Selecione uma face plana no visualizador"), 8000);
+        reportError(tr("Criar Esboço na Face"), tr("Selecione uma única face plana de um sólido no visualizador "
+                                                   "(clique sobre a face) e acione o comando novamente."));
+        return;
+    }
+    startSketchOnFace(face);
+}
+
+bool MainWindow::startSketchOnFace(const TopoDS_Shape& face)
+{
+    if (isEditingSketch())
+        return false;
+    const std::string body = m_document.bodyContainingFace(face);
+    std::string error;
+    auto sketch = body.empty() ? std::nullopt : m_document.createFaceSketch(body, face, error);
+    if (!sketch)
+    {
+        if (body.empty())
+            error = "A face selecionada não pertence a um corpo do documento";
+        statusBar()->showMessage(tr("Esboço na face recusado: %1").arg(QString::fromStdString(error)), 8000);
+        reportError(tr("Criar Esboço na Face"), QString::fromStdString(error));
+        return false;
+    }
+    m_editSketch = *sketch;
+    m_editSketchIsNew = true;
+    m_selectedEntity.clear();
+    m_viewer->clearSelection();
+    m_viewer->setDocumentSketches(displayedSketches(false));
+    m_viewer->enterSketchMode(*m_editSketch);
+    // Contorno da face de suporte como referência (o sólido fica oculto durante a edição).
+    m_viewer->setSketchReference(face);
+    m_actToolSelect->setChecked(true);
+    refreshSketchViews();
+    statusBar()->showMessage(tr("Modo de esboço: %1 sobre a face de %2 — vista normal à face. Escolha uma ferramenta.")
+                                 .arg(QString::fromStdString(m_editSketch->name()), bodyDescription(body)));
+    return true;
+}
+
 void MainWindow::editSelectedSketch()
 {
     if (QTreeWidgetItem* item = m_operationsTree->currentItem())
@@ -1722,6 +1993,8 @@ bool MainWindow::editSketch(const QString& sketchId)
     m_viewer->clearSelection();
     m_viewer->setDocumentSketches(displayedSketches(false));
     m_viewer->enterSketchMode(*m_editSketch);
+    if (sketch->support())
+        m_viewer->setSketchReference(m_document.supportFace(sketch->id()));
     m_actToolSelect->setChecked(true);
     refreshSketchViews();
     statusBar()->showMessage(tr("Editando %1 (plano %2)")
@@ -1843,6 +2116,33 @@ void MainWindow::editEntityDimensions()
     updateSketchEntity(m_selectedEntity, *geometry);
 }
 
+bool MainWindow::applyChamfer2D(double u, double v, double tolerance, const cad::sketch::SketchChamfer& parameters)
+{
+    if (!isEditingSketch())
+        return false;
+    const auto corner = cad::sketch::nearestCorner(*m_editSketch, gp_Pnt2d(u, v), tolerance);
+    if (!corner)
+        return applyCornerModifier(EntityType::Chamfer, u, v, tolerance, parameters.distance); // explica o motivo
+    cad::sketch::SketchChamfer c = parameters;
+    c.entityA = corner->entityA;
+    c.entityB = corner->entityB;
+    c.corner = corner->corner;
+    std::string newId;
+    const auto result = m_editSketch->addEntity(c, &newId);
+    if (!result.ok)
+    {
+        statusBar()->showMessage(tr("Chamfer 2D recusado: %1").arg(QString::fromStdString(result.message)), 8000);
+        reportError(tr("Chamfer 2D"), tr("O Chamfer 2D não foi aplicado:\n%1\n\nO esboço foi mantido.")
+                                          .arg(QString::fromStdString(result.message)));
+        return false;
+    }
+    m_selectedEntity = QString::fromStdString(newId);
+    refreshSketchViews();
+    if (const SketchEntity* e = m_editSketch->findEntity(newId))
+        statusBar()->showMessage(tr("Criado: %1").arg(entitySummary(*e)), 8000);
+    return true;
+}
+
 bool MainWindow::applyCornerModifier(EntityType type, double u, double v, double tolerance, double value)
 {
     if (!isEditingSketch())
@@ -1923,6 +2223,8 @@ QString geometryName(cad::modeling::GeometryKind kind)
 void MainWindow::updateSelectionStatus()
 {
     using cad::modeling::SubShapeKind;
+    if (!isEditingSketch())
+        updateActionStates();
 
     const QList<TopoDS_Shape> selected = m_viewer->selectedShapes();
     if (selected.isEmpty())
@@ -2162,26 +2464,46 @@ std::optional<cad::document::ExtrudeParameters> MainWindow::askExtrusion(const c
                                                                         bool editing)
 {
     const Sketch* sketch = m_document.findSketch(initial.sketchId);
-    const QString description = sketch ? tr("%1 (%2, plano %3)")
-                                             .arg(QString::fromStdString(sketch->name()),
-                                                  QString::fromStdString(sketch->id()),
-                                                  QString::fromLatin1(SketchPlane::name(sketch->plane().type())))
-                                       : QString::fromStdString(initial.sketchId);
-    // A pré-visualização avalia os parâmetros sem alterar o documento.
+    QString description = QString::fromStdString(initial.sketchId);
+    if (sketch && sketch->support())
+        description = tr("%1 (%2, sobre face de %3)")
+                          .arg(QString::fromStdString(sketch->name()), QString::fromStdString(sketch->id()),
+                               bodyDescription(sketch->support()->bodyId));
+    else if (sketch)
+        description = tr("%1 (%2, plano %3)")
+                          .arg(QString::fromStdString(sketch->name()), QString::fromStdString(sketch->id()),
+                               QString::fromLatin1(SketchPlane::name(sketch->plane().type())));
+    // A pré-visualização avalia os parâmetros sem alterar o documento. Saliência: região
+    // adicionada em verde; corte: região removida em vermelho; corpo de destino em azul.
+    const std::string editId = editing ? m_extrusionEditId.toStdString() : std::string();
     ExtrusionDialog dialog(initial, description,
-                           [this](const cad::document::ExtrudeParameters& p) { return m_document.previewExtrusion(p); },
-                           editing, this);
+                           [this, editId](const cad::document::ExtrudeParameters& p) {
+                               return m_document.previewExtrusion(p, editId);
+                           },
+                           editing, this, extrusionTargets(editId));
+    auto preview = [this](const cad::document::ExtrudeParameters& p, bool ok, bool show) {
+        if (!show || !ok)
+        {
+            m_viewer->clearPreviewShape();
+            m_viewer->clearOperandHighlight();
+            return;
+        }
+        if (p.mode == cad::document::ExtrudeMode::NewBody)
+        {
+            m_viewer->setPreviewShape(m_document.extrusionTool(p).shape);
+            return;
+        }
+        const Operation* target = m_document.findOperation(p.targetId);
+        m_viewer->setOperandHighlight(target ? target->result : TopoDS_Shape(), TopoDS_Shape());
+        m_viewer->setPreviewShape(m_document.extrusionTool(p).shape, p.mode == cad::document::ExtrudeMode::Cut);
+    };
     connect(&dialog, &ExtrusionDialog::previewChanged, this,
-            [this](const cad::modeling::FeatureResult& r, bool show) {
-                m_viewer->setPreviewShape(show && r.ok ? r.shape : TopoDS_Shape());
-            });
+            [&dialog, preview](const cad::modeling::FeatureResult& r, bool show) { preview(dialog.parameters(), r.ok, show); });
     // Força a primeira pré-visualização (o diálogo avaliou antes da conexão).
-    {
-        const auto r = m_document.previewExtrusion(dialog.parameters());
-        m_viewer->setPreviewShape(r.ok ? r.shape : TopoDS_Shape());
-    }
+    preview(dialog.parameters(), m_document.previewExtrusion(dialog.parameters(), editId).ok, true);
     const bool accepted = dialog.exec() == QDialog::Accepted;
     m_viewer->clearPreviewShape();
+    m_viewer->clearOperandHighlight();
     if (!accepted)
         return std::nullopt;
     return dialog.parameters();
@@ -2250,6 +2572,26 @@ std::optional<PlaneType> MainWindow::askSketchPlane()
     if (!ok)
         return std::nullopt;
     return PlaneType(items.indexOf(choice));
+}
+
+std::optional<cad::sketch::SketchChamfer> MainWindow::askChamfer2D(const cad::sketch::SketchChamfer& initial)
+{
+    SketchEntity e;
+    e.id = tr("novo").toStdString();
+    e.geometry = initial;
+    SketchEntityDialog dialog(e, this);
+    dialog.setWindowTitle(tr("Chamfer 2D"));
+    if (dialog.exec() != QDialog::Accepted)
+        return std::nullopt;
+    return std::get<cad::sketch::SketchChamfer>(dialog.geometry());
+}
+
+bool MainWindow::askConvertToNewBody(const QString& message)
+{
+    return QMessageBox::question(this, tr("Extrusão de Saliência"),
+                                 tr("%1\n\nDeseja criar o volume como novo corpo independente?").arg(message),
+                                 QMessageBox::Yes | QMessageBox::No, QMessageBox::No)
+           == QMessageBox::Yes;
 }
 
 std::optional<double> MainWindow::askCornerValue(EntityType type, double initial)

@@ -376,6 +376,34 @@ FeatureResult filletEdges(const TopoDS_Shape& solid, const std::vector<TopoDS_Ed
                                                  [radius](BRepFilletAPI_MakeFillet& b, const TopoDS_Edge& e) { b.Add(radius, e); });
 }
 
+FeatureResult chamferEdgesAdvanced(const TopoDS_Shape& solid, const std::vector<TopoDS_Edge>& edges,
+                                   const std::vector<TopoDS_Face>& faces, bool distanceAngle, double d1, double d2OrAngle)
+{
+    FeatureResult r;
+    if (faces.size() != edges.size())
+    {
+        r.message = "chanfro 3D: uma face de referência por aresta";
+        return r;
+    }
+    if (!std::isfinite(d2OrAngle) || d2OrAngle <= 0.0 || (distanceAngle && d2OrAngle >= 90.0))
+    {
+        r.message = distanceAngle ? "Ângulo do chanfro deve estar entre 0° e 90° (exclusive)"
+                                  : "Distância D2 deve ser maior que zero";
+        return r;
+    }
+    size_t index = 0;
+    const double angle = d2OrAngle * 3.14159265358979323846 / 180.0;
+    return finishEdges<BRepFilletAPI_MakeChamfer>(
+        solid, edges, d1, "chanfro 3D", distanceAngle ? "Combinação distância/ângulo" : "Combinação de distâncias",
+        [&](BRepFilletAPI_MakeChamfer& b, const TopoDS_Edge& e) {
+            const TopoDS_Face& f = faces[index++];
+            if (distanceAngle)
+                b.AddDA(d1, angle, e, f);
+            else
+                b.Add(d1, d2OrAngle, e, f);
+        });
+}
+
 FeatureResult chamferEdges(const TopoDS_Shape& solid, const std::vector<TopoDS_Edge>& edges, double distance)
 {
     return finishEdges<BRepFilletAPI_MakeChamfer>(solid, edges, distance, "chanfro 3D", "Distância",

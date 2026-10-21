@@ -1,6 +1,7 @@
 #include "app/SketchEntityDialog.h"
 
 #include <QCheckBox>
+#include <QComboBox>
 #include <QDialogButtonBox>
 #include <QDoubleSpinBox>
 #include <QFormLayout>
@@ -48,7 +49,18 @@ SketchEntityDialog::SketchEntityDialog(const SketchEntity& entity, QWidget* pare
     {
         const QString key = QString::fromStdString(d.key);
         const QString label = QString::fromStdString(d.label) + ':';
-        if (d.editable && d.kind == DimensionKind::Flag)
+        if (d.editable && d.kind == DimensionKind::Choice)
+        {
+            auto* box = new QComboBox;
+            box->setObjectName("dim_" + key);
+            for (const std::string& c : d.choices)
+                box->addItem(QString::fromStdString(c));
+            box->setCurrentIndex(int(d.value));
+            connect(box, &QComboBox::currentIndexChanged, this, &SketchEntityDialog::updateComputed);
+            form->addRow(label, box);
+            m_choices.insert(key, box);
+        }
+        else if (d.editable && d.kind == DimensionKind::Flag)
         {
             auto* box = new QCheckBox;
             box->setObjectName("dim_" + key);
@@ -101,10 +113,18 @@ SketchEntityDialog::SketchEntityDialog(const SketchEntity& entity, QWidget* pare
 
     auto* layout = new QVBoxLayout(this);
     layout->addLayout(form);
-    layout->addWidget(new QLabel(std::holds_alternative<SketchArc>(entity.geometry)
-                                     ? tr("Coordenadas locais do plano do esboço. Ângulos em graus a partir do eixo "
-                                          "horizontal (H), positivos no sentido anti-horário.")
-                                     : tr("Coordenadas locais do plano do esboço. Sem restrições associativas.")));
+    QString note = tr("Coordenadas locais do plano do esboço. Sem restrições associativas.");
+    if (std::holds_alternative<SketchArc>(entity.geometry))
+        note = tr("Coordenadas locais do plano do esboço. Ângulos em graus a partir do eixo horizontal (H), positivos "
+                  "no sentido anti-horário.");
+    else if (std::holds_alternative<SketchChamfer>(entity.geometry))
+        note = tr("Lado de referência: o primeiro lado do canto (ou o segundo, com a opção marcada). Duas distâncias: "
+                  "D1 no lado de referência e D2 no outro. Distância e ângulo: D1 no lado de referência e ângulo entre "
+                  "esse lado e o segmento do chanfro, medido por dentro do canto (D2 é calculada).");
+    auto* noteLabel = new QLabel(note);
+    noteLabel->setObjectName("rotuloConvencao");
+    noteLabel->setWordWrap(true);
+    layout->addWidget(noteLabel);
     layout->addWidget(m_message);
     layout->addWidget(m_buttons);
     updateComputed();
@@ -117,6 +137,8 @@ SketchGeometry SketchEntityDialog::geometry() const
         applyDimension(g, it.key().toStdString(), it.value()->value());
     for (auto it = m_flags.cbegin(); it != m_flags.cend(); ++it)
         applyDimension(g, it.key().toStdString(), it.value()->isChecked() ? 1.0 : 0.0);
+    for (auto it = m_choices.cbegin(); it != m_choices.cend(); ++it)
+        applyDimension(g, it.key().toStdString(), double(it.value()->currentIndex()));
     return g;
 }
 

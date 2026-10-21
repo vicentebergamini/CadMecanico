@@ -12,6 +12,7 @@
 #include <functional>
 
 class QCheckBox;
+class QComboBox;
 class QDialogButtonBox;
 class QDoubleSpinBox;
 class QLabel;
@@ -37,6 +38,15 @@ public:
 
     cad::document::OperationType type() const { return m_type; }
     double value() const;
+
+    // Chamfer 3D avançado (E5.6): modo, D2, ângulo e face de referência (padrão ou a outra).
+    void setChamferOptions(cad::document::Chamfer3DMode mode, double value2, double angle, bool flipReference);
+    cad::document::Chamfer3DMode chamferMode() const;
+    double value2() const;
+    double angle() const;
+    bool flipReference() const;
+    // Descrição da face de referência da primeira aresta (ex.: "normal (0,00; 0,00; 1,00)").
+    void setReferenceInfo(const QString& text);
     QString name() const;
     QString resultMessage() const;
     int edgeCount() const { return m_edgeCount; }
@@ -47,9 +57,12 @@ public slots:
 
 signals:
     void clearSelectionRequested();
+    void chamferOptionsChanged();
     void previewChanged(const cad::modeling::FeatureResult& result, bool show);
 
 private:
+    void updateChamferWidgets();
+
     cad::document::OperationType m_type;
     Evaluator m_evaluator;
     QLineEdit* m_name = nullptr;
@@ -57,6 +70,12 @@ private:
     QLabel* m_edges = nullptr;
     QDoubleSpinBox* m_value = nullptr;
     QCheckBox* m_preview = nullptr;
+    QComboBox* m_mode = nullptr;
+    QDoubleSpinBox* m_value2 = nullptr;
+    QDoubleSpinBox* m_angle = nullptr;
+    QCheckBox* m_flip = nullptr;
+    QLabel* m_reference = nullptr;
+    QLabel* m_convention = nullptr;
     QPushButton* m_clear = nullptr;
     QLabel* m_message = nullptr;
     QDialogButtonBox* m_buttons = nullptr;

@@ -72,6 +72,15 @@ public:
 protected:
     std::optional<PlaneType> askSketchPlane() override { return nextPlane; }
     std::optional<double> askCornerValue(EntityType, double) override { return nextCornerValue; }
+    // Chamfer 2D (E5.6): distâncias iguais com o mesmo valor do gancho.
+    std::optional<SketchChamfer> askChamfer2D(const SketchChamfer& initial) override
+    {
+        if (!nextCornerValue)
+            return std::nullopt;
+        SketchChamfer c = initial;
+        c.distance = *nextCornerValue;
+        return c;
+    }
     std::optional<SketchGeometry> askEntityDimensions(const SketchEntity&) override { return nextGeometry; }
     std::optional<StlExportRequest> askStlExport(const QString&) override { return nextStl; }
     SaveChoice askSaveChanges() override { return SaveChoice::Discard; }

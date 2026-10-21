@@ -9,6 +9,7 @@
 
 class QDialogButtonBox;
 class QCheckBox;
+class QComboBox;
 class QDoubleSpinBox;
 class QLabel;
 
@@ -35,6 +36,7 @@ private:
     QMap<QString, QDoubleSpinBox*> m_fields;
     QMap<QString, QLabel*> m_computed;
     QMap<QString, QCheckBox*> m_flags;
+    QMap<QString, QComboBox*> m_choices;
     QLabel* m_message = nullptr;
     QDialogButtonBox* m_buttons = nullptr;
 };

@@ -1,5 +1,6 @@
 // Formato nativo .cadmec (E5.1): salvar, abrir, validar e rejeitar arquivos inválidos.
 #include "document/DocumentFile.h"
+#include "modeling/FaceNaming.h"
 #include "modeling/ShapeInspector.h"
 #include "sketch/SketchShapes.h"
 
@@ -10,6 +11,8 @@
 #include <QJsonObject>
 #include <QTemporaryDir>
 #include <QTest>
+
+#include <functional>
 
 #include <BRepAdaptor_Curve.hxx>
 #include <TopExp_Explorer.hxx>
@@ -110,6 +113,11 @@ private slots:
     void arquivoE54Esquema5();
     void rejeitaE55Invalido_data();
     void rejeitaE55Invalido();
+    // E5.6
+    void salvarEAbrirE56();
+    void arquivoE55Esquema6();
+    void rejeitaE56Invalido_data();
+    void rejeitaE56Invalido();
 
 private:
     QTemporaryDir* m_dir = nullptr;
@@ -865,6 +873,18 @@ void TestArquivoCadmec::arquivoE53Esquema4()
     // Booleanas não pertencem ao esquema 4.
     QJsonObject root = QJsonDocument::fromJson(DocumentFile::toJson(documentWithBooleans())).object();
     root["schemaVersion"] = 4;
+    // Campos do esquema 7 removidos das extrusões: só a booleana fica fora do esquema 4.
+    QJsonObject d4 = root["document"].toObject();
+    QJsonArray ops4 = d4["operations"].toArray();
+    for (int i = 0; i < ops4.size(); ++i)
+    {
+        QJsonObject o = ops4[i].toObject();
+        for (const char* key : {"mode", "targetId", "endCondition"})
+            o.remove(key);
+        ops4[i] = o;
+    }
+    d4["operations"] = ops4;
+    root["document"] = d4;
     CadDocument active = documentWithBooleans();
     const FileResult old = DocumentFile::fromJson(QJsonDocument(root).toJson(), active);
     qInfo("booleana no esquema 4 -> %s", qPrintable(old.message));
@@ -999,7 +1019,7 @@ void TestArquivoCadmec::salvarEAbrirE55()
     QVERIFY(DocumentFile::save(original, path).ok);
 
     QJsonObject root = QJsonDocument::fromJson(readFile(path)).object();
-    QCOMPARE(root["schemaVersion"].toInt(), 6);
+    QCOMPARE(root["schemaVersion"].toInt(), DocumentFile::kSchemaVersion);
     const QJsonObject fillet = entityAt(root, 0, 1);
     QCOMPARE(fillet["type"].toString(), QStringLiteral("fillet"));
     QCOMPARE(fillet["entityA"].toString(), QStringLiteral("e-1"));
@@ -1134,6 +1154,219 @@ void TestArquivoCadmec::rejeitaE55Invalido()
     QVERIFY(!r.message.isEmpty());
     QVERIFY(active.shape().IsSame(before));
     QCOMPARE(active.operations().size(), size_t(3));
+}
+
+namespace {
+
+TopoDS_Face planarFace(const TopoDS_Shape& body, const gp_Dir& normal, const gp_Pnt& near)
+{
+    TopoDS_Face best;
+    double bestD = 1e300;
+    for (TopExp_Explorer ex(body, TopAbs_FACE); ex.More(); ex.Next())
+    {
+        const TopoDS_Face f = TopoDS::Face(ex.Current());
+        const auto pl = cad::modeling::planarFacePlane(f);
+        if (pl && pl->Axis().Direction().Angle(normal) < 1e-6)
+        {
+            const double d = cad::modeling::describeFace(f).centroid.Distance(near);
+            if (d < bestD)
+            {
+                bestD = d;
+                best = f;
+            }
+        }
+    }
+    return best;
+}
+
+// Fluxo E5.6: bloco (novo corpo) → esboço na face superior com círculo → corte atravessando
+// tudo → esboço na face frontal → saliência 10 mm → Chamfer 3D duas distâncias; esboço 1 com
+// Chamfer 2D distância–ângulo.
+CadDocument documentE56()
+{
+    using namespace cad::sketch;
+    CadDocument doc("Faces");
+    std::string error;
+    Sketch s = doc.createSketch(PlaneType::XY);
+    s.addEntity(SketchRectangle{0.0, 0.0, 100.0, 60.0});
+    s.addEntity(SketchChamfer{"e-1", "e-1", 0, 5.0, ChamferMode::DistanceAngle, 0.0, 30.0, false});
+    doc.commitSketch(s, error);
+    std::string b, cut, boss, ch;
+    doc.addExtrusion({"Bloco", s.id(), 20.0}, &b);
+    auto top = doc.createFaceSketch(b, planarFace(doc.shape(), gp_Dir(0, 0, 1), gp_Pnt(50, 30, 20)), error);
+    top->addEntity(SketchCircle{50.0, 30.0, 10.0});
+    doc.commitSketch(*top, error);
+    doc.addExtrusion({"", top->id(), 1.0, false, ExtrudeMode::Cut, b, EndCondition::ThroughAll}, &cut);
+    auto front = doc.createFaceSketch(cut, planarFace(doc.shape(), gp_Dir(0, -1, 0), gp_Pnt(50, 0, 10)), error);
+    front->addEntity(SketchRectangle{60.0, 2.0, 20.0, 15.0});
+    doc.commitSketch(*front, error);
+    doc.addExtrusion({"", front->id(), 10.0, false, ExtrudeMode::Boss, cut}, &boss);
+    TopoDS_Edge backTop;
+    for (TopExp_Explorer ex(doc.shape(), TopAbs_EDGE); ex.More(); ex.Next())
+    {
+        BRepAdaptor_Curve c(TopoDS::Edge(ex.Current()));
+        if (c.Value(0.5 * (c.FirstParameter() + c.LastParameter())).Distance(gp_Pnt(50, 60, 20)) < 1e-6)
+            backTop = TopoDS::Edge(ex.Current());
+    }
+    FinishParameters fp{"", boss, 3.0, doc.edgeSignatures(boss, {backTop})};
+    fp.chamferMode = Chamfer3DMode::TwoDistances;
+    fp.value2 = 6.0;
+    fp.referenceNormals = doc.referenceNormals(boss, {backTop}, false);
+    doc.addFinish(OperationType::Chamfer3D, fp, &ch);
+    return doc;
+}
+
+template <typename F>
+QByteArray e56Modified(F edit)
+{
+    QJsonObject root = QJsonDocument::fromJson(DocumentFile::toJson(documentE56())).object();
+    edit(root);
+    return QJsonDocument(root).toJson();
+}
+
+} // namespace
+
+void TestArquivoCadmec::salvarEAbrirE56()
+{
+    const CadDocument original = documentE56();
+    QCOMPARE(original.operations().size(), size_t(4));
+    QCOMPARE(original.activeBodies(), std::vector<std::string>{"op-4"});
+    const QString path = m_dir->filePath("e56.cadmec");
+    QVERIFY(DocumentFile::save(original, path).ok);
+    const QJsonObject root = QJsonDocument::fromJson(readFile(path)).object();
+    QCOMPARE(root["schemaVersion"].toInt(), 7);
+    QCOMPARE(sketchObject(const_cast<QJsonObject&>(root), 1)["plane"].toString(), QStringLiteral("face"));
+    const QJsonObject support = sketchObject(const_cast<QJsonObject&>(root), 1)["support"].toObject();
+    QCOMPARE(support["bodyId"].toString(), QStringLiteral("op-1"));
+    QCOMPARE(support["face"].toObject()["normal"].toArray()[2].toDouble(), 1.0);
+    QCOMPARE(support["frame"].toObject()["origin"].toArray()[2].toDouble(), 20.0);
+    const QJsonObject cut = opAt(root, 1);
+    QCOMPARE(cut["mode"].toString(), QStringLiteral("cut"));
+    QCOMPARE(cut["targetId"].toString(), QStringLiteral("op-1"));
+    QCOMPARE(cut["endCondition"].toString(), QStringLiteral("throughAll"));
+    QCOMPARE(opAt(root, 0)["mode"].toString(), QStringLiteral("newBody"));
+    QVERIFY(!opAt(root, 0).contains("targetId"));
+    QCOMPARE(opAt(root, 2)["mode"].toString(), QStringLiteral("boss"));
+    const QJsonObject ch = opAt(root, 3);
+    QCOMPARE(ch["mode"].toString(), QStringLiteral("twoDistances"));
+    QCOMPARE(ch["parameters"].toObject()["distance2"].toDouble(), 6.0);
+    QCOMPARE(ch["referenceNormals"].toArray().size(), 1);
+    const QJsonObject chamfer2d = entityAt(const_cast<QJsonObject&>(root), 0, 1);
+    QCOMPARE(chamfer2d["mode"].toString(), QStringLiteral("distanceAngle"));
+    QCOMPARE(chamfer2d["angle"].toDouble(), 30.0);
+
+    CadDocument doc;
+    const FileResult r = DocumentFile::load(path, doc);
+    QVERIFY2(r.ok, qPrintable(r.message));
+    QCOMPARE(doc.operations().size(), size_t(4));
+    QCOMPARE(doc.activeBodies(), std::vector<std::string>{"op-4"});
+    QVERIFY(doc.findSketch("sk-2")->support() && doc.findSketch("sk-2")->plane().type() == cad::sketch::PlaneType::Face);
+    QVERIFY(qAbs(ShapeInspector::volume(doc.shape()) - ShapeInspector::volume(original.shape())) < 1e-6);
+    QVERIFY(ShapeInspector::isValid(doc.shape()));
+    QCOMPARE(DocumentFile::toJson(doc), DocumentFile::toJson(original));
+    qInfo("volume reconstruido: %.4f", ShapeInspector::volume(doc.shape()));
+}
+
+void TestArquivoCadmec::arquivoE55Esquema6()
+{
+    const QString path = QStringLiteral(CADMEC_TEST_DATA_DIR "/documento_e55_v6.cadmec");
+    const QByteArray original = readFile(path);
+    QCOMPARE(QJsonDocument::fromJson(original).object()["schemaVersion"].toInt(), 6);
+    CadDocument doc;
+    const FileResult r = DocumentFile::load(path, doc);
+    QVERIFY2(r.ok, qPrintable(r.message));
+    QCOMPARE(doc.operations().size(), size_t(5));
+    for (const auto& op : doc.operations())
+        if (op.type == OperationType::Extrude)
+            QVERIFY(op.extrudeMode == ExtrudeMode::NewBody && op.endCondition == EndCondition::Blind);
+    QVERIFY(doc.operations()[4].chamferMode == Chamfer3DMode::Equal);
+    QVERIFY(qAbs(ShapeInspector::volume(doc.shape()) - 69954.40) < 0.01);
+    QCOMPARE(readFile(path), original); // documento antigo não é alterado
+}
+
+void TestArquivoCadmec::rejeitaE56Invalido_data()
+{
+    QTest::addColumn<QByteArray>("content");
+    auto setOpField = [](QJsonObject& r, int i, const char* key, const QJsonValue& v) {
+        QJsonObject o = opAt(r, i);
+        if (v.isUndefined())
+            o.remove(key);
+        else
+            o[key] = v;
+        setOp(r, i, o);
+    };
+    auto editSupport = [](QJsonObject& r, std::function<void(QJsonObject&)> f) {
+        QJsonObject s = sketchObject(r, 1);
+        QJsonObject support = s["support"].toObject();
+        f(support);
+        s["support"] = support;
+        setSketch(r, 1, s);
+    };
+    QTest::newRow("face no esquema 6") << e56Modified([](QJsonObject& r) {
+        // Sem os campos de operação do esquema 7: o motivo é o plano "face".
+        r["schemaVersion"] = 6;
+        QJsonObject d = r["document"].toObject();
+        QJsonArray ops = d["operations"].toArray();
+        QJsonObject first = ops[0].toObject();
+        first.remove("mode");
+        first.remove("endCondition");
+        QJsonArray ops1;
+        ops1.append(first);
+        d["operations"] = ops1;
+        r["document"] = d;
+        QJsonObject s0 = sketchObject(r, 0);
+        QJsonArray ents = s0["entities"].toArray();
+        ents.removeAt(1); // chanfro 2D com campos do esquema 7
+        s0["entities"] = ents;
+        setSketch(r, 0, s0); });
+    QTest::newRow("face sem suporte") << e56Modified([](QJsonObject& r) {
+        QJsonObject s = sketchObject(r, 1); s.remove("support"); setSketch(r, 1, s); });
+    QTest::newRow("suporte em plano XY") << e56Modified([](QJsonObject& r) {
+        QJsonObject s = sketchObject(r, 0); s["support"] = sketchObject(r, 1)["support"]; setSketch(r, 0, s); });
+    QTest::newRow("suporte campo desconhecido") << e56Modified([&](QJsonObject& r) { editSupport(r, [](QJsonObject& s) { s["index"] = 3; }); });
+    QTest::newRow("suporte corpo inexistente") << e56Modified([&](QJsonObject& r) { editSupport(r, [](QJsonObject& s) { s["bodyId"] = "op-9"; }); });
+    QTest::newRow("suporte corpo posterior") << e56Modified([&](QJsonObject& r) { editSupport(r, [](QJsonObject& s) { s["bodyId"] = "op-3"; }); });
+    QTest::newRow("sistema local nao ortogonal") << e56Modified([&](QJsonObject& r) { editSupport(r, [](QJsonObject& s) {
+        QJsonObject fr = s["frame"].toObject(); fr["xAxis"] = QJsonArray{0.0, 0.0, 1.0}; s["frame"] = fr; }); });
+    QTest::newRow("face nao remapeavel") << e56Modified([&](QJsonObject& r) { editSupport(r, [](QJsonObject& s) {
+        QJsonObject f = s["face"].toObject(); f["normal"] = QJsonArray{0.6, 0.0, 0.8}; s["face"] = f; }); });
+    QTest::newRow("area da face invalida") << e56Modified([&](QJsonObject& r) { editSupport(r, [](QJsonObject& s) {
+        QJsonObject f = s["face"].toObject(); f["area"] = -1.0; s["face"] = f; }); });
+    QTest::newRow("modo de extrusao invalido") << e56Modified([&](QJsonObject& r) { setOpField(r, 1, "mode", "pocket"); });
+    QTest::newRow("corte sem destino") << e56Modified([&](QJsonObject& r) { setOpField(r, 1, "targetId", QJsonValue(QJsonValue::Undefined)); });
+    QTest::newRow("novo corpo com destino") << e56Modified([&](QJsonObject& r) { setOpField(r, 0, "targetId", "op-1"); });
+    QTest::newRow("condicao final invalida") << e56Modified([&](QJsonObject& r) { setOpField(r, 1, "endCondition", "upToFace"); });
+    QTest::newRow("atravessar tudo na saliencia") << e56Modified([&](QJsonObject& r) { setOpField(r, 2, "endCondition", "throughAll"); });
+    QTest::newRow("saliencia sem modo v7") << e56Modified([&](QJsonObject& r) { setOpField(r, 2, "mode", QJsonValue(QJsonValue::Undefined)); });
+    QTest::newRow("corpo de destino consumido") << e56Modified([&](QJsonObject& r) { setOpField(r, 2, "targetId", "op-1"); });
+    QTest::newRow("chamfer2d modo invalido") << e56Modified([](QJsonObject& r) {
+        QJsonObject e = entityAt(r, 0, 1); e["mode"] = "variable"; setEntity(r, 0, 1, e); });
+    QTest::newRow("chamfer2d angulo inviavel") << e56Modified([](QJsonObject& r) {
+        QJsonObject e = entityAt(r, 0, 1); e["angle"] = 120.0; setEntity(r, 0, 1, e); });
+    QTest::newRow("chamfer2d sem flip") << e56Modified([](QJsonObject& r) {
+        QJsonObject e = entityAt(r, 0, 1); e.remove("flip"); setEntity(r, 0, 1, e); });
+    QTest::newRow("chamfer3d sem referencias") << e56Modified([&](QJsonObject& r) { setOpField(r, 3, "referenceNormals", QJsonValue(QJsonValue::Undefined)); });
+    QTest::newRow("chamfer3d referencia errada") << e56Modified([&](QJsonObject& r) {
+        // Normal válida que não é de nenhuma face adjacente à aresta.
+        QJsonArray normals;
+        normals.append(QJsonArray{1.0, 0.0, 0.0});
+        setOpField(r, 3, "referenceNormals", normals); });
+    QTest::newRow("chamfer3d sem distance2") << e56Modified([&](QJsonObject& r) {
+        QJsonObject o = opAt(r, 3); o["parameters"] = QJsonObject{{"distance", 3.0}}; setOp(r, 3, o); });
+    QTest::newRow("chamfer3d modo invalido") << e56Modified([&](QJsonObject& r) { setOpField(r, 3, "mode", "variable"); });
+}
+
+void TestArquivoCadmec::rejeitaE56Invalido()
+{
+    QFETCH(QByteArray, content);
+    CadDocument active = documentE56();
+    const TopoDS_Shape before = active.shape();
+    const FileResult r = DocumentFile::fromJson(content, active);
+    qInfo("%s -> %s", QTest::currentDataTag(), qPrintable(r.message));
+    QVERIFY(!r.ok);
+    QVERIFY(!r.message.isEmpty());
+    QVERIFY(active.shape().IsSame(before));
+    QCOMPARE(active.operations().size(), size_t(4));
 }
 
 QTEST_GUILESS_MAIN(TestArquivoCadmec)

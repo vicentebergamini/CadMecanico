@@ -540,6 +540,11 @@ QImage OcctViewerWidget::grabViewerImage()
 
 void OcctViewerWidget::setPreviewShape(const TopoDS_Shape& shape)
 {
+    setPreviewShape(shape, false);
+}
+
+void OcctViewerWidget::setPreviewShape(const TopoDS_Shape& shape, bool removal)
+{
     if (m_context.IsNull())
         return;
     if (!m_previewSolid.IsNull())
@@ -548,7 +553,7 @@ void OcctViewerWidget::setPreviewShape(const TopoDS_Shape& shape)
     if (!shape.IsNull())
     {
         m_previewSolid = new AIS_Shape(shape);
-        m_previewSolid->SetColor(kPreviewSolidColor);
+        m_previewSolid->SetColor(removal ? kOperandBColor : kPreviewSolidColor);
         m_previewSolid->SetTransparency(0.45);
         m_previewSolid->Attributes()->SetFaceBoundaryDraw(true);
         m_context->Display(m_previewSolid, AIS_Shaded, -1, false); // não selecionável
@@ -956,10 +961,36 @@ void OcctViewerWidget::enterSketchMode(const cad::sketch::Sketch& sketch)
 
     updateEditingSketch(sketch, QString());
 
-    // Câmera perpendicular ao plano, ortográfica, sem espelhamento (H para a direita, V para cima).
+    // Câmera perpendicular ao plano, ortográfica, sem espelhamento (H para a direita, V para cima):
+    // olha no sentido oposto à normal, com o eixo vertical local para cima (planos padrão e faces).
     AbortViewAnimation();
-    m_view->SetProj(sketchOrientation(plane.type()), false);
+    if (plane.type() == cad::sketch::PlaneType::Face)
+    {
+        // Olho sobre a normal da face, centro na origem local (SetCenter isolado manteria o olho
+        // e mudaria a direção; olho e centro são definidos juntos).
+        const occ::handle<Graphic3d_Camera>& camera = m_view->Camera();
+        const gp_Pnt center = plane.origin();
+        const double distance = std::max(camera->Distance(), 100.0);
+        camera->SetEyeAndCenter(center.Translated(gp_Vec(plane.normal()) * distance), center);
+        camera->SetUp(plane.verticalAxis());
+    }
+    else
+    {
+        m_view->SetProj(sketchOrientation(plane.type()), false);
+    }
     m_view->Camera()->SetProjectionType(Graphic3d_Camera::Projection_Orthographic);
+    fitAll();
+}
+
+void OcctViewerWidget::setSketchReference(const TopoDS_Shape& reference)
+{
+    if (!isSketchMode() || m_context.IsNull() || reference.IsNull())
+        return;
+    occ::handle<AIS_Shape> prs = new AIS_Shape(reference);
+    prs->SetColor(Quantity_Color(0.45, 0.45, 0.45, Quantity_TOC_sRGB));
+    prs->SetWidth(1.5);
+    m_context->Display(prs, AIS_WireFrame, -1, false); // referência, não selecionável
+    m_sketchDecorations.push_back(prs);
     fitAll();
 }
 

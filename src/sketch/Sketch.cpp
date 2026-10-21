@@ -41,6 +41,13 @@ Sketch::Sketch(std::string id, std::string name, PlaneType plane)
 {
 }
 
+Sketch::Sketch(std::string id, std::string name, const SketchPlane& plane)
+    : m_id(std::move(id))
+    , m_name(std::move(name))
+    , m_plane(plane)
+{
+}
+
 const SketchEntity* Sketch::findEntity(const std::string& entityId) const
 {
     for (const SketchEntity& e : m_entities)

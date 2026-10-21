@@ -135,6 +135,7 @@ ResolvedSketch resolveSketch(const Sketch& sketch)
         std::string idA, idB;
         int corner = -1;
         double value = 0.0;
+        SketchChamfer chamfer;
         if (fillet)
         {
             const auto& f = std::get<SketchFillet>(e.geometry);
@@ -142,8 +143,8 @@ ResolvedSketch resolveSketch(const Sketch& sketch)
         }
         else
         {
-            const auto& c = std::get<SketchChamfer>(e.geometry);
-            idA = c.entityA, idB = c.entityB, corner = c.corner, value = c.distance;
+            chamfer = std::get<SketchChamfer>(e.geometry);
+            idA = chamfer.entityA, idB = chamfer.entityB, corner = chamfer.corner, value = chamfer.distance;
         }
         const std::string label = std::string(what) + " " + e.id;
         for (const std::string& ref : {idA, idB})
@@ -207,14 +208,39 @@ ResolvedSketch resolveSketch(const Sketch& sketch)
         if (thetaDeg < kMinCornerAngle || thetaDeg > kMaxCornerAngle)
             return failure(r, e.id, label + ": os lados são colineares no ponto " + point(p) + " (não há canto)");
 
-        const double trim = fillet ? value / std::tan(theta / 2.0) : value;
-        const double available = std::min(la, lb) - kMinSize;
-        if (trim > available)
-            return failure(r, e.id, label + ": " + (fillet ? "raio " : "distância ") + num(value)
-                                        + " mm grande demais para o canto " + point(p) + " (exige " + num(trim)
-                                        + " mm em cada lado; disponível " + num(std::max(0.0, available)) + " mm)");
-        const gp_Pnt2d pa = p.Translated(un * trim);
-        const gp_Pnt2d pb = p.Translated(vn * trim);
+        // Recorte em cada lado: fillet t = r / tan(θ/2); chanfro conforme o modo (lado de
+        // referência = A, ou B com 'flip').
+        double trimA = fillet ? value / std::tan(theta / 2.0) : value;
+        double trimB = trimA;
+        if (!fillet && chamfer.mode != ChamferMode::Equal)
+        {
+            double d1 = chamfer.distance, d2 = chamfer.distance2;
+            if (chamfer.mode == ChamferMode::DistanceAngle)
+            {
+                const double alpha = chamfer.angle * kPi / 180.0;
+                if (alpha + theta >= kPi - 1e-6)
+                    return failure(r, e.id, label + ": ângulo " + num(chamfer.angle) + "° inviável para o canto de "
+                                                + num(thetaDeg) + "° em " + point(p)
+                                                + " (ângulo + canto deve ser menor que 180°)");
+                d2 = d1 * std::sin(alpha) / std::sin(theta + alpha); // lei dos senos no triângulo do chanfro
+            }
+            trimA = chamfer.flip ? d2 : d1;
+            trimB = chamfer.flip ? d1 : d2;
+        }
+        const double needA = std::max(trimA, 0.0), needB = std::max(trimB, 0.0);
+        if (needA > la - kMinSize || needB > lb - kMinSize)
+        {
+            if (fillet || chamfer.mode == ChamferMode::Equal)
+                return failure(r, e.id, label + ": " + (fillet ? "raio " : "distância ") + num(value)
+                                            + " mm grande demais para o canto " + point(p) + " (exige " + num(trimA)
+                                            + " mm em cada lado; disponível " + num(std::max(0.0, std::min(la, lb) - kMinSize))
+                                            + " mm)");
+            return failure(r, e.id, label + ": chanfro grande demais para o canto " + point(p) + " (exige " + num(trimA)
+                                        + " mm e " + num(trimB) + " mm; disponível " + num(std::max(0.0, la - kMinSize))
+                                        + " mm e " + num(std::max(0.0, lb - kMinSize)) + " mm)");
+        }
+        const gp_Pnt2d pa = p.Translated(un * trimA);
+        const gp_Pnt2d pb = p.Translated(vn * trimB);
         sa.at() = pa;
         sb.at() = pb;
         if (fillet)

@@ -10,7 +10,18 @@
 //   XY    | (0,0,0) | +X             | +Y           | +Z     | Superior
 //   XZ    | (0,0,0) | +X             | +Z           | -Y     | Frente
 //   YZ    | (0,0,0) | +Y             | +Z           | +X     | Direita
+//
+// Plano de face (E5.6, PlaneType::Face): sistema local de uma face plana de um sólido, obtido de
+// forma determinística a partir do plano da face (forPlane):
+//   normal     = normal externa da face;
+//   origem     = projeção da origem global no plano;
+//   horizontal = Z × normal normalizado (ou +X se a normal for paralela a Z);
+//   vertical   = normal × horizontal.
+// Faces paralelas a XY, XZ e YZ recebem os mesmos eixos dos planos padrão (mesma vista), e a
+// orientação não depende do índice nem da parametrização da face.
 #pragma once
+
+#include <gp_Pln.hxx>
 
 #include <gp_Ax3.hxx>
 #include <gp_Dir.hxx>
@@ -26,13 +37,19 @@ enum class PlaneType
 {
     XY,
     XZ,
-    YZ
+    YZ,
+    Face // plano de uma face plana (E5.6)
 };
 
 class SketchPlane
 {
 public:
     explicit SketchPlane(PlaneType type = PlaneType::XY);
+
+    // Plano de face com sistema local explícito (eixos ortonormais; vertical = normal × horizontal).
+    static SketchPlane fromFrame(const gp_Pnt& origin, const gp_Dir& normal, const gp_Dir& horizontal);
+    // Sistema local determinístico de uma face plana (ver regra no início do arquivo).
+    static SketchPlane forPlane(const gp_Pln& plane);
 
     PlaneType type() const { return m_type; }
     const gp_Pnt& origin() const { return m_origin; }
@@ -50,7 +67,7 @@ public:
     // Distância (com sinal, ao longo da normal) do ponto ao plano.
     double distance(const gp_Pnt& p) const;
 
-    // Nome curto ("XY", "XZ", "YZ") usado no arquivo e na interface.
+    // Nome curto ("XY", "XZ", "YZ", "face") usado no arquivo e na interface.
     static const char* name(PlaneType type);
     static std::optional<PlaneType> fromName(const std::string& name);
 

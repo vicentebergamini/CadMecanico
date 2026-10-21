@@ -25,8 +25,35 @@ SketchPlane::SketchPlane(PlaneType type)
         m_xAxis = gp_Dir(0.0, 1.0, 0.0);
         m_yAxis = gp_Dir(0.0, 0.0, 1.0);
         break;
+    case PlaneType::Face:
+        break; // definido por fromFrame/forPlane; padrão = XY
     }
     m_normal = m_xAxis.Crossed(m_yAxis);
+}
+
+SketchPlane SketchPlane::fromFrame(const gp_Pnt& origin, const gp_Dir& normal, const gp_Dir& horizontal)
+{
+    SketchPlane p(PlaneType::Face);
+    p.m_origin = origin;
+    p.m_normal = normal;
+    p.m_xAxis = horizontal;
+    p.m_yAxis = normal.Crossed(horizontal);
+    return p;
+}
+
+SketchPlane SketchPlane::forPlane(const gp_Pln& plane)
+{
+    const gp_Dir n = plane.Axis().Direction();
+    const gp_Dir z(0.0, 0.0, 1.0);
+    gp_Dir x(1.0, 0.0, 0.0);
+    const gp_Vec zn = gp_Vec(z).Crossed(gp_Vec(n));
+    if (zn.Magnitude() > 1e-9)
+        x = gp_Dir(zn);
+    // Origem: projeção da origem global no plano.
+    const gp_Pnt o = plane.Location();
+    const double d = gp_Vec(n).Dot(gp_Vec(o.XYZ()));
+    const gp_Pnt origin(gp_Vec(n).Multiplied(d).XYZ());
+    return fromFrame(origin, n, x);
 }
 
 gp_Ax3 SketchPlane::ax3() const
@@ -57,6 +84,7 @@ const char* SketchPlane::name(PlaneType type)
     case PlaneType::XY: return "XY";
     case PlaneType::XZ: return "XZ";
     case PlaneType::YZ: return "YZ";
+    case PlaneType::Face: return "face";
     }
     return "";
 }
@@ -66,6 +94,7 @@ std::optional<PlaneType> SketchPlane::fromName(const std::string& name)
     if (name == "XY") return PlaneType::XY;
     if (name == "XZ") return PlaneType::XZ;
     if (name == "YZ") return PlaneType::YZ;
+    if (name == "face") return PlaneType::Face;
     return std::nullopt;
 }
 

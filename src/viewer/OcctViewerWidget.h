@@ -103,6 +103,8 @@ public:
     // Pré-visualização temporária de um sólido (ex.: extrusão antes de confirmar): translúcida,
     // não selecionável e fora do documento. Forma nula remove a pré-visualização.
     void setPreviewShape(const TopoDS_Shape& shape);
+    // Pré-visualização de material removido (corte, E5.6): vermelho translúcido.
+    void setPreviewShape(const TopoDS_Shape& shape, bool removal);
     void clearPreviewShape() { setPreviewShape(TopoDS_Shape()); }
     const occ::handle<AIS_Shape>& previewPresentation() const { return m_previewSolid; }
 
@@ -116,7 +118,11 @@ public:
     // --- Esboços --------------------------------------------------------------
     // Esboços do documento exibidos fora da edição (somente visualização).
     void setDocumentSketches(const std::vector<cad::sketch::Sketch>& sketches);
+    // Câmera perpendicular ao plano do esboço (olhando contra a normal, eixo vertical local para
+    // cima), para qualquer plano — padrão ou de face (E5.6).
     void enterSketchMode(const cad::sketch::Sketch& sketch);
+    // Contorno da face de suporte exibido como referência durante a edição (esboço sobre face).
+    void setSketchReference(const TopoDS_Shape& reference);
     void updateEditingSketch(const cad::sketch::Sketch& sketch, const QString& selectedEntityId);
     void exitSketchMode();
     bool isSketchMode() const { return m_sketchPlane.has_value(); }

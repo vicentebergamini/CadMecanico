@@ -165,11 +165,11 @@ void TestMainWindow::menus()
     QCOMPARE(actionTexts(exportMenu), QStringList({"STEP (*.step)...", "STL (*.stl)..."}));
     auto* operations = m_window->findChild<QMenu*>("menuOperacoes");
     QVERIFY(operations);
-    QCOMPARE(actionTexts(operations), QStringList({"Extrusão...", "|", "União...", "Subtração...", "Interseção...", "|",
+    QCOMPARE(actionTexts(operations), QStringList({"Extrusão de Novo Corpo...", "Extrusão de Saliência...", "Extrusão de Corte...", "|", "União...", "Subtração...", "Interseção...", "|",
                                                     "Fillet 3D...", "Chamfer 3D...", "|", "Editar operação..."}));
     auto* sketchMenu = m_window->findChild<QMenu*>("menuEsboco");
     QVERIFY(sketchMenu);
-    QCOMPARE(actionTexts(sketchMenu), QStringList({"Novo esboço...", "Editar esboço", "|", "Selecionar", "Linha",
+    QCOMPARE(actionTexts(sketchMenu), QStringList({"Novo esboço...", "Criar Esboço na Face", "Editar esboço", "|", "Selecionar", "Linha",
                                                    "Retângulo", "Círculo", "Arco circular", "Sentido horário do arco",
                                                    "Fillet 2D", "Chamfer 2D", "|", "Dimensões...", "Excluir entidade", "|",
                                                    "Concluir esboço", "Cancelar esboço"}));

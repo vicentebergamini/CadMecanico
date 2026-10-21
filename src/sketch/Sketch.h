@@ -2,24 +2,40 @@
 // Sem dependência de Qt. Operações inválidas não alteram o esboço.
 #pragma once
 
+#include "modeling/FaceNaming.h"
 #include "sketch/SketchEntity.h"
 #include "sketch/SketchPlane.h"
+
+#include <optional>
 
 #include <string>
 #include <vector>
 
 namespace cad::sketch {
 
+// Suporte de um esboço sobre face (E5.6): corpo de origem (operação) e assinatura persistente da
+// face plana. O plano do esboço é recalculado a partir da face a cada reconstrução.
+struct SketchSupport
+{
+    std::string bodyId;
+    cad::modeling::FaceSignature face;
+};
+
 class Sketch
 {
 public:
     Sketch() = default;
     Sketch(std::string id, std::string name, PlaneType plane);
+    Sketch(std::string id, std::string name, const SketchPlane& plane);
 
     const std::string& id() const { return m_id; }
     const std::string& name() const { return m_name; }
     void setName(const std::string& name) { m_name = name; }
     const SketchPlane& plane() const { return m_plane; }
+    // Atualiza o plano (esboço sobre face após reconstrução); as coordenadas locais não mudam.
+    void setPlane(const SketchPlane& plane) { m_plane = plane; }
+    const std::optional<SketchSupport>& support() const { return m_support; }
+    void setSupport(const std::optional<SketchSupport>& support) { m_support = support; }
 
     const std::vector<SketchEntity>& entities() const { return m_entities; }
     const SketchEntity* findEntity(const std::string& entityId) const;
@@ -58,6 +74,7 @@ private:
     std::string m_id;
     std::string m_name;
     SketchPlane m_plane;
+    std::optional<SketchSupport> m_support;
     std::vector<SketchEntity> m_entities;
     int m_nextEntityNumber = 1;
 };

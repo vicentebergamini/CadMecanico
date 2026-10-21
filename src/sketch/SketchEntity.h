@@ -96,12 +96,33 @@ struct SketchFillet
     double radius = 0.0;
 };
 
+// Modos do chanfro (E5.6). Lado de referência = primeiro lado do canto (linha entityA, ou o lado
+// do retângulo que termina no canto), ou o segundo se 'flip' for verdadeiro.
+//   Equal         : distância 'distance' nos dois lados (modo da E5.5);
+//   TwoDistances  : D1 = 'distance' no lado de referência, D2 = 'distance2' no outro lado;
+//   DistanceAngle : D1 = 'distance' no lado de referência e 'angle' = ângulo (graus) entre o lado
+//                   de referência e o segmento do chanfro, medido no ponto de recorte, por dentro
+//                   do canto. D2 = D1 · sen(α) / sen(θ + α), θ = ângulo interno do canto; exige
+//                   0 < α e θ + α < 180°.
+enum class ChamferMode
+{
+    Equal,
+    TwoDistances,
+    DistanceAngle
+};
+
 struct SketchChamfer
 {
     std::string entityA, entityB;
     int corner = -1;
-    double distance = 0.0; // medida a partir do vértice original, ao longo de cada lado
+    double distance = 0.0; // D1, medida a partir do vértice original, ao longo do lado
+    ChamferMode mode = ChamferMode::Equal;
+    double distance2 = 0.0; // D2 (modo TwoDistances)
+    double angle = 45.0;    // graus (modo DistanceAngle)
+    bool flip = false;      // referência no segundo lado
 };
+
+const char* chamferModeName(ChamferMode mode); // "equal", "twoDistances", "distanceAngle"
 
 using SketchGeometry =
     std::variant<SketchLine, SketchRectangle, SketchCircle, SketchArc, SketchFillet, SketchChamfer>;
@@ -114,7 +135,8 @@ enum class DimensionKind
 {
     Length,
     Angle,
-    Flag
+    Flag,
+    Choice // índice em 'choices'
 };
 
 // Dimensão (coordenada ou medida) de uma entidade. Valores calculados (comprimento da linha,
@@ -127,6 +149,7 @@ struct SketchDimension
     double value = 0.0;
     bool editable = true;
     DimensionKind kind = DimensionKind::Length;
+    std::vector<std::string> choices; // DimensionKind::Choice
 };
 
 struct EntityValidation

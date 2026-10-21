@@ -58,6 +58,32 @@ enum class OperationType
 
 using cad::modeling::BooleanKind;
 
+// Modo da extrusão (E5.6): novo corpo independente (comportamento da E5.3), saliência (volume
+// unido ao corpo de destino) ou corte (volume subtraído do corpo de destino).
+enum class ExtrudeMode
+{
+    NewBody,
+    Boss,
+    Cut
+};
+
+// Condição final: profundidade definida ou, no corte, atravessar todo o corpo de destino.
+enum class EndCondition
+{
+    Blind,
+    ThroughAll
+};
+
+// Modo do Chamfer 3D (E5.6): distâncias iguais (E5.5), duas distâncias (D1 na face de
+// referência, D2 na outra) ou distância e ângulo (D1 na face de referência; ângulo entre a face
+// de referência e a face do chanfro).
+enum class Chamfer3DMode
+{
+    Equal,
+    TwoDistances,
+    DistanceAngle
+};
+
 enum class OperationStatus
 {
     Valid,
@@ -79,9 +105,14 @@ struct Operation
     OperationStatus status = OperationStatus::Valid;
     std::string statusMessage;
 
-    // Extrusão: esboço de origem e sentido (false = normal do plano; true = oposto).
+    // Extrusão: esboço de origem e sentido (false = normal do plano; true = oposto; no corte o
+    // sentido padrão é para dentro da face, oposto à normal), modo, corpo de destino (saliência
+    // e corte) e condição final.
     std::string sketchId;
     bool reversed = false;
+    ExtrudeMode extrudeMode = ExtrudeMode::NewBody;
+    std::string targetId;
+    EndCondition endCondition = EndCondition::Blind;
 
     // Booleana: tipo e corpos operandos (ids de operações anteriores). Na subtração A é o corpo
     // principal e B a ferramenta de corte.
@@ -93,6 +124,10 @@ struct Operation
     // ver EdgeNaming). Parâmetro "radius" ou "distance".
     std::string sourceId;
     std::vector<cad::modeling::EdgeSignature> edges;
+    // Chamfer 3D avançado: modo e normal da face de referência de cada aresta (parâmetros
+    // "distance", "distance2" e "angle").
+    Chamfer3DMode chamferMode = Chamfer3DMode::Equal;
+    std::vector<gp_Dir> referenceNormals;
 
     // Geometria resultante da operação (calculada; não persistida).
     TopoDS_Shape result;
@@ -106,10 +141,13 @@ struct Operation
 // Parâmetros de uma extrusão.
 struct ExtrudeParameters
 {
-    std::string name;     // vazio = nome padrão ("Extrusão N")
+    std::string name;     // vazio = nome padrão ("Extrusão N" / "Extrusão de Saliência N" / ...)
     std::string sketchId; // esboço de origem
-    double depth = 10.0;  // mm, > 0
+    double depth = 10.0;  // mm, > 0 (ignorada em "atravessar tudo")
     bool reversed = false;
+    ExtrudeMode mode = ExtrudeMode::NewBody;
+    std::string targetId; // corpo de destino (saliência e corte)
+    EndCondition endCondition = EndCondition::Blind;
 };
 
 // Parâmetros de uma operação booleana.
@@ -126,8 +164,13 @@ struct FinishParameters
 {
     std::string name;     // vazio = nome padrão ("Fillet 3D N", "Chamfer 3D N")
     std::string sourceId; // corpo de origem
-    double value = 1.0;   // mm, > 0
+    double value = 1.0;   // mm, > 0 (raio, distância ou D1)
     std::vector<cad::modeling::EdgeSignature> edges;
+    // Chamfer 3D avançado (E5.6).
+    Chamfer3DMode chamferMode = Chamfer3DMode::Equal;
+    double value2 = 1.0;  // D2 (mm)
+    double angle = 45.0;  // graus
+    std::vector<gp_Dir> referenceNormals; // uma por aresta (vazio = escolha padrão)
 };
 
 struct ValidationResult
@@ -212,7 +255,9 @@ public:
 
     // --- Extrusões (E5.3) -----------------------------------------------------
     // Sólido que a extrusão produziria, sem alterar o documento (pré-visualização).
-    cad::modeling::FeatureResult previewExtrusion(const ExtrudeParameters& parameters) const;
+    // 'editingId': extrusão em edição (o corpo de destino consumido por ela continua disponível).
+    cad::modeling::FeatureResult previewExtrusion(const ExtrudeParameters& parameters,
+                                                  const std::string& editingId = std::string()) const;
     // Acrescenta a extrusão ao final da sequência e recalcula. Em falha nada muda.
     ValidationResult addExtrusion(const ExtrudeParameters& parameters, std::string* newId = nullptr);
     // Altera nome, profundidade, sentido (e esboço) de uma extrusão existente.
@@ -220,7 +265,20 @@ public:
     ExtrudeParameters extrudeParameters(const std::string& id) const;
     // Extrusões que dependem do esboço.
     std::vector<std::string> dependentOperations(const std::string& sketchId) const;
-    std::string defaultExtrusionName() const;
+    std::string defaultExtrusionName(ExtrudeMode mode = ExtrudeMode::NewBody) const;
+    // Ferramenta da extrusão (prisma do perfil) com os parâmetros dados — pré-visualização da
+    // região adicionada/removida.
+    cad::modeling::FeatureResult extrusionTool(const ExtrudeParameters& parameters) const;
+
+    // --- Esboços sobre faces (E5.6) ------------------------------------------------
+    // Novo esboço (não incluído no documento) sobre a face plana 'face' do corpo 'bodyId'. Vazio
+    // com 'error' se a face não for plana ou não pertencer ao corpo.
+    std::optional<cad::sketch::Sketch> createFaceSketch(const std::string& bodyId, const TopoDS_Shape& face,
+                                                        std::string& error) const;
+    // Corpo (qualquer, ativo de preferência) que contém a face.
+    std::string bodyContainingFace(const TopoDS_Shape& face) const;
+    // Face atual de suporte de um esboço sobre face (nula se não houver).
+    TopoDS_Face supportFace(const std::string& sketchId) const;
 
     // --- Corpos e operações booleanas (E5.4) -------------------------------------
     static bool producesBody(OperationType type);
@@ -251,6 +309,10 @@ public:
     std::string defaultFinishName(OperationType type) const;
     // Arestas atuais do corpo de origem correspondentes às referências da operação.
     std::vector<TopoDS_Edge> resolvedFinishEdges(const std::string& id) const;
+    // Normais das faces de referência padrão das arestas (ver Chamfer3DMode); 'flip' escolhe a
+    // outra face adjacente.
+    std::vector<gp_Dir> referenceNormals(const std::string& bodyId, const std::vector<TopoDS_Edge>& edges,
+                                         bool flip) const;
 
     // Geometria resultante do último recálculo válido (nula em documento sem sólidos).
     const TopoDS_Shape& shape() const { return m_shape; }
@@ -282,20 +344,28 @@ private:
     static Operation makeExtrusion(const std::string& id, const ExtrudeParameters& parameters);
     static Operation makeBoolean(const std::string& id, const BooleanParameters& parameters);
     static Operation makeFinish(const std::string& id, OperationType type, const FinishParameters& parameters);
+    static ValidationResult validateChamferMode(OperationType type, const FinishParameters& parameters);
     // Calcula um acabamento a partir do sólido de origem e das assinaturas (atualizadas para as
     // arestas encontradas).
-    static cad::modeling::FeatureResult computeFinish(OperationType type, const TopoDS_Shape& source, double value,
-                                                      std::vector<cad::modeling::EdgeSignature>& edges);
+    static cad::modeling::FeatureResult computeFinish(Operation& op, const TopoDS_Shape& source);
+    // Extrusão de qualquer modo a partir do esboço (plano já resolvido) e do corpo de destino;
+    // 'tool' recebe o prisma.
+    static cad::modeling::FeatureResult computeExtrusion(const ExtrudeParameters& p, const cad::sketch::Sketch& sketch,
+                                                         const TopoDS_Shape& target, TopoDS_Shape* tool);
+    // Atualiza o plano de um esboço sobre face a partir do corpo de origem.
+    static bool resolveSupport(cad::sketch::Sketch& sketch, const TopoDS_Shape& body, std::string& error);
     // Referências entre operações: operandos existentes, anteriores, de corpos, distintos e
     // consumidos uma única vez. Preenche consumedBy.
     static bool checkReferences(std::vector<Operation>& operations, std::string& error);
     ValidationResult applyOperations(std::vector<Operation> operations, const char* field);
     // Recalcula a sequência de operações (em ordem) com os esboços dados; preenche o estado e o
     // resultado de cada operação e o resultado combinado.
-    static bool rebuild(std::vector<Operation>& operations, const std::vector<cad::sketch::Sketch>& sketches,
+    // Os planos dos esboços sobre faces são atualizados em 'sketches' (cópia de trabalho).
+    static bool rebuild(std::vector<Operation>& operations, std::vector<cad::sketch::Sketch>& sketches,
                         TopoDS_Shape& shape, std::string& error);
     // Aplica um novo estado (já recalculado) e marca o documento como modificado.
     void commit(std::vector<Operation> operations, TopoDS_Shape shape);
+    void commit(std::vector<Operation> operations, std::vector<cad::sketch::Sketch> sketches, TopoDS_Shape shape);
 
     std::string m_name;
     std::vector<Operation> m_operations;
@@ -317,5 +387,7 @@ int operationNumber(const std::string& operationId);
 
 // Nome da booleana para a interface ("União", "Subtração", "Interseção").
 const char* booleanKindLabel(BooleanKind kind);
+// Nome do modo de extrusão ("Novo corpo", "Saliência", "Corte").
+const char* extrudeModeLabel(ExtrudeMode mode);
 
 } // namespace cad::document

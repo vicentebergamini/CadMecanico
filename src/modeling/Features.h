@@ -54,5 +54,12 @@ int countSolids(const TopoDS_Shape& shape);
 // sólido e valores inviáveis (algoritmo não concluído, resultado inválido ou sem volume).
 FeatureResult filletEdges(const TopoDS_Shape& solid, const std::vector<TopoDS_Edge>& edges, double radius);
 FeatureResult chamferEdges(const TopoDS_Shape& solid, const std::vector<TopoDS_Edge>& edges, double distance);
+// Chanfro assimétrico (E5.6): para cada aresta, 'faces[i]' é a face de referência (adjacente à
+// aresta). Duas distâncias: D1 na face de referência e D2 na outra (Add(D1, D2, E, F)).
+// Distância e ângulo: D1 na face de referência e ângulo (graus) entre a face de referência e a
+// face do chanfro (AddDA(D1, ângulo, E, F)); exige 0 < ângulo < 90°.
+FeatureResult chamferEdgesAdvanced(const TopoDS_Shape& solid, const std::vector<TopoDS_Edge>& edges,
+                                   const std::vector<TopoDS_Face>& faces, bool distanceAngle, double d1,
+                                   double d2OrAngle);
 
 } // namespace cad::modeling

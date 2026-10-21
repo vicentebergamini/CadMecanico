@@ -63,7 +63,23 @@
 // Cada aresta é guardada pela assinatura geométrica (EdgeNaming) e remapeada ao abrir; aresta
 // não identificável com segurança torna o arquivo inválido (a operação não é aplicada).
 //
-// Arquivos das versões 1 a 5 continuam sendo lidos sem alteração; a gravação usa sempre a
+// Esquema versão 7 (E5.6):
+//   - esboço sobre face: "plane": "face" e
+//       "support": { "bodyId": "op-1",
+//                    "face": { "normal": [0,0,1], "offset": 20, "centroid": [50,30,20], "area": 6000 },
+//                    "frame": { "origin": [0,0,20], "xAxis": [1,0,0], "normal": [0,0,1] } }
+//     (assinatura persistente da face — ver FaceNaming — e sistema local do esboço; o plano é
+//     recalculado a partir da face ao reconstruir);
+//   - extrusão: "mode" = "newBody" | "boss" | "cut", "targetId" (saliência e corte) e
+//     "endCondition" = "blind" | "throughAll";
+//   - Chamfer 2D: "mode" = "equal" | "twoDistances" | "distanceAngle", "distance2", "angle",
+//     "flip" (referência no segundo lado);
+//   - Chamfer 3D: "mode", parâmetros "distance" + "distance2" ou "angle", e "referenceNormals"
+//     (normal da face de referência de cada aresta) nos modos assimétricos.
+// Documentos antigos são lidos sem alteração: extrusões = novo corpo / profundidade definida;
+// chanfros = distâncias iguais.
+//
+// Arquivos das versões 1 a 6 continuam sendo lidos sem alteração; a gravação usa sempre a
 // versão atual.
 #pragma once
 
@@ -83,7 +99,7 @@ struct FileResult
 class DocumentFile
 {
 public:
-    static constexpr int kSchemaVersion = 6;
+    static constexpr int kSchemaVersion = 7;
     static constexpr qint64 kMaxFileSize = 4 * 1024 * 1024;
     static constexpr const char* kFormat = "cadmec";
     static constexpr const char* kExtension = "cadmec";
