@@ -25,6 +25,18 @@ const char* typeName(OperationType t)
     case OperationType::Block:       return "block";
     case OperationType::ThroughHole: return "throughHole";
     case OperationType::Extrude:     return "extrude";
+    case OperationType::Boolean:     return "boolean";
+    }
+    return "";
+}
+
+const char* booleanName(BooleanKind k)
+{
+    switch (k)
+    {
+    case BooleanKind::Fuse:   return "fuse";
+    case BooleanKind::Cut:    return "cut";
+    case BooleanKind::Common: return "common";
     }
     return "";
 }
@@ -240,8 +252,17 @@ QByteArray DocumentFile::toJson(const CadDocument& document)
             {"id", QString::fromStdString(op.id)},
             {"type", QString::fromLatin1(typeName(op.type))},
             {"name", QString::fromStdString(op.name)},
-            {"parameters", params},
         };
+        if (op.type == OperationType::Boolean)
+        {
+            o.insert("operation", QString::fromLatin1(booleanName(op.booleanKind)));
+            o.insert("operandA", QString::fromStdString(op.operandA));
+            o.insert("operandB", QString::fromStdString(op.operandB));
+        }
+        else
+        {
+            o.insert("parameters", params);
+        }
         if (op.type == OperationType::Extrude)
         {
             o.insert("sketchId", QString::fromStdString(op.sketchId));
@@ -312,7 +333,7 @@ FileResult DocumentFile::fromJson(const QByteArray& json, CadDocument& out)
     data.name = name.toStdString();
 
     // Esquemas 1 e 2: exatamente bloco base + furo passante. Esquema 3: também lista vazia.
-    // Esquema 4: par bloco + furo opcional no início, seguido de extrusões.
+    // Esquema 4: par bloco + furo opcional no início, seguido de extrusões (5: e booleanas).
     int index = 0;
     const bool startsWithPart = !ops.isEmpty() && ops.at(0).toObject().value("type").toString() == QLatin1String("block");
     if (schema <= 3)
@@ -372,10 +393,15 @@ FileResult DocumentFile::fromJson(const QByteArray& json, CadDocument& out)
         if (!ops.at(i).isObject())
             return error(QStringLiteral("Operação %1 não é um objeto").arg(i + 1));
         const QJsonObject op = ops.at(i).toObject();
-        if (op.value("type").toString() != QLatin1String("extrude"))
-            return error(QStringLiteral("Operação %1: tipo inesperado \"%2\" (esperado \"extrude\")")
-                             .arg(i + 1).arg(op.value("type").toString()));
-        const QStringList allowed{"id", "type", "name", "sketchId", "reversed", "parameters"};
+        const QString type = op.value("type").toString();
+        const bool isBoolean = type == QLatin1String("boolean") && schema >= 5;
+        if (type != QLatin1String("extrude") && !isBoolean)
+            return error(QStringLiteral("Operação %1: tipo inesperado \"%2\" (esperado %3)")
+                             .arg(i + 1)
+                             .arg(type, schema >= 5 ? QStringLiteral("\"extrude\" ou \"boolean\"")
+                                                    : QStringLiteral("\"extrude\"")));
+        const QStringList allowed = isBoolean ? QStringList{"id", "type", "name", "operation", "operandA", "operandB"}
+                                              : QStringList{"id", "type", "name", "sketchId", "reversed", "parameters"};
         for (auto it = op.begin(); it != op.end(); ++it)
             if (!allowed.contains(it.key()))
                 return error(QStringLiteral("Operação %1: campo desconhecido \"%2\"").arg(i + 1).arg(it.key()));
@@ -384,6 +410,30 @@ FileResult DocumentFile::fromJson(const QByteArray& json, CadDocument& out)
             return error(QStringLiteral("Operação %1: identificador inválido").arg(i + 1));
         if (!op.value("name").isString())
             return error(QStringLiteral("Operação %1: nome ausente ou inválido").arg(i + 1));
+        if (isBoolean)
+        {
+            Operation b;
+            b.id = id.toString().toStdString();
+            b.type = OperationType::Boolean;
+            b.name = op.value("name").toString().toStdString();
+            const QString kind = op.value("operation").toString();
+            if (kind == QLatin1String("fuse"))
+                b.booleanKind = BooleanKind::Fuse;
+            else if (kind == QLatin1String("cut"))
+                b.booleanKind = BooleanKind::Cut;
+            else if (kind == QLatin1String("common"))
+                b.booleanKind = BooleanKind::Common;
+            else
+                return error(QStringLiteral("Operação %1: campo \"operation\" inválido (esperado fuse, cut ou common)")
+                                 .arg(i + 1));
+            for (const char* key : {"operandA", "operandB"})
+                if (!op.value(key).isString() || !isValidIdentifier(op.value(key).toString().toStdString()))
+                    return error(QStringLiteral("Operação %1: referência \"%2\" ausente ou inválida").arg(i + 1).arg(key));
+            b.operandA = op.value("operandA").toString().toStdString();
+            b.operandB = op.value("operandB").toString().toStdString();
+            data.features.push_back(b);
+            continue;
+        }
         if (!op.value("sketchId").isString())
             return error(QStringLiteral("Operação %1: referência ao esboço ausente ou inválida").arg(i + 1));
         if (!op.value("reversed").isBool())
@@ -392,16 +442,17 @@ FileResult DocumentFile::fromJson(const QByteArray& json, CadDocument& out)
         QString message;
         if (!readParameters(op, QStringList{"depth"}, values, message))
             return error(QStringLiteral("Operação %1: %2").arg(i + 1).arg(message));
-        CadDocument::ExtrudeData e;
+        Operation e;
         e.id = id.toString().toStdString();
-        e.parameters.name = op.value("name").toString().toStdString();
-        e.parameters.sketchId = op.value("sketchId").toString().toStdString();
-        e.parameters.reversed = op.value("reversed").toBool();
-        e.parameters.depth = values[0];
-        data.extrusions.push_back(e);
+        e.type = OperationType::Extrude;
+        e.name = op.value("name").toString().toStdString();
+        e.sketchId = op.value("sketchId").toString().toStdString();
+        e.reversed = op.value("reversed").toBool();
+        e.parameters = {{"depth", values[0]}};
+        data.features.push_back(e);
     }
 
-    // Contador de operações: só no esquema 4.
+    // Contador de operações: a partir do esquema 4.
     if (schema >= 4)
     {
         if (!readInt(doc, "nextOperationNumber", 1, data.nextOperationNumber))

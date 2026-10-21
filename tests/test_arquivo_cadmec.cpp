@@ -96,6 +96,11 @@ private slots:
     void arquivoE521SomenteEsbocos();
     void rejeitaExtrusaoInvalida_data();
     void rejeitaExtrusaoInvalida();
+    // E5.4
+    void salvarEAbrirBooleanas();
+    void arquivoE53Esquema4();
+    void rejeitaBooleanaInvalida_data();
+    void rejeitaBooleanaInvalida();
 
 private:
     QTemporaryDir* m_dir = nullptr;
@@ -661,7 +666,7 @@ void TestArquivoCadmec::salvarEAbrirExtrusao()
     QVERIFY(DocumentFile::save(original, path).ok);
 
     const QJsonObject root = QJsonDocument::fromJson(readFile(path)).object();
-    QCOMPARE(root["schemaVersion"].toInt(), 4);
+    QCOMPARE(root["schemaVersion"].toInt(), DocumentFile::kSchemaVersion);
     const QJsonObject d = root["document"].toObject();
     QCOMPARE(d["nextOperationNumber"].toInt(), 3);
     const QJsonObject e = d["operations"].toArray()[1].toObject();
@@ -756,6 +761,162 @@ void TestArquivoCadmec::rejeitaExtrusaoInvalida()
     QVERIFY(!r.message.isEmpty());
     QVERIFY(active.shape().IsSame(before));
     QCOMPARE(active.operations().size(), size_t(2));
+}
+
+namespace {
+
+// Bloco (op-1) − cilindro (op-2) = op-3; união (op-5) do resultado com um terceiro bloco (op-4).
+CadDocument documentWithBooleans()
+{
+    using namespace cad::sketch;
+    CadDocument doc("Booleanas");
+    std::string error;
+    Sketch a = doc.createSketch(PlaneType::XZ);
+    a.addEntity(SketchRectangle{0.0, 5.0, 100.0, 20.0});
+    doc.commitSketch(a, error);
+    Sketch b = doc.createSketch(PlaneType::XY);
+    b.addEntity(SketchCircle{50.0, -30.0, 10.0});
+    doc.commitSketch(b, error);
+    Sketch c = doc.createSketch(PlaneType::XY);
+    c.addEntity(SketchRectangle{100.0, -60.0, 20.0, 60.0});
+    doc.commitSketch(c, error);
+    doc.addExtrusion({"Bloco", a.id(), 60.0, false});
+    doc.addExtrusion({"Cilindro", b.id(), 30.0, false});
+    doc.addBoolean({"Bloco - Cilindro", cad::modeling::BooleanKind::Cut, "op-1", "op-2"});
+    doc.addExtrusion({"Aba", c.id(), 25.0, false});
+    doc.addBoolean({"", cad::modeling::BooleanKind::Fuse, "op-3", "op-4"});
+    return doc;
+}
+
+template <typename F>
+QByteArray booleansModified(F edit)
+{
+    QJsonObject root = QJsonDocument::fromJson(DocumentFile::toJson(documentWithBooleans())).object();
+    edit(root);
+    return QJsonDocument(root).toJson();
+}
+
+QJsonObject opAt(const QJsonObject& root, int i)
+{
+    return root["document"].toObject()["operations"].toArray()[i].toObject();
+}
+
+} // namespace
+
+void TestArquivoCadmec::salvarEAbrirBooleanas()
+{
+    const CadDocument original = documentWithBooleans();
+    QCOMPARE(original.operations().size(), size_t(5));
+    QCOMPARE(original.activeBodies(), std::vector<std::string>{"op-5"});
+    const QString path = m_dir->filePath("booleanas.cadmec");
+    QVERIFY(DocumentFile::save(original, path).ok);
+
+    const QJsonObject root = QJsonDocument::fromJson(readFile(path)).object();
+    QCOMPARE(root["schemaVersion"].toInt(), DocumentFile::kSchemaVersion);
+    const QJsonObject cut = opAt(root, 2);
+    QCOMPARE(cut["type"].toString(), QStringLiteral("boolean"));
+    QCOMPARE(cut["id"].toString(), QStringLiteral("op-3"));
+    QCOMPARE(cut["name"].toString(), QStringLiteral("Bloco - Cilindro"));
+    QCOMPARE(cut["operation"].toString(), QStringLiteral("cut"));
+    QCOMPARE(cut["operandA"].toString(), QStringLiteral("op-1"));
+    QCOMPARE(cut["operandB"].toString(), QStringLiteral("op-2"));
+    QVERIFY(!cut.contains("parameters"));
+    QCOMPARE(opAt(root, 4)["operation"].toString(), QStringLiteral("fuse"));
+    QCOMPARE(opAt(root, 4)["name"].toString(), QStringLiteral("União 1"));
+
+    CadDocument doc;
+    const FileResult r = DocumentFile::load(path, doc);
+    QVERIFY2(r.ok, qPrintable(r.message));
+    QCOMPARE(doc.operations().size(), size_t(5));
+    QCOMPARE(doc.activeBodies(), std::vector<std::string>{"op-5"});
+    QCOMPARE(doc.consumerOf("op-1"), std::string("op-3"));
+    QCOMPARE(doc.consumerOf("op-3"), std::string("op-5"));
+    QCOMPARE(doc.solidCount(), 1); // operandos ocultos não duplicam o resultado
+    // Reconstruído dos parâmetros: (bloco − cilindro) ∪ aba (aba 20 x 60 x 25 encostada em x = 100).
+    // A aba (x em [100, 120]) encosta na face x = 100 do bloco, sem sobreposição.
+    const double expected = 120000.0 - 2000.0 * 3.14159265358979323846 + 20.0 * 60.0 * 25.0;
+    QVERIFY2(qAbs(ShapeInspector::volume(doc.shape()) - expected) < 1e-6,
+             qPrintable(QString::number(ShapeInspector::volume(doc.shape()), 'f', 4)));
+    QCOMPARE(DocumentFile::toJson(doc), DocumentFile::toJson(original));
+    QCOMPARE(doc.nextOperationNumber(), 6);
+}
+
+void TestArquivoCadmec::arquivoE53Esquema4()
+{
+    // Arquivo real gravado na sessão Windows da E5.3 (esquema 4, uma extrusão).
+    const QString path = QStringLiteral(CADMEC_TEST_DATA_DIR "/documento_e53_v4.cadmec");
+    const QByteArray original = readFile(path);
+    QCOMPARE(QJsonDocument::fromJson(original).object()["schemaVersion"].toInt(), 4);
+    CadDocument doc;
+    const FileResult r = DocumentFile::load(path, doc);
+    QVERIFY2(r.ok, qPrintable(r.message));
+    QCOMPARE(doc.operations().size(), size_t(1));
+    QVERIFY(qAbs(ShapeInspector::volume(doc.shape()) - 53.2 * 32.1 * 40.0) < 1e-6);
+    QCOMPARE(readFile(path), original);
+    // Booleanas não pertencem ao esquema 4.
+    QJsonObject root = QJsonDocument::fromJson(DocumentFile::toJson(documentWithBooleans())).object();
+    root["schemaVersion"] = 4;
+    CadDocument active = documentWithBooleans();
+    const FileResult old = DocumentFile::fromJson(QJsonDocument(root).toJson(), active);
+    qInfo("booleana no esquema 4 -> %s", qPrintable(old.message));
+    QVERIFY(!old.ok && old.message.contains("extrude"));
+}
+
+void TestArquivoCadmec::rejeitaBooleanaInvalida_data()
+{
+    QTest::addColumn<QByteArray>("content");
+    auto setField = [](QJsonObject& r, int i, const char* key, const QJsonValue& value) {
+        QJsonObject o = opAt(r, i);
+        if (value.isUndefined())
+            o.remove(key);
+        else
+            o[key] = value;
+        setOp(r, i, o);
+    };
+    QTest::newRow("operando inexistente") << booleansModified([&](QJsonObject& r) { setField(r, 2, "operandB", "op-9"); });
+    QTest::newRow("operando posterior") << booleansModified([&](QJsonObject& r) { setField(r, 2, "operandB", "op-4"); });
+    QTest::newRow("operando proprio") << booleansModified([&](QJsonObject& r) { setField(r, 2, "operandA", "op-3"); });
+    QTest::newRow("A igual a B") << booleansModified([&](QJsonObject& r) { setField(r, 2, "operandB", "op-1"); });
+    QTest::newRow("corpo consumido duas vezes") << booleansModified([&](QJsonObject& r) { setField(r, 4, "operandA", "op-1"); });
+    QTest::newRow("sem operandA") << booleansModified([&](QJsonObject& r) { setField(r, 2, "operandA", QJsonValue(QJsonValue::Undefined)); });
+    QTest::newRow("operandA numerico") << booleansModified([&](QJsonObject& r) { setField(r, 2, "operandA", 1); });
+    QTest::newRow("operacao desconhecida") << booleansModified([&](QJsonObject& r) { setField(r, 2, "operation", "xor"); });
+    QTest::newRow("campo desconhecido") << booleansModified([&](QJsonObject& r) { setField(r, 2, "parameters", QJsonObject{}); });
+    QTest::newRow("nome vazio") << booleansModified([&](QJsonObject& r) { setField(r, 2, "name", " "); });
+    QTest::newRow("interseccao vazia") << booleansModified([&](QJsonObject& r) {
+        setField(r, 2, "operation", "common");
+        // Cilindro deslocado para fora do bloco: a interseção não tem volume.
+        QJsonObject s = sketchObject(r, 1);
+        QJsonArray e = s["entities"].toArray();
+        QJsonObject c = e[0].toObject();
+        c["cx"] = 500.0;
+        e[0] = c;
+        s["entities"] = e;
+        setSketch(r, 1, s); });
+    QTest::newRow("bloco base como operando") << booleansModified([](QJsonObject& r) {
+        // Documento com a peça de exemplo: o bloco base (consumido pelo furo) não é corpo.
+        CadDocument ex = CadDocument::withTestPart();
+        r = QJsonDocument::fromJson(DocumentFile::toJson(ex)).object();
+        QJsonObject d = r["document"].toObject();
+        QJsonArray ops = d["operations"].toArray();
+        ops.append(QJsonObject{{"id", "op-3"}, {"type", "boolean"}, {"name", "X"}, {"operation", "fuse"},
+                               {"operandA", "op-1"}, {"operandB", "op-2"}});
+        d["operations"] = ops;
+        d["nextOperationNumber"] = 4;
+        r["document"] = d; });
+}
+
+void TestArquivoCadmec::rejeitaBooleanaInvalida()
+{
+    QFETCH(QByteArray, content);
+    CadDocument active = documentWithBooleans();
+    const TopoDS_Shape before = active.shape();
+    const FileResult r = DocumentFile::fromJson(content, active);
+    qInfo("%s -> %s", QTest::currentDataTag(), qPrintable(r.message));
+    QVERIFY(!r.ok);
+    QVERIFY(!r.message.isEmpty());
+    QVERIFY(active.shape().IsSame(before));
+    QCOMPARE(active.operations().size(), size_t(5));
 }
 
 QTEST_GUILESS_MAIN(TestArquivoCadmec)

@@ -1,5 +1,6 @@
 #include "app/MainWindow.h"
 
+#include "app/BooleanDialog.h"
 #include "app/ExtrusionDialog.h"
 #include "app/ParametersDialog.h"
 #include "app/SketchEntityDialog.h"
@@ -120,8 +121,38 @@ QString operationTypeName(OperationType type)
     case OperationType::Block:       return MainWindow::tr("Bloco");
     case OperationType::ThroughHole: return MainWindow::tr("Furo passante");
     case OperationType::Extrude:     return MainWindow::tr("Extrusão");
+    case OperationType::Boolean:     return MainWindow::tr("Operação booleana");
     }
     return QString();
+}
+
+QString booleanKindName(cad::modeling::BooleanKind kind)
+{
+    switch (kind)
+    {
+    case cad::modeling::BooleanKind::Fuse:   return MainWindow::tr("União (A ∪ B)");
+    case cad::modeling::BooleanKind::Cut:    return MainWindow::tr("Subtração (A − B)");
+    case cad::modeling::BooleanKind::Common: return MainWindow::tr("Interseção (A ∩ B)");
+    }
+    return QString();
+}
+
+QString booleanSymbol(cad::modeling::BooleanKind kind)
+{
+    switch (kind)
+    {
+    case cad::modeling::BooleanKind::Fuse:   return QStringLiteral("∪");
+    case cad::modeling::BooleanKind::Cut:    return QStringLiteral("−");
+    case cad::modeling::BooleanKind::Common: return QStringLiteral("∩");
+    }
+    return QString();
+}
+
+// "1 sólido" ou "N sólidos desconectados (corpo composto)".
+QString solidsText(const TopoDS_Shape& shape)
+{
+    const int n = cad::modeling::countSolids(shape);
+    return n == 1 ? MainWindow::tr("1 sólido") : MainWindow::tr("%1 sólidos desconectados (corpo composto)").arg(n);
 }
 
 QString statusName(OperationStatus status)
@@ -200,6 +231,20 @@ void MainWindow::createActions()
     m_actExtrude = new QAction(st->standardIcon(QStyle::SP_ArrowUp), tr("&Extrusão..."), this);
     m_actExtrude->setObjectName("actionExtrusao");
     connect(m_actExtrude, &QAction::triggered, this, &MainWindow::extrude);
+
+    auto makeBoolean = [this](const QString& text, const char* name, cad::modeling::BooleanKind kind, const QString& tip) {
+        auto* act = new QAction(text, this);
+        act->setObjectName(name);
+        act->setStatusTip(tip);
+        connect(act, &QAction::triggered, this, [this, kind] { booleanCommand(kind); });
+        return act;
+    };
+    m_actFuse = makeBoolean(tr("&União..."), "actionUniao", cad::modeling::BooleanKind::Fuse,
+                            tr("União de dois corpos (A ∪ B)"));
+    m_actCut = makeBoolean(tr("&Subtração..."), "actionSubtracao", cad::modeling::BooleanKind::Cut,
+                           tr("Subtração: corpo principal A menos a ferramenta de corte B (A − B)"));
+    m_actCommon = makeBoolean(tr("&Interseção..."), "actionIntersecao", cad::modeling::BooleanKind::Common,
+                              tr("Interseção de dois corpos (A ∩ B)"));
 
     m_actEditOperation = new QAction(tr("Editar &operação..."), this);
     m_actEditOperation->setObjectName("actionEditarOperacao");
@@ -336,6 +381,11 @@ void MainWindow::createMenus()
     QMenu* menuOperations = menuBar()->addMenu(tr("&Operações"));
     menuOperations->setObjectName("menuOperacoes");
     menuOperations->addAction(m_actExtrude);
+    menuOperations->addSeparator();
+    menuOperations->addAction(m_actFuse);
+    menuOperations->addAction(m_actCut);
+    menuOperations->addAction(m_actCommon);
+    menuOperations->addSeparator();
     menuOperations->addAction(m_actEditOperation);
 
     QMenu* menuSketch = menuBar()->addMenu(tr("E&sboço"));
@@ -387,6 +437,9 @@ void MainWindow::createToolBars()
     m_toolBarModeling->addAction(m_actEditParameters);
     m_toolBarModeling->addAction(m_actNewSketch);
     m_toolBarModeling->addAction(m_actExtrude);
+    m_toolBarModeling->addAction(m_actFuse);
+    m_toolBarModeling->addAction(m_actCut);
+    m_toolBarModeling->addAction(m_actCommon);
 
     m_toolBarSketch = addToolBar(tr("Esboço"));
     m_toolBarSketch->setObjectName("toolBarEsboco");
@@ -511,6 +564,14 @@ void MainWindow::updateActionStates()
                                               : tr("Selecione na árvore um esboço concluído para extrudar"));
     m_actExtrude->setToolTip(m_actExtrude->statusTip());
     m_actEditOperation->setEnabled(!editing && !selectedOperationId().isEmpty());
+    // Booleanas: pelo menos dois corpos ativos.
+    const bool twoBodies = !editing && m_document.activeBodies().size() >= 2;
+    for (QAction* a : {m_actFuse, m_actCut, m_actCommon})
+    {
+        a->setEnabled(twoBodies);
+        a->setToolTip(twoBodies ? a->statusTip()
+                                : tr("Operações booleanas exigem pelo menos dois corpos sólidos (ex.: duas extrusões)"));
+    }
 }
 
 std::vector<Sketch> MainWindow::displayedSketches(bool includeEditing) const
@@ -571,7 +632,7 @@ void MainWindow::rebuildTree()
 
     for (const Operation& op : m_document.operations())
     {
-        if (op.type == OperationType::Extrude)
+        if (op.type == OperationType::Extrude || op.type == OperationType::Boolean)
             continue; // listadas depois dos esboços de que dependem
         const QString id = QString::fromStdString(op.id);
         auto* item = new QTreeWidgetItem(root);
@@ -628,45 +689,82 @@ void MainWindow::rebuildTree()
             toSelect = item;
     }
 
-    // Extrusões (dependem dos esboços): esboço de origem, profundidade, sentido e estado.
+    // Extrusões e booleanas (dependem dos esboços), na ordem do histórico. Corpos consumidos por
+    // uma booleana continuam listados, marcados como consumidos.
     for (const Operation& op : m_document.operations())
     {
-        if (op.type != OperationType::Extrude)
+        if (op.type != OperationType::Extrude && op.type != OperationType::Boolean)
             continue;
         const QString id = QString::fromStdString(op.id);
-        const Sketch* sketch = m_document.findSketch(op.sketchId);
         auto* item = new QTreeWidgetItem(root);
-        item->setText(0, QString::fromStdString(op.name));
-        item->setIcon(0, st->standardIcon(op.status == OperationStatus::Valid ? QStyle::SP_ArrowUp
-                                                                              : QStyle::SP_MessageBoxWarning));
+        QString text = QString::fromStdString(op.name);
+        if (op.type == OperationType::Boolean)
+        {
+            const Operation* a = m_document.findOperation(op.operandA);
+            const Operation* b = m_document.findOperation(op.operandB);
+            text += tr(" — %1 %2 %3")
+                        .arg(a ? QString::fromStdString(a->name) : QString::fromStdString(op.operandA),
+                             booleanSymbol(op.booleanKind),
+                             b ? QString::fromStdString(b->name) : QString::fromStdString(op.operandB));
+        }
+        const Operation* consumer = op.consumedBy.empty() ? nullptr : m_document.findOperation(op.consumedBy);
+        if (consumer)
+        {
+            text += tr(" (consumido por %1)").arg(QString::fromStdString(consumer->name));
+            item->setForeground(0, palette().color(QPalette::Disabled, QPalette::Text));
+        }
+        item->setText(0, text);
+        const QStyle::StandardPixmap icon = op.status != OperationStatus::Valid ? QStyle::SP_MessageBoxWarning
+                                            : op.type == OperationType::Boolean ? QStyle::SP_BrowserReload
+                                                                                : QStyle::SP_ArrowUp;
+        item->setIcon(0, st->standardIcon(icon));
         item->setData(0, kItemKindRole, QStringLiteral("operacao"));
         item->setData(0, kItemIdRole, id);
-        item->setToolTip(0, tr("%1 (%2) — %3").arg(QString::fromStdString(op.name), id, statusName(op.status)));
-        auto addChild = [&](const QString& text, const char* kind) {
+        item->setToolTip(0, tr("%1 (%2) — %3%4")
+                                .arg(QString::fromStdString(op.name), id, statusName(op.status),
+                                     consumer ? tr(" — consumido por %1, oculto no visualizador e na exportação")
+                                                    .arg(QString::fromStdString(consumer->name))
+                                              : QString()));
+        auto addChild = [&](const QString& childText, const char* kind) {
             auto* child = new QTreeWidgetItem(item);
-            child->setText(0, text);
+            child->setText(0, childText);
             child->setData(0, kItemKindRole, QString::fromLatin1(kind));
             child->setData(0, kItemIdRole, id);
         };
-        addChild(tr("Esboço de origem: %1 (%2)")
-                     .arg(sketch ? QString::fromStdString(sketch->name()) : tr("inexistente"),
-                          QString::fromStdString(op.sketchId)),
-                 "referencia");
-        addChild(tr("Profundidade: %1").arg(mm(op.parameter("depth"))), "parametro");
-        QString direction;
-        if (sketch)
+        if (op.type == OperationType::Extrude)
         {
-            const gp_Dir n = op.reversed ? sketch->plane().normal().Reversed() : sketch->plane().normal();
-            direction = vectorText(n);
+            const Sketch* sketch = m_document.findSketch(op.sketchId);
+            addChild(tr("Esboço de origem: %1 (%2)")
+                         .arg(sketch ? QString::fromStdString(sketch->name()) : tr("inexistente"),
+                              QString::fromStdString(op.sketchId)),
+                     "referencia");
+            addChild(tr("Profundidade: %1").arg(mm(op.parameter("depth"))), "parametro");
+            QString direction;
+            if (sketch)
+            {
+                const gp_Dir n = op.reversed ? sketch->plane().normal().Reversed() : sketch->plane().normal();
+                direction = vectorText(n);
+            }
+            addChild(tr("Sentido: %1 %2").arg(op.reversed ? tr("oposto à normal") : tr("normal do plano"), direction),
+                     "parametro");
         }
-        addChild(tr("Sentido: %1 %2").arg(op.reversed ? tr("oposto à normal") : tr("normal do plano"), direction),
-                 "parametro");
+        else
+        {
+            addChild(tr("Tipo: %1").arg(booleanKindName(op.booleanKind)), "parametro");
+            addChild(tr("%1: %2").arg(BooleanDialog::operandLabel(op.booleanKind, true), bodyDescription(op.operandA)),
+                     "referencia");
+            addChild(tr("%1: %2").arg(BooleanDialog::operandLabel(op.booleanKind, false), bodyDescription(op.operandB)),
+                     "referencia");
+            if (!op.result.IsNull())
+                addChild(tr("Resultado: %1, volume %2 mm³")
+                             .arg(solidsText(op.result), num(cad::modeling::ShapeInspector::volume(op.result))),
+                         "parametro");
+        }
         addChild(tr("Estado: %1").arg(statusName(op.status)), "estado");
         if (!toSelect && id == selectedId)
             toSelect = item;
-        item->setExpanded(true);
+        item->setExpanded(!consumer);
     }
-
     root->setExpanded(true);
     m_operationsTree->setCurrentItem(toSelect ? toSelect : root);
     m_updatingTree = false;
@@ -760,6 +858,17 @@ void MainWindow::showItemProperties(QTreeWidgetItem* item)
                              op->reversed ? tr("oposto à normal do plano") : tr("normal do plano"),
                              num(cad::modeling::ShapeInspector::volume(op->result)));
         }
+        if (op->type == OperationType::Boolean)
+        {
+            html += tr("<br>Operação: %1<br>%2: %3<br>%4: %5<br>Resultado: %6<br>Volume: %7 mm³")
+                        .arg(booleanKindName(op->booleanKind),
+                             BooleanDialog::operandLabel(op->booleanKind, true), bodyDescription(op->operandA).toHtmlEscaped(),
+                             BooleanDialog::operandLabel(op->booleanKind, false), bodyDescription(op->operandB).toHtmlEscaped(),
+                             solidsText(op->result), num(cad::modeling::ShapeInspector::volume(op->result)));
+        }
+        if (!op->consumedBy.empty())
+            html += tr("<br><i>Consumido por %1: oculto no visualizador e na exportação (mantido no histórico)</i>")
+                        .arg(bodyDescription(op->consumedBy).toHtmlEscaped());
         if (op->type == OperationType::ThroughHole)
         {
             const PartParameters pp = m_document.parameters();
@@ -1042,6 +1151,91 @@ bool MainWindow::addExtrusion(const cad::document::ExtrudeParameters& parameters
     return true;
 }
 
+QString MainWindow::bodyDescription(const std::string& bodyId) const
+{
+    const Operation* op = m_document.findOperation(bodyId);
+    if (!op)
+        return tr("inexistente (%1)").arg(QString::fromStdString(bodyId));
+    return tr("%1 (%2)").arg(QString::fromStdString(op->name), QString::fromStdString(op->id));
+}
+
+void MainWindow::booleanCommand(cad::modeling::BooleanKind kind)
+{
+    if (isEditingSketch())
+        return;
+    const std::vector<std::string> bodies = m_document.activeBodies();
+    if (bodies.size() < 2)
+    {
+        statusBar()->showMessage(tr("Operação booleana indisponível: são necessários dois corpos sólidos"), 8000);
+        reportError(tr("Operação booleana"),
+                    tr("A operação booleana exige pelo menos dois corpos sólidos ativos.\n\n"
+                       "Crie extrusões (ou abra uma peça) e acione o comando novamente."));
+        return;
+    }
+    // Corpo selecionado na árvore como A (se ativo); B = primeiro outro corpo ativo.
+    cad::document::BooleanParameters initial;
+    initial.kind = kind;
+    initial.name = m_document.defaultBooleanName(kind);
+    const std::string selected = selectedOperationId().toStdString();
+    initial.operandA = std::find(bodies.begin(), bodies.end(), selected) != bodies.end() ? selected : bodies.front();
+    for (const std::string& b : bodies)
+        if (b != initial.operandA)
+        {
+            initial.operandB = b;
+            break;
+        }
+    const auto parameters = askBoolean(initial, QString());
+    m_viewer->clearOperandHighlight();
+    if (!parameters)
+    {
+        statusBar()->showMessage(tr("Operação booleana cancelada; documento mantido"), 5000);
+        return;
+    }
+    addBoolean(*parameters);
+}
+
+bool MainWindow::addBoolean(const cad::document::BooleanParameters& parameters)
+{
+    std::string newId;
+    const auto result = m_document.addBoolean(parameters, &newId);
+    if (!result.ok)
+    {
+        statusBar()->showMessage(tr("Operação booleana recusada: %1").arg(QString::fromStdString(result.message)), 8000);
+        reportError(tr("Operação booleana"), tr("A operação não foi criada:\n%1\n\nO documento foi mantido.")
+                                                 .arg(QString::fromStdString(result.message)));
+        return false;
+    }
+    refreshDocumentViews(true);
+    selectTreeItem(QString::fromStdString(newId));
+    const Operation* op = m_document.findOperation(newId);
+    statusBar()->showMessage(tr("%1 criada: %2, volume %3 mm³")
+                                 .arg(QString::fromStdString(op->name), solidsText(op->result),
+                                      num(cad::modeling::ShapeInspector::volume(op->result))),
+                             10000);
+    return true;
+}
+
+bool MainWindow::updateBoolean(const QString& operationId, const cad::document::BooleanParameters& parameters)
+{
+    const int revision = m_document.revision();
+    const auto result = m_document.updateBoolean(operationId.toStdString(), parameters);
+    if (!result.ok)
+    {
+        statusBar()->showMessage(tr("Operação booleana não alterada: %1").arg(QString::fromStdString(result.message)), 8000);
+        reportError(tr("Operação booleana"), tr("A alteração não foi aplicada:\n%1\n\nA geometria foi mantida no último "
+                                                "estado válido.")
+                                                 .arg(QString::fromStdString(result.message)));
+        return false;
+    }
+    if (m_document.revision() != revision)
+    {
+        refreshDocumentViews(true);
+        selectTreeItem(operationId);
+        statusBar()->showMessage(tr("Operação booleana recalculada"), 5000);
+    }
+    return true;
+}
+
 void MainWindow::editOperation()
 {
     if (isEditingSketch())
@@ -1050,6 +1244,18 @@ void MainWindow::editOperation()
     const Operation* op = m_document.findOperation(id.toStdString());
     if (!op)
         return;
+    if (op->type == OperationType::Boolean)
+    {
+        const auto parameters = askBoolean(m_document.booleanParameters(id.toStdString()), id);
+        m_viewer->clearOperandHighlight();
+        if (!parameters)
+        {
+            statusBar()->showMessage(tr("Edição da operação booleana cancelada"), 5000);
+            return;
+        }
+        updateBoolean(id, *parameters);
+        return;
+    }
     if (op->type != OperationType::Extrude)
     {
         editParameters(); // bloco base / furo passante
@@ -1576,6 +1782,52 @@ std::optional<cad::document::ExtrudeParameters> MainWindow::askExtrusion(const c
     }
     const bool accepted = dialog.exec() == QDialog::Accepted;
     m_viewer->clearPreviewShape();
+    if (!accepted)
+        return std::nullopt;
+    return dialog.parameters();
+}
+
+std::optional<cad::document::BooleanParameters> MainWindow::askBoolean(const cad::document::BooleanParameters& initial,
+                                                                      const QString& operationId)
+{
+    // Corpos disponíveis: ativos ao criar; na edição, os corpos anteriores à operação que estão
+    // ativos ou são consumidos por ela.
+    BooleanDialog::BodyList bodies;
+    const std::string editing = operationId.toStdString();
+    for (const Operation& op : m_document.operations())
+    {
+        if (!editing.empty() && op.id == editing)
+            break;
+        if (CadDocument::producesBody(op.type) && (op.consumedBy.empty() || op.consumedBy == editing))
+            bodies.emplace_back(op.id, bodyDescription(op.id));
+    }
+    BooleanDialog dialog(
+        initial, bodies,
+        [this, editing](const cad::document::BooleanParameters& p) {
+            if (editing.empty())
+                return m_document.previewBoolean(p);
+            // Edição: avalia diretamente com os resultados dos operandos (consumidos pela própria
+            // operação), sem alterar o documento.
+            const Operation* a = m_document.findOperation(p.operandA);
+            const Operation* b = m_document.findOperation(p.operandB);
+            if (!a || !b || a == b)
+            {
+                cad::modeling::FeatureResult r;
+                r.message = tr("Selecione dois corpos diferentes").toStdString();
+                return r;
+            }
+            return cad::modeling::booleanOperation(p.kind, a->result, b->result);
+        },
+        !editing.empty(), this);
+    auto highlight = [this](const QString& a, const QString& b) {
+        const Operation* opA = m_document.findOperation(a.toStdString());
+        const Operation* opB = m_document.findOperation(b.toStdString());
+        m_viewer->setOperandHighlight(opA ? opA->result : TopoDS_Shape(), opB ? opB->result : TopoDS_Shape());
+    };
+    connect(&dialog, &BooleanDialog::operandsChanged, this, highlight);
+    highlight(QString::fromStdString(dialog.parameters().operandA), QString::fromStdString(dialog.parameters().operandB));
+    const bool accepted = dialog.exec() == QDialog::Accepted;
+    m_viewer->clearOperandHighlight();
     if (!accepted)
         return std::nullopt;
     return dialog.parameters();

@@ -3,6 +3,7 @@ qt_add_library(cad_app STATIC
     ParametersDialog.h ParametersDialog.cpp
     SketchEntityDialog.h SketchEntityDialog.cpp
     ExtrusionDialog.h ExtrusionDialog.cpp
+    BooleanDialog.h BooleanDialog.cpp
     StlExportDialog.h StlExportDialog.cpp
 )
 set_target_properties(cad_app PROPERTIES AUTOMOC ON)

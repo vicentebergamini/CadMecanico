@@ -92,6 +92,13 @@ public:
     void clearPreviewShape() { setPreviewShape(TopoDS_Shape()); }
     const occ::handle<AIS_Shape>& previewPresentation() const { return m_previewSolid; }
 
+    // Destaque dos operandos de uma operação booleana (E5.4): A (corpo principal) em azul e B
+    // (ferramenta) em vermelho, translúcidos e não selecionáveis. Formas nulas removem o destaque.
+    void setOperandHighlight(const TopoDS_Shape& a, const TopoDS_Shape& b);
+    void clearOperandHighlight() { setOperandHighlight(TopoDS_Shape(), TopoDS_Shape()); }
+    const occ::handle<AIS_Shape>& operandAPresentation() const { return m_operandA; }
+    const occ::handle<AIS_Shape>& operandBPresentation() const { return m_operandB; }
+
     // --- Esboços --------------------------------------------------------------
     // Esboços do documento exibidos fora da edição (somente visualização).
     void setDocumentSketches(const std::vector<cad::sketch::Sketch>& sketches);
@@ -183,6 +190,8 @@ private:
     QHash<QString, occ::handle<AIS_Shape>> m_editShapes;               // id da entidade -> objeto
     occ::handle<AIS_Shape> m_preview;
     occ::handle<AIS_Shape> m_previewSolid;
+    occ::handle<AIS_Shape> m_operandA;
+    occ::handle<AIS_Shape> m_operandB;
     std::optional<cad::sketch::SketchPlane> m_sketchPlane;
     SketchTool m_sketchTool = SketchTool::Select;
     std::optional<gp_Pnt2d> m_pendingPoint;

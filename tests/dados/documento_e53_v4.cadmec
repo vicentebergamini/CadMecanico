@@ -1,0 +1,41 @@
+{
+    "document": {
+        "name": "Sem título",
+        "nextOperationNumber": 2,
+        "nextSketchNumber": 2,
+        "operations": [
+            {
+                "id": "op-1",
+                "name": "Extrusão 1",
+                "parameters": {
+                    "depth": 40
+                },
+                "reversed": false,
+                "sketchId": "sk-1",
+                "type": "extrude"
+            }
+        ],
+        "sketches": [
+            {
+                "entities": [
+                    {
+                        "height": 32.1,
+                        "id": "e-1",
+                        "type": "rectangle",
+                        "width": 53.2,
+                        "x": 20,
+                        "y": 37.3
+                    }
+                ],
+                "id": "sk-1",
+                "name": "Esboço 1",
+                "nextEntityNumber": 2,
+                "plane": "XY"
+            }
+        ],
+        "unit": "mm"
+    },
+    "format": "cadmec",
+    "generator": "CadMecanico",
+    "schemaVersion": 4
+}

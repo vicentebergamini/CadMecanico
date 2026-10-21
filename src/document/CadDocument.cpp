@@ -198,27 +198,45 @@ bool CadDocument::fromData(const Data& data, CadDocument& out, std::string& erro
         }
         ops = makeOperations(*data.part, data.blockId, data.holeId);
     }
-    for (const ExtrudeData& e : data.extrusions)
+    for (const Operation& f : data.features)
     {
-        const ValidationResult v = validateExtrude(e.parameters);
-        if (!v.ok)
+        if (trim(f.name).empty())
         {
-            error = "Extrusão " + e.id + ": " + v.message;
+            error = "Operação " + f.id + ": nome vazio";
             return false;
         }
-        if (trim(e.parameters.name).empty())
+        if (trim(f.name).size() > kMaxNameLength)
         {
-            error = "Extrusão " + e.id + ": nome vazio";
+            error = "Operação " + f.id + ": nome longo demais";
             return false;
         }
-        const bool sketchExists = std::any_of(data.sketches.begin(), data.sketches.end(),
-                                              [&](const cad::sketch::Sketch& s) { return s.id() == e.parameters.sketchId; });
-        if (!sketchExists)
+        if (f.type == OperationType::Extrude)
         {
-            error = "Extrusão " + e.id + ": esboço de origem inexistente (" + e.parameters.sketchId + ")";
+            const ExtrudeParameters p{f.name, f.sketchId, f.parameter("depth"), f.reversed};
+            const ValidationResult v = validateExtrude(p);
+            if (!v.ok)
+            {
+                error = "Extrusão " + f.id + ": " + v.message;
+                return false;
+            }
+            const bool sketchExists = std::any_of(data.sketches.begin(), data.sketches.end(),
+                                                  [&](const cad::sketch::Sketch& s) { return s.id() == p.sketchId; });
+            if (!sketchExists)
+            {
+                error = "Extrusão " + f.id + ": esboço de origem inexistente (" + p.sketchId + ")";
+                return false;
+            }
+            ops.push_back(makeExtrusion(f.id, p));
+        }
+        else if (f.type == OperationType::Boolean)
+        {
+            ops.push_back(makeBoolean(f.id, BooleanParameters{f.name, f.booleanKind, f.operandA, f.operandB}));
+        }
+        else
+        {
+            error = "Operação " + f.id + ": tipo não permitido após a peça";
             return false;
         }
-        ops.push_back(makeExtrusion(e.id, e.parameters));
     }
 
     // Identificadores de operação válidos e únicos; contador coerente.
@@ -330,7 +348,7 @@ bool CadDocument::commitSketch(const cad::sketch::Sketch& sketch, std::string& e
         std::string rebuildError;
         if (!rebuild(ops, sketches, shape, rebuildError))
         {
-            error = "A alteração do esboço invalida a extrusão dependente: " + rebuildError;
+            error = "A alteração do esboço invalida uma operação dependente: " + rebuildError;
             return false;
         }
         m_sketches = std::move(sketches);
@@ -594,12 +612,87 @@ Operation CadDocument::makeExtrusion(const std::string& id, const ExtrudeParamet
     return op;
 }
 
+bool CadDocument::producesBody(OperationType type)
+{
+    return type == OperationType::ThroughHole || type == OperationType::Extrude || type == OperationType::Boolean;
+}
+
+bool CadDocument::checkReferences(std::vector<Operation>& operations, std::string& error)
+{
+    std::set<std::string> bodies; // corpos definidos antes da operação corrente
+    std::set<std::string> consumed;
+    for (Operation& op : operations)
+        op.consumedBy.clear();
+    auto findOp = [&operations](const std::string& id) -> Operation* {
+        for (Operation& op : operations)
+            if (op.id == id)
+                return &op;
+        return nullptr;
+    };
+    for (Operation& op : operations)
+    {
+        if (op.type == OperationType::Boolean)
+        {
+            const std::string label = op.name + " (" + op.id + ")";
+            if (op.operandA.empty() || op.operandB.empty())
+            {
+                error = label + ": selecione os corpos A e B";
+                return false;
+            }
+            if (op.operandA == op.operandB)
+            {
+                error = label + ": os corpos A e B devem ser diferentes";
+                return false;
+            }
+            for (const std::string* operand : {&op.operandA, &op.operandB})
+            {
+                const char* which = operand == &op.operandA ? "A" : "B";
+                if (*operand == op.id)
+                {
+                    error = label + ": a operação não pode usar o próprio resultado (dependência circular)";
+                    return false;
+                }
+                if (!bodies.count(*operand))
+                {
+                    const Operation* target = findOp(*operand);
+                    if (!target)
+                        error = label + ": corpo " + which + " inexistente (" + *operand + ")";
+                    else if (!producesBody(target->type))
+                        error = label + ": a operação " + *operand + " não produz um corpo sólido";
+                    else
+                        error = label + ": o corpo " + which + " (" + *operand
+                                + ") é posterior à operação (dependência circular não permitida)";
+                    return false;
+                }
+                if (consumed.count(*operand))
+                {
+                    error = label + ": o corpo " + *operand + " já é usado por " + findOp(*operand)->consumedBy;
+                    return false;
+                }
+                consumed.insert(*operand);
+                findOp(*operand)->consumedBy = op.id;
+            }
+        }
+        if (producesBody(op.type))
+            bodies.insert(op.id);
+    }
+    return true;
+}
+
 bool CadDocument::rebuild(std::vector<Operation>& operations, const std::vector<cad::sketch::Sketch>& sketches,
                           TopoDS_Shape& shape, std::string& error)
 {
+    if (!checkReferences(operations, error))
+        return false;
+
     TopoDS_Shape part; // bloco (+ furo)
-    std::vector<TopoDS_Shape> solids;
     double length = 0.0, width = 0.0;
+    auto resultOf = [&operations](const std::string& id) {
+        for (const Operation& op : operations)
+            if (op.id == id)
+                return op.result;
+        return TopoDS_Shape();
+    };
     bool ok = true;
     for (Operation& op : operations)
     {
@@ -644,10 +737,11 @@ bool CadDocument::rebuild(std::vector<Operation>& operations, const std::vector<
             const double depth = op.parameter("depth");
             const gp_Vec direction = gp_Vec(it->plane().normal()) * (op.reversed ? -depth : depth);
             r = cad::modeling::extrudeFace(profile.face, direction);
-            if (r.ok)
-                solids.push_back(r.shape);
             break;
         }
+        case OperationType::Boolean:
+            r = cad::modeling::booleanOperation(op.booleanKind, resultOf(op.operandA), resultOf(op.operandB));
+            break;
         }
         op.status = r.ok ? OperationStatus::Valid : OperationStatus::Invalid;
         op.statusMessage = r.message;
@@ -662,15 +756,17 @@ bool CadDocument::rebuild(std::vector<Operation>& operations, const std::vector<
     if (!ok)
         return false;
 
-    if (!part.IsNull())
-        solids.insert(solids.begin(), part);
+    // Resultado do documento: corpos ativos (não consumidos), sem união implícita.
+    std::vector<TopoDS_Shape> solids;
+    for (const Operation& op : operations)
+        if (producesBody(op.type) && op.consumedBy.empty() && !op.result.IsNull())
+            solids.push_back(op.result);
     if (solids.empty())
         shape.Nullify();
     else if (solids.size() == 1)
         shape = solids.front();
     else
     {
-        // Sólidos independentes lado a lado, sem união booleana.
         BRep_Builder builder;
         TopoDS_Compound compound;
         builder.MakeCompound(compound);
@@ -681,4 +777,137 @@ bool CadDocument::rebuild(std::vector<Operation>& operations, const std::vector<
     return true;
 }
 
+// --- Corpos e booleanas -------------------------------------------------------
+
+const char* booleanKindLabel(BooleanKind kind)
+{
+    switch (kind)
+    {
+    case BooleanKind::Fuse:   return "União";
+    case BooleanKind::Cut:    return "Subtração";
+    case BooleanKind::Common: return "Interseção";
+    }
+    return "";
+}
+
+std::vector<std::string> CadDocument::activeBodies() const
+{
+    std::vector<std::string> ids;
+    for (const Operation& op : m_operations)
+        if (producesBody(op.type) && op.consumedBy.empty())
+            ids.push_back(op.id);
+    return ids;
+}
+
+std::string CadDocument::consumerOf(const std::string& bodyId) const
+{
+    const Operation* op = findOperation(bodyId);
+    return op ? op->consumedBy : std::string();
+}
+
+std::string CadDocument::defaultBooleanName(BooleanKind kind) const
+{
+    int n = 1;
+    for (const Operation& op : m_operations)
+        if (op.type == OperationType::Boolean && op.booleanKind == kind)
+            ++n;
+    return std::string(booleanKindLabel(kind)) + " " + std::to_string(n);
+}
+
+Operation CadDocument::makeBoolean(const std::string& id, const BooleanParameters& parameters)
+{
+    Operation op;
+    op.id = id;
+    op.type = OperationType::Boolean;
+    op.name = trim(parameters.name);
+    op.booleanKind = parameters.kind;
+    op.operandA = parameters.operandA;
+    op.operandB = parameters.operandB;
+    return op;
+}
+
+BooleanParameters CadDocument::booleanParameters(const std::string& id) const
+{
+    BooleanParameters p;
+    if (const Operation* op = findOperation(id); op && op->type == OperationType::Boolean)
+    {
+        p.name = op->name;
+        p.kind = op->booleanKind;
+        p.operandA = op->operandA;
+        p.operandB = op->operandB;
+    }
+    return p;
+}
+
+cad::modeling::FeatureResult CadDocument::previewBoolean(const BooleanParameters& parameters) const
+{
+    cad::modeling::FeatureResult r;
+    const Operation* a = findOperation(parameters.operandA);
+    const Operation* b = findOperation(parameters.operandB);
+    if (!a || !b)
+    {
+        r.message = "Selecione os corpos A e B";
+        return r;
+    }
+    if (a == b)
+    {
+        r.message = "Os corpos A e B devem ser diferentes";
+        return r;
+    }
+    for (const Operation* op : {a, b})
+        if (!producesBody(op->type) || !op->consumedBy.empty())
+        {
+            r.message = "O corpo " + op->id + " não está disponível (já consumido por " + op->consumedBy + ")";
+            return r;
+        }
+    return cad::modeling::booleanOperation(parameters.kind, a->result, b->result);
+}
+
+ValidationResult CadDocument::applyOperations(std::vector<Operation> operations, const char* field)
+{
+    TopoDS_Shape shape;
+    std::string error;
+    if (!rebuild(operations, m_sketches, shape, error))
+        return ValidationResult{false, field, error};
+    commit(std::move(operations), shape);
+    return {};
+}
+
+ValidationResult CadDocument::addBoolean(const BooleanParameters& parameters, std::string* newId)
+{
+    if (trim(parameters.name).size() > kMaxNameLength)
+        return ValidationResult{false, "name", "Nome longo demais"};
+    BooleanParameters p = parameters;
+    if (trim(p.name).empty())
+        p.name = defaultBooleanName(p.kind);
+    const std::string id = "op-" + std::to_string(m_nextOperationNumber);
+    std::vector<Operation> ops = m_operations;
+    ops.push_back(makeBoolean(id, p));
+    const ValidationResult v = applyOperations(std::move(ops), "operands");
+    if (!v.ok)
+        return v;
+    ++m_nextOperationNumber;
+    if (newId)
+        *newId = id;
+    return {};
+}
+
+ValidationResult CadDocument::updateBoolean(const std::string& id, const BooleanParameters& parameters)
+{
+    if (trim(parameters.name).size() > kMaxNameLength)
+        return ValidationResult{false, "name", "Nome longo demais"};
+    std::vector<Operation> ops = m_operations;
+    auto it = std::find_if(ops.begin(), ops.end(), [&](const Operation& op) { return op.id == id; });
+    if (it == ops.end() || it->type != OperationType::Boolean)
+        return ValidationResult{false, "", "Operação booleana inexistente: " + id};
+    BooleanParameters p = parameters;
+    if (trim(p.name).empty())
+        p.name = it->name;
+    const Operation updated = makeBoolean(id, p);
+    if (updated.name == it->name && updated.booleanKind == it->booleanKind && updated.operandA == it->operandA
+        && updated.operandB == it->operandB)
+        return {};
+    *it = updated;
+    return applyOperations(std::move(ops), "operands");
+}
 } // namespace cad::document

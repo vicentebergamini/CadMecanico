@@ -102,6 +102,13 @@ public:
     // Seleciona um item da árvore pelo id (operação ou esboço).
     void selectTreeItem(const QString& id);
 
+    // --- Operações booleanas (E5.4) ---------------------------------------------
+    // Cria/edita a booleana; erros são informados e o documento não muda.
+    bool addBoolean(const cad::document::BooleanParameters& parameters);
+    bool updateBoolean(const QString& operationId, const cad::document::BooleanParameters& parameters);
+    // Descrição de um corpo para a interface: "Extrusão 1 (op-1)".
+    QString bodyDescription(const std::string& bodyId) const;
+
 public slots:
     void exportStep();
     void showAbout();
@@ -118,6 +125,7 @@ public slots:
     void editParameters();
 
     void extrude();
+    void booleanCommand(cad::modeling::BooleanKind kind);
     void editOperation();
     void exportStl();
 
@@ -143,6 +151,9 @@ protected:
     virtual std::optional<cad::document::ExtrudeParameters> askExtrusion(const cad::document::ExtrudeParameters& initial,
                                                                         bool editing);
     virtual std::optional<StlExportRequest> askStlExport(const QString& suggestedPath);
+    // Diálogo da booleana; 'operationId' = operação em edição (vazio ao criar). Vazio = cancelado.
+    virtual std::optional<cad::document::BooleanParameters> askBoolean(const cad::document::BooleanParameters& initial,
+                                                                      const QString& operationId);
     virtual std::optional<cad::sketch::SketchGeometry> askEntityDimensions(const cad::sketch::SketchEntity& entity);
 
 private:
@@ -183,6 +194,9 @@ private:
     QAction* m_actExportStl = nullptr;
     QAction* m_actExtrude = nullptr;
     QAction* m_actEditOperation = nullptr;
+    QAction* m_actFuse = nullptr;
+    QAction* m_actCut = nullptr;
+    QAction* m_actCommon = nullptr;
     QAction* m_actQuit = nullptr;
     QAction* m_actUndo = nullptr;
     QAction* m_actRedo = nullptr;

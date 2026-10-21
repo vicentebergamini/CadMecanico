@@ -250,7 +250,7 @@ int main()
         std::string error;
         CAD_CHECK(!doc.commitSketch(broken, error));
         std::printf("  esboco recusado: %s\n", error.c_str());
-        CAD_CHECK(error.find("extrusão dependente") != std::string::npos);
+        CAD_CHECK(error.find("operação dependente") != std::string::npos);
         CAD_CHECK(doc.shape().IsSame(before) && doc.revision() == rev);
         CAD_CHECK(doc.findSketch(rectSketch)->entities().size() == 1);
         CAD_CHECK(std::holds_alternative<SketchRectangle>(doc.findSketch(rectSketch)->entities()[0].geometry));

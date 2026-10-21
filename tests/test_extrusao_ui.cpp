@@ -455,7 +455,7 @@ void TestExtrusaoUi::edicaoDeEsbocoInvalidaMantemEstado()
     QVERIFY(!m_window->finishSketch());
     QCOMPARE(m_window->errors.size(), 1);
     qInfo("%s", qPrintable(m_window->errors.first()));
-    QVERIFY(m_window->errors.first().contains(QStringLiteral("extrusão dependente")));
+    QVERIFY(m_window->errors.first().contains(QStringLiteral("operação dependente")));
     QVERIFY(m_window->isEditingSketch()); // edição permanece aberta para correção
     QVERIFY(m_window->part().IsSame(before));
     QCOMPARE(m_window->document().findSketch("sk-1")->entities().size(), size_t(1));

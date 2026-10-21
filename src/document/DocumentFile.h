@@ -41,7 +41,15 @@
 // A geometria é sempre reconstruída a partir desses dados (nenhuma malha ou objeto gráfico é
 // salvo). Toda extrusão precisa referenciar um esboço existente no arquivo.
 //
-// Arquivos das versões 1, 2 e 3 continuam sendo lidos sem alteração; a gravação usa sempre a
+// Esquema versão 5 (E5.4): além das extrusões, "operations" aceita operações booleanas, que
+// referenciam corpos anteriores pelos ids (a ordem do array é a ordem de reconstrução):
+//     { "id": "op-3", "type": "boolean", "name": "Subtração 1", "operation": "cut",
+//       "operandA": "op-1", "operandB": "op-2" }
+// "operation" = "fuse" (A ∪ B), "cut" (A − B) ou "common" (A ∩ B). Os operandos são consumidos
+// (permanecem no histórico, mas não são exibidos nem exportados); cada corpo só pode ser
+// consumido uma vez e só por uma operação posterior.
+//
+// Arquivos das versões 1 a 4 continuam sendo lidos sem alteração; a gravação usa sempre a
 // versão atual.
 #pragma once
 
@@ -61,7 +69,7 @@ struct FileResult
 class DocumentFile
 {
 public:
-    static constexpr int kSchemaVersion = 4;
+    static constexpr int kSchemaVersion = 5;
     static constexpr qint64 kMaxFileSize = 4 * 1024 * 1024;
     static constexpr const char* kFormat = "cadmec";
     static constexpr const char* kExtension = "cadmec";

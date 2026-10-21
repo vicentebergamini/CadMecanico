@@ -2,11 +2,15 @@
 // resultante e esboços 2D. Núcleo sem dependência de Qt; a geometria é construída pelo
 // Open CASCADE.
 //
-// Operações (E5.3): a peça de exemplo (bloco base + furo passante, opcional) e extrusões de
-// esboços. Cada extrusão gera um sólido independente; o resultado do documento é o sólido único
-// ou, havendo mais de um, um TopoDS_Compound com os sólidos lado a lado (sem união booleana).
-// Toda alteração (parâmetros, esboço de origem, profundidade) recalcula as operações em ordem de
-// dependência numa cópia; o documento só muda se tudo for válido.
+// Operações: a peça de exemplo (bloco base + furo passante, opcional), extrusões de esboços
+// (E5.3) e operações booleanas (E5.4). Operações que produzem sólido são "corpos" (furo passante
+// = peça, extrusão, booleana). Uma booleana referencia os corpos A e B pelos ids persistentes e os
+// consome: eles continuam no histórico, mas deixam de ser exibidos e exportados. Cada corpo só
+// pode ser consumido uma vez e só por uma operação posterior (a ordem da lista impede ciclos).
+// O resultado do documento são os corpos ativos (não consumidos): o sólido único ou um
+// TopoDS_Compound com os corpos lado a lado (sem união implícita).
+// Toda alteração recalcula as operações em ordem de dependência numa cópia; o documento só muda
+// se tudo for válido.
 #pragma once
 
 #include "modeling/Features.h"
@@ -42,8 +46,11 @@ enum class OperationType
 {
     Block,       // bloco base
     ThroughHole, // furo passante
-    Extrude      // extrusão de esboço (E5.3)
+    Extrude,     // extrusão de esboço (E5.3)
+    Boolean      // união, subtração ou interseção de dois corpos (E5.4)
 };
+
+using cad::modeling::BooleanKind;
 
 enum class OperationStatus
 {
@@ -70,8 +77,16 @@ struct Operation
     std::string sketchId;
     bool reversed = false;
 
+    // Booleana: tipo e corpos operandos (ids de operações anteriores). Na subtração A é o corpo
+    // principal e B a ferramenta de corte.
+    BooleanKind booleanKind = BooleanKind::Fuse;
+    std::string operandA;
+    std::string operandB;
+
     // Geometria resultante da operação (calculada; não persistida).
     TopoDS_Shape result;
+    // Operação posterior que consome este corpo (calculado; vazio = corpo ativo).
+    std::string consumedBy;
 
     // Valor do parâmetro 'key' (0 se ausente).
     double parameter(const std::string& key) const;
@@ -84,6 +99,15 @@ struct ExtrudeParameters
     std::string sketchId; // esboço de origem
     double depth = 10.0;  // mm, > 0
     bool reversed = false;
+};
+
+// Parâmetros de uma operação booleana.
+struct BooleanParameters
+{
+    std::string name; // vazio = nome padrão ("União N", "Subtração N", "Interseção N")
+    BooleanKind kind = BooleanKind::Fuse;
+    std::string operandA;
+    std::string operandB;
 };
 
 struct ValidationResult
@@ -120,18 +144,15 @@ public:
     static ValidationResult validateExtrude(const ExtrudeParameters& parameters);
 
     // Dados persistidos (leitura do .cadmec).
-    struct ExtrudeData
-    {
-        std::string id;
-        ExtrudeParameters parameters;
-    };
     struct Data
     {
         std::string name;
         std::optional<PartParameters> part; // bloco + furo (opcional)
         std::string blockId = "op-1";
         std::string holeId = "op-2";
-        std::vector<ExtrudeData> extrusions; // em ordem
+        // Operações após a peça, em ordem: id, tipo, nome e campos de definição (extrusão:
+        // sketchId/reversed/"depth"; booleana: booleanKind/operandA/operandB).
+        std::vector<Operation> features;
         std::vector<cad::sketch::Sketch> sketches;
         int nextSketchNumber = 1;
         int nextOperationNumber = 0; // 0 = calcular a partir dos ids
@@ -180,6 +201,21 @@ public:
     std::vector<std::string> dependentOperations(const std::string& sketchId) const;
     std::string defaultExtrusionName() const;
 
+    // --- Corpos e operações booleanas (E5.4) -------------------------------------
+    static bool producesBody(OperationType type);
+    // Corpos ativos (não consumidos), na ordem do histórico.
+    std::vector<std::string> activeBodies() const;
+    // Operação que consome o corpo (vazio se ativo ou inexistente).
+    std::string consumerOf(const std::string& bodyId) const;
+    // Resultado que a booleana produziria, sem alterar o documento.
+    cad::modeling::FeatureResult previewBoolean(const BooleanParameters& parameters) const;
+    // Acrescenta a booleana (consome A e B) e recalcula. Em falha nada muda.
+    ValidationResult addBoolean(const BooleanParameters& parameters, std::string* newId = nullptr);
+    // Altera tipo, operandos e nome; recalcula a booleana e as operações seguintes.
+    ValidationResult updateBoolean(const std::string& id, const BooleanParameters& parameters);
+    BooleanParameters booleanParameters(const std::string& id) const;
+    std::string defaultBooleanName(BooleanKind kind) const;
+
     // Geometria resultante do último recálculo válido (nula em documento sem sólidos).
     const TopoDS_Shape& shape() const { return m_shape; }
 
@@ -208,6 +244,11 @@ private:
     static std::vector<Operation> makeOperations(const PartParameters& p, const std::string& blockId,
                                                  const std::string& holeId);
     static Operation makeExtrusion(const std::string& id, const ExtrudeParameters& parameters);
+    static Operation makeBoolean(const std::string& id, const BooleanParameters& parameters);
+    // Referências entre operações: operandos existentes, anteriores, de corpos, distintos e
+    // consumidos uma única vez. Preenche consumedBy.
+    static bool checkReferences(std::vector<Operation>& operations, std::string& error);
+    ValidationResult applyOperations(std::vector<Operation> operations, const char* field);
     // Recalcula a sequência de operações (em ordem) com os esboços dados; preenche o estado e o
     // resultado de cada operação e o resultado combinado.
     static bool rebuild(std::vector<Operation>& operations, const std::vector<cad::sketch::Sketch>& sketches,
@@ -232,5 +273,8 @@ bool isValidIdentifier(const std::string& id);
 int sketchNumber(const std::string& sketchId);
 // Número N de um identificador de operação "op-N" (0 se o formato for outro).
 int operationNumber(const std::string& operationId);
+
+// Nome da booleana para a interface ("União", "Subtração", "Interseção").
+const char* booleanKindLabel(BooleanKind kind);
 
 } // namespace cad::document

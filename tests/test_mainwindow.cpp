@@ -165,7 +165,7 @@ void TestMainWindow::menus()
     QCOMPARE(actionTexts(exportMenu), QStringList({"STEP (*.step)...", "STL (*.stl)..."}));
     auto* operations = m_window->findChild<QMenu*>("menuOperacoes");
     QVERIFY(operations);
-    QCOMPARE(actionTexts(operations), QStringList({"Extrusão...", "Editar operação..."}));
+    QCOMPARE(actionTexts(operations), QStringList({"Extrusão...", "|", "União...", "Subtração...", "Interseção...", "|", "Editar operação..."}));
     QVERIFY(!action("actionExtrusao")->isEnabled()); // nenhum esboço selecionado
     QVERIFY(action("actionNovo")->isEnabled());
     QVERIFY(action("actionAbrir")->isEnabled());
