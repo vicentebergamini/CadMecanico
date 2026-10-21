@@ -27,6 +27,7 @@
 #include <QLocale>
 #include <QMenu>
 #include <QMenuBar>
+#include <QAbstractButton>
 #include <QMessageBox>
 #include <QStandardPaths>
 #include <QStatusBar>
@@ -189,6 +190,21 @@ QString statusName(OperationStatus status)
     return status == OperationStatus::Valid ? MainWindow::tr("Válida") : MainWindow::tr("Inválida");
 }
 
+// Pergunta com os botões padrão rotulados em português (sem depender das traduções do Qt).
+QMessageBox::StandardButton askQuestion(QWidget* parent, const QString& title, const QString& text,
+                                        QMessageBox::StandardButtons buttons, QMessageBox::StandardButton defaultButton)
+{
+    QMessageBox box(QMessageBox::Question, title, text, buttons, parent);
+    box.setDefaultButton(defaultButton);
+    const std::pair<QMessageBox::StandardButton, const char*> labels[] = {
+        {QMessageBox::Yes, "Sim"},         {QMessageBox::No, "Não"},          {QMessageBox::Save, "Salvar"},
+        {QMessageBox::Discard, "Descartar"}, {QMessageBox::Cancel, "Cancelar"}};
+    for (const auto& [button, label] : labels)
+        if (QAbstractButton* b = box.button(button))
+            b->setText(MainWindow::tr(label));
+    return QMessageBox::StandardButton(box.exec());
+}
+
 } // namespace
 
 MainWindow::MainWindow(QWidget* parent)
@@ -344,6 +360,10 @@ void MainWindow::createActions()
         m_sketchTools->addAction(act);
         connect(act, &QAction::triggered, this, [this, tool, tip] {
             m_viewer->setSketchTool(tool);
+            // Ferramenta pronta: o próximo clique no visualizador já define o primeiro ponto e
+            // Esc cancela sem exigir um clique para dar foco.
+            if (m_viewer->isSketchMode())
+                m_viewer->setFocus(Qt::OtherFocusReason);
             statusBar()->showMessage(tip);
         });
         return act;
@@ -1017,8 +1037,24 @@ void MainWindow::showItemProperties(QTreeWidgetItem* item)
                        .arg(entityTypeName(entity->type()), QString::fromStdString(entity->id),
                             QString::fromStdString(sketch->name()).toHtmlEscaped(), id);
             for (const auto& d : cad::sketch::dimensionsOf(*entity))
-                html += tr("<br>%1%2: %3 mm")
-                            .arg(QString::fromStdString(d.label), d.editable ? QString() : tr(" (calculado)"), num(d.value));
+            {
+                // Unidade conforme o tipo: comprimento em mm, ângulo em graus, opção como texto.
+                QString value;
+                switch (d.kind)
+                {
+                case cad::sketch::DimensionKind::Angle: value = num(d.value) + tr("°"); break;
+                case cad::sketch::DimensionKind::Flag:  value = d.value != 0.0 ? tr("sim") : tr("não"); break;
+                case cad::sketch::DimensionKind::Choice:
+                {
+                    const size_t i = size_t(std::max(0.0, d.value));
+                    value = i < d.choices.size() ? QString::fromStdString(d.choices[i]) : num(d.value);
+                    break;
+                }
+                default: value = num(d.value) + tr(" mm"); break;
+                }
+                html += tr("<br>%1%2: %3")
+                            .arg(QString::fromStdString(d.label), d.editable ? QString() : tr(" (calculado)"), value);
+            }
         }
         else
         {
@@ -2422,9 +2458,9 @@ QString MainWindow::askExportPath(const QString& suggestedPath)
 
 bool MainWindow::confirmOverwrite(const QString& filePath)
 {
-    return QMessageBox::question(this, tr("Substituir arquivo"),
-                                 tr("O arquivo já existe:\n%1\n\nDeseja substituí-lo?").arg(filePath),
-                                 QMessageBox::Yes | QMessageBox::No, QMessageBox::No)
+    return askQuestion(this, tr("Substituir arquivo"),
+                       tr("O arquivo já existe:\n%1\n\nDeseja substituí-lo?").arg(filePath),
+                       QMessageBox::Yes | QMessageBox::No, QMessageBox::No)
            == QMessageBox::Yes;
 }
 
@@ -2588,9 +2624,9 @@ std::optional<cad::sketch::SketchChamfer> MainWindow::askChamfer2D(const cad::sk
 
 bool MainWindow::askConvertToNewBody(const QString& message)
 {
-    return QMessageBox::question(this, tr("Extrusão de Saliência"),
-                                 tr("%1\n\nDeseja criar o volume como novo corpo independente?").arg(message),
-                                 QMessageBox::Yes | QMessageBox::No, QMessageBox::No)
+    return askQuestion(this, tr("Extrusão de Saliência"),
+                       tr("%1\n\nDeseja criar o volume como novo corpo independente?").arg(message),
+                       QMessageBox::Yes | QMessageBox::No, QMessageBox::No)
            == QMessageBox::Yes;
 }
 
@@ -2616,7 +2652,7 @@ std::optional<SketchGeometry> MainWindow::askEntityDimensions(const SketchEntity
 
 MainWindow::SaveChoice MainWindow::askSaveChanges()
 {
-    const auto answer = QMessageBox::question(
+    const auto answer = askQuestion(
         this, tr("Alterações não salvas"),
         tr("O documento \"%1\" tem alterações não salvas.\n\nDeseja salvá-las?")
             .arg(QString::fromStdString(m_document.name())),

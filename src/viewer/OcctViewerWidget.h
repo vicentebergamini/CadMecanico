@@ -138,6 +138,9 @@ public:
     std::optional<gp_Pnt2d> sketchPointAt(const QPointF& logicalPos) const;
     // Objeto exibido de uma entidade em edição (para testes e diagnóstico).
     occ::handle<AIS_Shape> sketchEntityPresentation(const QString& entityId) const;
+    // Entrada em andamento (E5.6.1): primeiro ponto já definido e pré-visualização dinâmica.
+    bool hasPendingSketchPoint() const { return m_pendingPoint.has_value(); }
+    const occ::handle<AIS_Shape>& sketchPreviewPresentation() const { return m_preview; }
 
 public slots:
     void fitAll();
@@ -229,6 +232,7 @@ private:
     bool m_arcClockwise = false;
     QPointF m_leftPressPos;
     bool m_leftPressed = false;
+    bool m_leftDragging = false; // arrasto do botão esquerdo iniciado (desenho por arrasto)
     bool m_edgesOnly = false;
     // Ativa no objeto da peça os modos de seleção correspondentes ao modo atual.
     void activateSelectionModes();

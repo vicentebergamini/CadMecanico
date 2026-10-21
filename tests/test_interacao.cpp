@@ -15,7 +15,7 @@
 #include <QWheelEvent>
 
 #include <AIS_ViewCube.hxx>
-#include <TColStd_ListOfInteger.hxx>
+#include <NCollection_List.hxx>
 #include <StdSelect_BRepOwner.hxx>
 #include <Graphic3d_Camera.hxx>
 #include <TopoDS.hxx>
@@ -264,7 +264,7 @@ void TestInteracao::deteccaoDaPeca()
 {
     // Regressão: a peça precisa estar carregada no seletor (faces, arestas e vértices ativos).
     const auto& ctx = m_w->aisContext();
-    TColStd_ListOfInteger modes;
+    NCollection_List<int> modes; // TColStd_ListOfInteger está obsoleto no OCCT 8
     ctx->ActivatedModes(m_w->shapePresentation(), modes);
     QCOMPARE(modes.Size(), 3);
     const QPoint p = project(m_w, gp_Pnt(25.0, 15.0, 20.0));

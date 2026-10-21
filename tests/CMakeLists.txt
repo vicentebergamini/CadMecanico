@@ -116,6 +116,10 @@ qt_add_executable(test_e56_ui test_e56_ui.cpp ViewerTestUtils.h StlTestUtils.h)
 set_target_properties(test_e56_ui PROPERTIES AUTOMOC ON WIN32_EXECUTABLE OFF)
 target_link_libraries(test_e56_ui PRIVATE cad_app cad_viewer cad_document_io cad_io cad_modeling Qt6::Test)
 
+qt_add_executable(test_e561_ui test_e561_ui.cpp ViewerTestUtils.h)
+set_target_properties(test_e561_ui PROPERTIES AUTOMOC ON WIN32_EXECUTABLE OFF)
+target_link_libraries(test_e561_ui PRIVATE cad_app cad_viewer cad_document_io cad_io cad_modeling Qt6::Test)
+
 add_test(NAME viewer COMMAND test_viewer)
 add_test(NAME viewer_escala COMMAND test_viewer)
 add_test(NAME app_viewer COMMAND test_app_viewer)
@@ -128,15 +132,17 @@ add_test(NAME extrusao_ui COMMAND test_extrusao_ui)
 add_test(NAME booleanas_ui COMMAND test_booleanas_ui)
 add_test(NAME e55_ui COMMAND test_e55_ui)
 add_test(NAME e56_ui COMMAND test_e56_ui)
+add_test(NAME e561_ui COMMAND test_e561_ui)
+add_test(NAME e561_ui_escala COMMAND test_e561_ui)
 
 set(_cad_gl_env "QT_QPA_PLATFORM=windows;QT_PLUGIN_PATH=${QT6_INSTALL_PREFIX}/${QT6_INSTALL_PLUGINS}")
-set_tests_properties(viewer app_viewer interacao esboco_ui documento_vazio extrusao_ui booleanas_ui e55_ui e56_ui PROPERTIES
+set_tests_properties(viewer app_viewer interacao esboco_ui documento_vazio extrusao_ui booleanas_ui e55_ui e56_ui e561_ui PROPERTIES
     LABELS "gui;opengl"
     TIMEOUT 300
     ENVIRONMENT "${_cad_gl_env}"
     ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${QT6_INSTALL_PREFIX}/${QT6_INSTALL_BINS}"
 )
-set_tests_properties(viewer_escala interacao_escala esboco_ui_escala PROPERTIES
+set_tests_properties(viewer_escala interacao_escala esboco_ui_escala e561_ui_escala PROPERTIES
     LABELS "gui;opengl"
     TIMEOUT 300
     ENVIRONMENT "${_cad_gl_env};QT_SCALE_FACTOR=1.25"

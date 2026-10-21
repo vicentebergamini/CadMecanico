@@ -9,6 +9,7 @@
 
 #include "viewer/OcctViewerWidget.h"
 
+#include <QApplication>
 #include <QKeyEvent>
 #include <QMouseEvent>
 #include <QOpenGLContext>
@@ -83,8 +84,21 @@ constexpr double kOriginAxesSize = 70.0;
 // Região enquadrada quando a cena não tem sólido nem esboço (mm, a partir da origem).
 constexpr double kEmptySceneExtent = 100.0;
 
-// Clique (sem arrasto) no modo de esboço: deslocamento máximo em pixels lógicos.
+// Clique (sem arrasto): deslocamento máximo tolerado entre pressionar e soltar, em pixels
+// lógicos; o limiar efetivo é o maior entre este valor e o startDragDistance do sistema.
 constexpr double kClickTolerance = 4.0;
+
+double sketchClickTolerance()
+{
+    return std::max(kClickTolerance, double(QApplication::startDragDistance()));
+}
+
+bool isDrawingTool(cad::viewer::SketchTool tool)
+{
+    return tool == cad::viewer::SketchTool::Line || tool == cad::viewer::SketchTool::Rectangle
+           || tool == cad::viewer::SketchTool::Circle || tool == cad::viewer::SketchTool::Arc;
+}
+
 // Coordenadas criadas com o mouse são arredondadas a 0,1 mm (1/kSnapDivisions).
 constexpr double kSnapDivisions = 10.0;
 
@@ -334,7 +348,9 @@ void OcctViewerWidget::setupNavigation()
     myMouseGestureMapDrag.Clear();
     SetAllowDragging(false);
 
-    // Seleção só por clique (sem movimento além do limiar): navegar não seleciona.
+    // Seleção só por clique (sem movimento além do limiar): navegar não seleciona. Limiar igual ao
+    // do esboço (E5.6.1): um clique com pequeno tremido do mouse físico ainda seleciona.
+    myMouseClickThreshold = sketchClickTolerance() * devicePixelRatioF();
     myMouseSelectionSchemes.Clear();
     myMouseSelectionSchemes.Bind(Aspect_VKeyMouse_LeftButton, AIS_SelectionScheme_Replace);
     myMouseSelectionSchemes.Bind(Aspect_VKeyMouse_LeftButton | Aspect_VKeyFlags_SHIFT, AIS_SelectionScheme_XOR);
@@ -345,6 +361,7 @@ void OcctViewerWidget::applyDevicePixelRatio(qreal dpr)
     if (qFuzzyCompare(dpr, m_appliedDpr))
         return;
     m_appliedDpr = dpr;
+    myMouseClickThreshold = sketchClickTolerance() * dpr; // limiar de clique em pixels físicos
 
     // Textos e linhas do OCCT acompanham a escala da tela (ex.: 125%).
     m_view->ChangeRenderingParams().Resolution = static_cast<unsigned int>(96.0 * dpr + 0.5);
@@ -778,9 +795,12 @@ void OcctViewerWidget::mousePressEvent(QMouseEvent* event)
         return;
     if (isSketchMode() && event->button() == Qt::LeftButton)
     {
-        // Botão esquerdo no esboço: tratado pela ferramenta ativa, não pela seleção 3D.
+        // Botão esquerdo no esboço: tratado pela ferramenta ativa, não pela seleção 3D. O ponto
+        // só é registrado ao soltar (clique) ou ao iniciar um arrasto (ver mouseMoveEvent).
         m_leftPressed = true;
+        m_leftDragging = false;
         m_leftPressPos = event->position();
+        setFocus(Qt::MouseFocusReason); // Esc funciona sem clique adicional
         event->accept();
         return;
     }
@@ -798,10 +818,17 @@ void OcctViewerWidget::mouseReleaseEvent(QMouseEvent* event)
     if (isSketchMode() && event->button() == Qt::LeftButton)
     {
         const bool wasPressed = m_leftPressed;
+        const bool dragged = m_leftDragging;
         m_leftPressed = false;
+        m_leftDragging = false;
         const QPointF delta = event->position() - m_leftPressPos;
-        if (wasPressed && std::hypot(delta.x(), delta.y()) <= kClickTolerance)
-            handleSketchClick(event->position());
+        if (wasPressed)
+        {
+            if (!dragged && std::hypot(delta.x(), delta.y()) <= sketchClickTolerance())
+                handleSketchClick(m_leftPressPos); // clique: vale o ponto em que o botão foi pressionado
+            else if (isDrawingTool(m_sketchTool))
+                handleSketchClick(event->position()); // fim do arrasto define o ponto seguinte
+        }
         event->accept();
         return;
     }
@@ -820,6 +847,18 @@ void OcctViewerWidget::mouseMoveEvent(QMouseEvent* event)
     if (isSketchMode())
     {
         buttons &= ~Qt::LeftButton; // o esquerdo não participa da navegação no esboço
+        // Arrasto com o botão esquerdo a partir do primeiro ponto: o pressionamento define o
+        // ponto inicial e a soltura o seguinte (alternativa aos dois cliques independentes).
+        if (m_leftPressed && !m_leftDragging && isDrawingTool(m_sketchTool))
+        {
+            const QPointF delta = event->position() - m_leftPressPos;
+            if (std::hypot(delta.x(), delta.y()) > sketchClickTolerance())
+            {
+                m_leftDragging = true;
+                if (!m_pendingPoint)
+                    handleSketchClick(m_leftPressPos);
+            }
+        }
         if (m_pendingPoint)
             if (const auto p = sketchPointAt(event->position()))
                 updatePreview(*p);
@@ -864,6 +903,8 @@ void OcctViewerWidget::focusOutEvent(QFocusEvent* event)
 {
     // Evita botões "presos" se o foco sair durante um arrasto.
     ResetViewInput();
+    m_leftPressed = false;
+    m_leftDragging = false;
     QOpenGLWidget::focusOutEvent(event);
 }
 
@@ -1037,6 +1078,7 @@ void OcctViewerWidget::exitSketchMode()
     m_pendingPoint.reset();
     m_arcStart.reset();
     m_leftPressed = false;
+    m_leftDragging = false;
     m_sketchTool = SketchTool::Select;
 
     // Restaura a visualização do documento.

@@ -379,10 +379,16 @@ void TestEsbocoUi::navegacaoNoModoEsboco()
     QTest::keyClick(viewer(), Qt::Key_F);
     QVERIFY(waitFrames(viewer()));
     QVERIFY(cam->Direction().IsEqual(dir, 1e-9));
-    // Arrasto com o botão esquerdo não cria nem seleciona.
+    // Arrasto com o botão esquerdo não seleciona; com uma ferramenta de desenho, desenha do
+    // ponto pressionado ao ponto solto (E5.6.1, alternativa aos dois cliques) sem mover a câmera.
+    tool("actionFerramentaSelecionar");
+    QVERIFY(drag(viewer(), c, c + QPointF(60, 0), Qt::LeftButton));
+    QVERIFY(m_window->selectedSketchEntity().isEmpty());
+    QVERIFY(m_window->editingSketch()->entities().empty());
     tool("actionFerramentaLinha");
     QVERIFY(drag(viewer(), c, c + QPointF(60, 0), Qt::LeftButton));
-    QVERIFY(m_window->editingSketch()->entities().empty());
+    QCOMPARE(m_window->editingSketch()->entities().size(), size_t(1));
+    QVERIFY(cam->Direction().IsEqual(dir, 1e-9));
 }
 
 void TestEsbocoUi::edicaoDeDimensoesPelaInterface()
