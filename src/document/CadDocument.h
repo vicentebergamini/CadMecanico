@@ -113,6 +113,8 @@ struct Operation
     ExtrudeMode extrudeMode = ExtrudeMode::NewBody;
     std::string targetId;
     EndCondition endCondition = EndCondition::Blind;
+    // Corte: remover o lado de fora do perfil (E5.7, ver ExtrudeParameters::cutOutside).
+    bool cutOutside = false;
 
     // Booleana: tipo e corpos operandos (ids de operações anteriores). Na subtração A é o corpo
     // principal e B a ferramenta de corte.
@@ -133,6 +135,8 @@ struct Operation
     TopoDS_Shape result;
     // Operação posterior que consome este corpo (calculado; vazio = corpo ativo).
     std::string consumedBy;
+    // Operação inválida da qual esta depende (calculado; vazio = a falha, se houver, é própria).
+    std::string blockedBy;
 
     // Valor do parâmetro 'key' (0 se ausente).
     double parameter(const std::string& key) const;
@@ -148,6 +152,11 @@ struct ExtrudeParameters
     ExtrudeMode mode = ExtrudeMode::NewBody;
     std::string targetId; // corpo de destino (saliência e corte)
     EndCondition endCondition = EndCondition::Blind;
+    // Somente corte (E5.7, "Cortar o lado de fora"): remove do corpo de destino o material FORA
+    // do perfil dentro da extensão da extrusão (mesmo sentido e condição final); o material
+    // dentro do perfil e o material além da extensão são preservados. Ferramenta = laje do plano
+    // do esboço cobrindo o corpo, varrida pela extensão, menos o prisma do perfil.
+    bool cutOutside = false;
 };
 
 // Parâmetros de uma operação booleana.
@@ -178,6 +187,13 @@ struct ValidationResult
     bool ok = true;
     std::string field;   // parâmetro que causou a falha (ex.: "holeRadius", "depth")
     std::string message; // mensagem para o usuário
+};
+
+// Esboço sobre face cuja face de suporte não pôde ser recuperada (documento aberto com erros).
+struct SketchIssue
+{
+    std::string sketchId;
+    std::string message;
 };
 
 class CadDocument
@@ -222,8 +238,11 @@ public:
         int nextOperationNumber = 0; // 0 = calcular a partir dos ids
     };
     // Constrói e recalcula a partir de dados persistidos. Em falha retorna false e não altera
-    // 'out'. Os identificadores são preservados.
-    static bool fromData(const Data& data, CadDocument& out, std::string& error);
+    // 'out'. Os identificadores são preservados. Com 'allowInvalid' (E5.7, abertura com erros),
+    // falhas de reconstrução não impedem a abertura: as operações ficam marcadas como inválidas,
+    // com mensagem, e nada é descartado nem alterado; dados estruturalmente inválidos continuam
+    // recusados.
+    static bool fromData(const Data& data, CadDocument& out, std::string& error, bool allowInvalid = false);
     // Compatibilidade (E5.1/E5.2): peça opcional e esboços, sem extrusões.
     static bool fromData(const std::string& name, const std::optional<PartParameters>& part,
                          const std::string& blockId, const std::string& holeId, CadDocument& out,
@@ -314,8 +333,16 @@ public:
     std::vector<gp_Dir> referenceNormals(const std::string& bodyId, const std::vector<TopoDS_Edge>& edges,
                                          bool flip) const;
 
-    // Geometria resultante do último recálculo válido (nula em documento sem sólidos).
+    // Geometria resultante do último recálculo válido (nula em documento sem sólidos). Em
+    // documento com operações inválidas: os corpos válidos no estado anterior à primeira falha
+    // de cada cadeia.
     const TopoDS_Shape& shape() const { return m_shape; }
+
+    // --- Diagnóstico (E5.7) -----------------------------------------------------------
+    // true se alguma operação está inválida (documento aberto com erros ou ainda não corrigido).
+    bool hasInvalidOperations() const;
+    // Esboços sobre face sem face de suporte recuperável (somente em documento com erros).
+    const std::vector<SketchIssue>& sketchIssues() const { return m_sketchIssues; }
 
     bool isModified() const { return m_modified; }
     void setModified(bool modified) { m_modified = modified; }
@@ -342,6 +369,7 @@ private:
     static std::vector<Operation> makeOperations(const PartParameters& p, const std::string& blockId,
                                                  const std::string& holeId);
     static Operation makeExtrusion(const std::string& id, const ExtrudeParameters& parameters);
+    static ExtrudeParameters extrudeParametersOf(const Operation& op);
     static Operation makeBoolean(const std::string& id, const BooleanParameters& parameters);
     static Operation makeFinish(const std::string& id, OperationType type, const FinishParameters& parameters);
     static ValidationResult validateChamferMode(OperationType type, const FinishParameters& parameters);
@@ -361,8 +389,17 @@ private:
     // Recalcula a sequência de operações (em ordem) com os esboços dados; preenche o estado e o
     // resultado de cada operação e o resultado combinado.
     // Os planos dos esboços sobre faces são atualizados em 'sketches' (cópia de trabalho).
+    // Uma falha não interrompe o cálculo das operações independentes; as dependentes ficam
+    // inválidas com 'blockedBy'. Retorna false se houver alguma falha ('error' = a primeira);
+    // 'shape' recebe sempre os corpos válidos (estado anterior à falha de cada cadeia). Com
+    // 'issues', esboços não usados cuja face de suporte se perdeu são registrados em vez
+    // de causar falha.
     static bool rebuild(std::vector<Operation>& operations, std::vector<cad::sketch::Sketch>& sketches,
-                        TopoDS_Shape& shape, std::string& error);
+                        TopoDS_Shape& shape, std::string& error, std::vector<SketchIssue>* issues = nullptr);
+    // Recalcula e decide se o novo estado pode ser aplicado: válido, ou — em documento que já
+    // tem operações inválidas — sem novas operações inválidas (permite corrigir uma de cada vez).
+    bool rebuildForCommit(std::vector<Operation>& operations, std::vector<cad::sketch::Sketch>& sketches,
+                          TopoDS_Shape& shape, std::string& error, std::vector<SketchIssue>& issues) const;
     // Aplica um novo estado (já recalculado) e marca o documento como modificado.
     void commit(std::vector<Operation> operations, TopoDS_Shape shape);
     void commit(std::vector<Operation> operations, std::vector<cad::sketch::Sketch> sketches, TopoDS_Shape shape);
@@ -373,6 +410,7 @@ private:
     bool m_modified = false;
     int m_revision = 0;
     std::vector<cad::sketch::Sketch> m_sketches;
+    std::vector<SketchIssue> m_sketchIssues;
     int m_nextSketchNumber = 1;
     int m_nextOperationNumber = 1;
 };

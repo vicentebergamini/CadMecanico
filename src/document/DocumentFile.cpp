@@ -609,6 +609,8 @@ QByteArray DocumentFile::toJson(const CadDocument& document)
             if (op.extrudeMode != ExtrudeMode::NewBody)
                 o.insert("targetId", QString::fromStdString(op.targetId));
             o.insert("endCondition", QString::fromLatin1(op.endCondition == EndCondition::ThroughAll ? "throughAll" : "blind"));
+            if (op.extrudeMode == ExtrudeMode::Cut)
+                o.insert("cutOutside", op.cutOutside);
         }
         operations.append(o);
     }
@@ -630,7 +632,7 @@ QByteArray DocumentFile::toJson(const CadDocument& document)
     return QJsonDocument(root).toJson(QJsonDocument::Indented);
 }
 
-FileResult DocumentFile::fromJson(const QByteArray& json, CadDocument& out)
+FileResult DocumentFile::fromJson(const QByteArray& json, CadDocument& out, bool allowInvalidOperations)
 {
     QJsonParseError parseError;
     const QJsonDocument jd = QJsonDocument::fromJson(json, &parseError);
@@ -755,6 +757,8 @@ FileResult DocumentFile::fromJson(const QByteArray& json, CadDocument& out)
             else if (!isFinish)
                 allowed << "mode" << "targetId" << "endCondition";
         }
+        if (schema >= 8 && !isBoolean && !isFinish)
+            allowed << "cutOutside"; // esquema 8: corte do lado de fora do perfil
         for (auto it = op.begin(); it != op.end(); ++it)
             if (!allowed.contains(it.key()))
                 return error(QStringLiteral("Operação %1: campo desconhecido \"%2\"").arg(i + 1).arg(it.key()));
@@ -883,6 +887,14 @@ FileResult DocumentFile::fromJson(const QByteArray& json, CadDocument& out)
                 return error(QStringLiteral("Operação %1: corpo de destino ausente ou inválido").arg(i + 1));
             e.targetId = op.value("targetId").toString().toStdString();
         }
+        if (op.contains("cutOutside"))
+        {
+            if (!op.value("cutOutside").isBool())
+                return error(QStringLiteral("Operação %1: campo \"cutOutside\" inválido (true ou false)").arg(i + 1));
+            if (e.extrudeMode != ExtrudeMode::Cut)
+                return error(QStringLiteral("Operação %1: \"cutOutside\" só se aplica ao corte").arg(i + 1));
+            e.cutOutside = op.value("cutOutside").toBool();
+        }
         e.id = id.toString().toStdString();
         e.type = OperationType::Extrude;
         e.name = op.value("name").toString().toStdString();
@@ -929,8 +941,15 @@ FileResult DocumentFile::fromJson(const QByteArray& json, CadDocument& out)
 
     // Limites geométricos e reconstrução (fromData só altera 'out' em caso de sucesso).
     std::string buildError;
-    if (!CadDocument::fromData(data, out, buildError))
+    if (!CadDocument::fromData(data, out, buildError, allowInvalidOperations))
         return error(QStringLiteral("Dados inválidos: %1").arg(QString::fromStdString(buildError)));
+    int invalid = 0;
+    for (const Operation& op : out.operations())
+        invalid += op.status == cad::document::OperationStatus::Invalid ? 1 : 0;
+    if (invalid > 0 || !out.sketchIssues().empty())
+        return FileResult{true, QStringLiteral("Documento aberto com %1 operação(ões) inválida(s) e %2 esboço(s) sem suporte; veja o painel Diagnóstico.")
+                                    .arg(invalid)
+                                    .arg(out.sketchIssues().size())};
     return FileResult{true, QString()};
 }
 
@@ -954,7 +973,7 @@ FileResult DocumentFile::save(const CadDocument& document, const QString& path)
     return FileResult{true, QString()};
 }
 
-FileResult DocumentFile::load(const QString& path, CadDocument& out)
+FileResult DocumentFile::load(const QString& path, CadDocument& out, bool allowInvalidOperations)
 {
     QFile file(path);
     if (!file.exists())
@@ -963,7 +982,7 @@ FileResult DocumentFile::load(const QString& path, CadDocument& out)
         return error(QStringLiteral("Arquivo grande demais para um documento CadMecanico"));
     if (!file.open(QIODevice::ReadOnly))
         return error(QStringLiteral("Não foi possível abrir o arquivo: %1").arg(file.errorString()));
-    return fromJson(file.readAll(), out);
+    return fromJson(file.readAll(), out, allowInvalidOperations);
 }
 
 } // namespace cad::document

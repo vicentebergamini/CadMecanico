@@ -1234,7 +1234,7 @@ void TestArquivoCadmec::salvarEAbrirE56()
     const QString path = m_dir->filePath("e56.cadmec");
     QVERIFY(DocumentFile::save(original, path).ok);
     const QJsonObject root = QJsonDocument::fromJson(readFile(path)).object();
-    QCOMPARE(root["schemaVersion"].toInt(), 7);
+    QCOMPARE(root["schemaVersion"].toInt(), DocumentFile::kSchemaVersion);
     QCOMPARE(sketchObject(const_cast<QJsonObject&>(root), 1)["plane"].toString(), QStringLiteral("face"));
     const QJsonObject support = sketchObject(const_cast<QJsonObject&>(root), 1)["support"].toObject();
     QCOMPARE(support["bodyId"].toString(), QStringLiteral("op-1"));

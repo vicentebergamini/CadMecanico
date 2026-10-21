@@ -55,5 +55,8 @@ FaceMatch resolvePlanarFace(const TopoDS_Shape& body, const FaceSignature& signa
 
 // true se 'face' é uma face de 'shape'.
 bool containsFace(const TopoDS_Shape& shape, const TopoDS_Shape& face);
+// A mesma face (IsSame) como ela aparece em 'shape', com a orientação do sólido (a face vinda da
+// seleção do visualizador pode ter outra orientação). Nula se não pertencer a 'shape'.
+TopoDS_Face faceInShape(const TopoDS_Shape& shape, const TopoDS_Shape& face);
 
 } // namespace cad::modeling

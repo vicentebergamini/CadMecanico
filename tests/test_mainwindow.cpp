@@ -165,15 +165,18 @@ void TestMainWindow::menus()
     QCOMPARE(actionTexts(exportMenu), QStringList({"STEP (*.step)...", "STL (*.stl)..."}));
     auto* operations = m_window->findChild<QMenu*>("menuOperacoes");
     QVERIFY(operations);
-    QCOMPARE(actionTexts(operations), QStringList({"Extrusão de Novo Corpo...", "Extrusão de Saliência...", "Extrusão de Corte...", "|", "União...", "Subtração...", "Interseção...", "|",
+    QCOMPARE(actionTexts(operations), QStringList({"Extrusão...", "Extrusão de Novo Corpo...", "Extrusão de Saliência...", "Extrusão de Corte...", "|", "União...", "Subtração...", "Interseção...", "|",
                                                     "Fillet 3D...", "Chamfer 3D...", "|", "Editar operação..."}));
     auto* sketchMenu = m_window->findChild<QMenu*>("menuEsboco");
     QVERIFY(sketchMenu);
     QCOMPARE(actionTexts(sketchMenu), QStringList({"Novo esboço...", "Criar Esboço na Face", "Editar esboço", "|", "Selecionar", "Linha",
                                                    "Retângulo", "Círculo", "Arco circular", "Sentido horário do arco",
                                                    "Fillet 2D", "Chamfer 2D", "|", "Dimensões...", "Excluir entidade", "|",
-                                                   "Concluir esboço", "Cancelar esboço"}));
+                                                   "Concluir esboço", "Cancelar esboço", "|",
+                                                   "Abrir extrusão ao concluir esboço na face"}));
     QVERIFY(!action("actionExtrusao")->isEnabled()); // nenhum esboço selecionado
+    QVERIFY(!action("actionExtrusaoUnificada")->isEnabled());
+    QVERIFY(action("actionExtrusaoAoConcluir")->isChecked());
     QVERIFY(action("actionNovo")->isEnabled());
     QVERIFY(action("actionAbrir")->isEnabled());
     QVERIFY(action("actionSalvar")->isEnabled());
@@ -191,6 +194,7 @@ void TestMainWindow::menus()
     auto* view = m_window->findChild<QMenu*>("menuVisualizar");
     QVERIFY(view);
     QCOMPARE(actionTexts(view).mid(0, 2), QStringList({"Ajustar à janela", "Vistas padrão"}));
+    QVERIFY(actionTexts(view).contains(QStringLiteral("Diagnóstico"))); // painel da E5.7
     QVERIFY(action("actionAjustarJanela")->isEnabled());
     auto* views = m_window->findChild<QMenu*>("menuVistasPadrao");
     QVERIFY(views);

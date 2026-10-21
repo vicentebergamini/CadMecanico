@@ -79,8 +79,13 @@
 // Documentos antigos são lidos sem alteração: extrusões = novo corpo / profundidade definida;
 // chanfros = distâncias iguais.
 //
-// Arquivos das versões 1 a 6 continuam sendo lidos sem alteração; a gravação usa sempre a
-// versão atual.
+// Esquema versão 8 (E5.7): extrusão de corte com "cutOutside": true | false (remove o material
+// fora do perfil dentro da extensão do corte; ver ExtrudeParameters::cutOutside). Gravado em todo
+// corte; ausente = false.
+//
+// Arquivos das versões 1 a 7 continuam sendo lidos sem alteração; a gravação usa sempre a
+// versão atual. Documento cujas operações falham na reconstrução pode ser aberto com as operações
+// marcadas como inválidas (painel Diagnóstico) — ver fromJson.
 #pragma once
 
 #include "document/CadDocument.h"
@@ -99,7 +104,7 @@ struct FileResult
 class DocumentFile
 {
 public:
-    static constexpr int kSchemaVersion = 7;
+    static constexpr int kSchemaVersion = 8;
     static constexpr qint64 kMaxFileSize = 4 * 1024 * 1024;
     static constexpr const char* kFormat = "cadmec";
     static constexpr const char* kExtension = "cadmec";
@@ -107,14 +112,16 @@ public:
     static QByteArray toJson(const CadDocument& document);
 
     // Valida estrutura, tipos e limites e reconstrói a geometria. Em caso de falha 'out' não é
-    // alterado.
-    static FileResult fromJson(const QByteArray& json, CadDocument& out);
+    // alterado. Com 'allowInvalidOperations' (E5.7) um arquivo estruturalmente válido cujas
+    // operações falham na reconstrução é aberto com as operações marcadas como inválidas (nada é
+    // descartado nem alterado); a mensagem de 'FileResult' informa quantas estão inválidas.
+    static FileResult fromJson(const QByteArray& json, CadDocument& out, bool allowInvalidOperations = false);
 
     // Grava em arquivo temporário e substitui o destino só ao final (QSaveFile).
     static FileResult save(const CadDocument& document, const QString& path);
 
     // Lê e valida; em caso de falha 'out' (o documento ativo) não é alterado.
-    static FileResult load(const QString& path, CadDocument& out);
+    static FileResult load(const QString& path, CadDocument& out, bool allowInvalidOperations = false);
 };
 
 } // namespace cad::document

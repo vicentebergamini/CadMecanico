@@ -2,6 +2,7 @@
 #pragma once
 
 #include "document/CadDocument.h"
+#include "document/Diagnostics.h"
 #include "io/StlExporter.h"
 
 #include <QMainWindow>
@@ -91,6 +92,10 @@ public:
     bool startSketchOnFace(const TopoDS_Shape& face);
     bool editSketch(const QString& sketchId);
     bool finishSketch();
+    // "Concluir esboço" da interface (E5.7, P1): conclui e, para um esboço novo criado sobre uma
+    // face pelo fluxo rápido com perfil fechado, abre o diálogo de extrusão (nada é extrudado sem
+    // a confirmação dos parâmetros). A opção "actionExtrusaoAoConcluir" desativa a abertura.
+    bool finishSketchCommand();
     void cancelSketch();
     // Acrescenta uma entidade ao esboço em edição (criação pelo mouse ou programática).
     bool addSketchGeometry(const cad::sketch::SketchGeometry& geometry);
@@ -127,6 +132,12 @@ public:
                    double value);
     // Diálogo não modal aberto pelo comando Fillet 3D / Chamfer 3D (nulo fora do comando).
     FinishDialog* finishDialog() const;
+
+    // --- Diagnóstico (E5.7, P2) -----------------------------------------------------
+    // Erros e avisos do documento (operações inválidas, esboços sem suporte ou sem perfil) e as
+    // alterações recusadas desde a última alteração aplicada.
+    std::vector<cad::document::Diagnostic> diagnostics() const;
+    QTreeWidget* diagnosticsList() const { return m_diagnostics; }
 
 public slots:
     void exportStep();
@@ -209,6 +220,15 @@ private:
     std::vector<cad::sketch::Sketch> displayedSketches(bool includeEditing) const;
     // Face plana selecionada no visualizador (nula se a seleção não for uma única face).
     TopoDS_Shape selectedFace() const;
+    // Fluxo rápido (P1): face plana selecionada fora do esboço.
+    bool planarFaceSelected() const;
+    // Tipo padrão da extrusão do esboço selecionado: saliência para esboço sobre face com corpo
+    // disponível; novo corpo nos demais casos.
+    cad::document::ExtrudeMode defaultExtrudeMode() const;
+    // Diagnóstico: atualiza o painel; registra uma alteração recusada (o documento foi mantido).
+    void refreshDiagnostics();
+    void recordRejected(const std::string& itemId, const std::string& itemName, cad::document::OperationType type,
+                        const std::string& message);
     // Corpos disponíveis para saliência/corte (ativos; na edição, também o consumido pela operação).
     std::vector<std::pair<std::string, QString>> extrusionTargets(const std::string& editingId) const;
     // Acabamentos 3D: sessão de seleção de arestas.
@@ -233,6 +253,8 @@ private:
     QAction* m_actSaveAs = nullptr;
     QAction* m_actExportStep = nullptr;
     QAction* m_actExportStl = nullptr;
+    QAction* m_actExtrudeUnified = nullptr;
+    QAction* m_actAutoExtrude = nullptr;
     QAction* m_actExtrude = nullptr;
     QAction* m_actExtrudeBoss = nullptr;
     QAction* m_actExtrudeCut = nullptr;
@@ -272,6 +294,8 @@ private:
 
     std::optional<cad::sketch::Sketch> m_editSketch;
     bool m_editSketchIsNew = false;
+    bool m_editSketchOnFace = false; // esboço novo sobre face (fluxo rápido P1)
+    std::vector<cad::document::Diagnostic> m_rejected; // alterações recusadas (sessão)
     QString m_selectedEntity;
     bool m_updatingTree = false;
     QString m_extrusionEditId; // extrusão em edição no diálogo
@@ -287,6 +311,11 @@ private:
     QTreeWidget* m_operationsTree = nullptr;
     QDockWidget* m_dockProperties = nullptr;
     QLabel* m_properties = nullptr;
+    QDockWidget* m_dockDiagnostics = nullptr;
+    QTreeWidget* m_diagnostics = nullptr;
+    QLabel* m_diagnosticsSummary = nullptr;
+    QLabel* m_diagnosticsDetail = nullptr;
+    int m_lastDiagnosticErrors = 0;
     cad::viewer::OcctViewerWidget* m_viewer = nullptr;
 };
 

@@ -1,6 +1,7 @@
 # Núcleo do documento paramétrico (sem Qt).
 add_library(cad_document STATIC
     CadDocument.h CadDocument.cpp
+    Diagnostics.h Diagnostics.cpp
 )
 target_include_directories(cad_document PUBLIC ${PROJECT_SOURCE_DIR}/src)
 target_link_libraries(cad_document PUBLIC cad_modeling cad_sketch)

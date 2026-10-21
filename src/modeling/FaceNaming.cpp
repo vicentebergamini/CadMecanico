@@ -33,8 +33,12 @@ std::optional<gp_Pln> planarFacePlane(const TopoDS_Face& face)
         if (surface.GetType() != GeomAbs_Plane)
             return std::nullopt;
         gp_Pln plane = surface.Plane();
-        // A normal geométrica do plano segue a superfície; a face invertida aponta para o outro lado.
-        if (face.Orientation() == TopAbs_REVERSED)
+        // Normal da superfície = X × Y do sistema do plano: igual ao eixo principal num sistema
+        // direto e oposta num sistema indireto (planos criados por chanfros/arredondamentos podem
+        // ser indiretos). A face invertida aponta para o outro lado. O plano devolvido tem o eixo
+        // principal na normal externa da face.
+        const bool flip = (face.Orientation() == TopAbs_REVERSED) != !plane.Position().Direct();
+        if (flip)
         {
             gp_Ax3 a = plane.Position();
             a.ZReverse();
@@ -61,6 +65,16 @@ FaceSignature describeFace(const TopoDS_Face& face)
     s.centroid = props.CentreOfMass();
     s.offset = gp_Vec(s.normal).Dot(gp_Vec(s.centroid.XYZ()));
     return s;
+}
+
+TopoDS_Face faceInShape(const TopoDS_Shape& shape, const TopoDS_Shape& face)
+{
+    if (shape.IsNull() || face.IsNull() || face.ShapeType() != TopAbs_FACE)
+        return TopoDS_Face();
+    for (TopExp_Explorer ex(shape, TopAbs_FACE); ex.More(); ex.Next())
+        if (ex.Current().IsSame(face))
+            return TopoDS::Face(ex.Current());
+    return TopoDS_Face();
 }
 
 bool containsFace(const TopoDS_Shape& shape, const TopoDS_Shape& face)

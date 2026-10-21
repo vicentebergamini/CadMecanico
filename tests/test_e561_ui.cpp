@@ -375,7 +375,7 @@ void TestE561Ui::esbocoSobreFaceEExtrusao()
     QVERIFY(physicalClick(at(0, 0), QPointF(2, 2)));
     QVERIFY(physicalClick(at(100, 60), QPointF(-3, 1)));
     QVERIFY(m_window->finishSketch());
-    const auto& rect = std::get<SketchRectangle>(m_window->document().sketches()[0].entities()[0].geometry);
+    const SketchRectangle rect = std::get<SketchRectangle>(m_window->document().sketches()[0].entities()[0].geometry);
     QVERIFY(approx(rect.width, 100) && approx(rect.height, 60));
     QVERIFY(m_window->addExtrusion({"Bloco", "sk-1", 20.0}));
     action("actionVistaIsometrica")->trigger();
@@ -402,7 +402,10 @@ void TestE561Ui::esbocoSobreFaceEExtrusao()
     cut.targetId = "op-1";
     cut.endCondition = EndCondition::ThroughAll;
     QVERIFY2(m_window->addExtrusion(cut), qPrintable(m_window->errors.join('\n')));
-    const double expected = 100.0 * 60.0 * 20.0 - kPi * 100.0 * 20.0;
+    // Raio desenhado pelo mouse (arredondado a 0,1 mm; depende da escala da tela).
+    const double r = std::get<SketchCircle>(m_window->document().findSketch("sk-2")->entities()[0].geometry).radius;
+    QVERIFY(approx(r, 10.0));
+    const double expected = rect.width * rect.height * 20.0 - kPi * r * r * 20.0;
     qInfo("Volume: %.4f (esperado %.4f)", ShapeInspector::volume(m_window->part()), expected);
     QVERIFY(std::fabs(ShapeInspector::volume(m_window->part()) - expected) < 0.5);
 }

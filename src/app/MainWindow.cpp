@@ -6,6 +6,7 @@
 #include "app/ParametersDialog.h"
 #include "app/SketchEntityDialog.h"
 #include "app/StlExportDialog.h"
+#include "modeling/FaceNaming.h"
 #include "modeling/ShapeInspector.h"
 #include "sketch/SketchProfile.h"
 #include "sketch/SketchResolver.h"
@@ -34,6 +35,8 @@
 #include <QStyle>
 #include <QToolBar>
 #include <QTreeWidget>
+#include <QVBoxLayout>
+#include <QWidget>
 
 #include <BRep_Builder.hxx>
 #include <Standard_Version.hxx>
@@ -272,7 +275,11 @@ void MainWindow::createActions()
     m_actExportStl->setStatusTip(tr("Exporta a geometria sólida atual em STL (malha triangular, mm)"));
     connect(m_actExportStl, &QAction::triggered, this, &MainWindow::exportStl);
 
-    // Operações
+    // Operações. "Extrusão..." abre o diálogo único (P4) com o tipo padrão do esboço; os três
+    // comandos seguintes abrem o mesmo diálogo com o tipo pré-selecionado.
+    m_actExtrudeUnified = new QAction(st->standardIcon(QStyle::SP_ArrowUp), tr("&Extrusão..."), this);
+    m_actExtrudeUnified->setObjectName("actionExtrusaoUnificada");
+    connect(m_actExtrudeUnified, &QAction::triggered, this, [this] { extrudeCommand(defaultExtrudeMode()); });
     m_actExtrude = new QAction(st->standardIcon(QStyle::SP_ArrowUp), tr("Extrusão de &Novo Corpo..."), this);
     m_actExtrude->setObjectName("actionExtrusao");
     connect(m_actExtrude, &QAction::triggered, this, &MainWindow::extrude);
@@ -358,7 +365,20 @@ void MainWindow::createActions()
         act->setCheckable(true);
         act->setStatusTip(tip);
         m_sketchTools->addAction(act);
-        connect(act, &QAction::triggered, this, [this, tool, tip] {
+        connect(act, &QAction::triggered, this, [this, act, tool, tip] {
+            if (!m_viewer->isSketchMode())
+            {
+                // Fluxo rápido (P1): com uma face plana selecionada, a ferramenta de desenho abre
+                // o esboço sobre a face (vista normal) já com a ferramenta ativa.
+                const bool drawing = tool == cad::viewer::SketchTool::Line || tool == cad::viewer::SketchTool::Rectangle
+                                     || tool == cad::viewer::SketchTool::Circle || tool == cad::viewer::SketchTool::Arc;
+                if (!drawing || !planarFaceSelected() || !startSketchOnFace(selectedFace()))
+                {
+                    m_actToolSelect->setChecked(true);
+                    return;
+                }
+                act->setChecked(true);
+            }
             m_viewer->setSketchTool(tool);
             // Ferramenta pronta: o próximo clique no visualizador já define o primeiro ponto e
             // Esc cancela sem exigir um clique para dar foco.
@@ -406,7 +426,14 @@ void MainWindow::createActions()
     m_actFinishSketch = new QAction(st->standardIcon(QStyle::SP_DialogApplyButton), tr("C&oncluir esboço"), this);
     m_actFinishSketch->setObjectName("actionConcluirEsboco");
     m_actFinishSketch->setStatusTip(tr("Grava o esboço no documento e sai do modo de esboço"));
-    connect(m_actFinishSketch, &QAction::triggered, this, &MainWindow::finishSketch);
+    connect(m_actFinishSketch, &QAction::triggered, this, &MainWindow::finishSketchCommand);
+
+    m_actAutoExtrude = new QAction(tr("Abrir e&xtrusão ao concluir esboço na face"), this);
+    m_actAutoExtrude->setObjectName("actionExtrusaoAoConcluir");
+    m_actAutoExtrude->setCheckable(true);
+    m_actAutoExtrude->setChecked(true);
+    m_actAutoExtrude->setStatusTip(tr("Ao concluir um esboço novo sobre uma face, abre o diálogo de extrusão "
+                                      "(os parâmetros são confirmados pelo usuário)"));
 
     m_actCancelSketch = new QAction(st->standardIcon(QStyle::SP_DialogCancelButton), tr("C&ancelar esboço"), this);
     m_actCancelSketch->setObjectName("actionCancelarEsboco");
@@ -464,6 +491,7 @@ void MainWindow::createMenus()
 
     QMenu* menuOperations = menuBar()->addMenu(tr("&Operações"));
     menuOperations->setObjectName("menuOperacoes");
+    menuOperations->addAction(m_actExtrudeUnified);
     menuOperations->addAction(m_actExtrude);
     menuOperations->addAction(m_actExtrudeBoss);
     menuOperations->addAction(m_actExtrudeCut);
@@ -497,6 +525,8 @@ void MainWindow::createMenus()
     menuSketch->addSeparator();
     menuSketch->addAction(m_actFinishSketch);
     menuSketch->addAction(m_actCancelSketch);
+    menuSketch->addSeparator();
+    menuSketch->addAction(m_actAutoExtrude);
 
     QMenu* menuView = menuBar()->addMenu(tr("&Visualizar"));
     menuView->setObjectName("menuVisualizar");
@@ -531,6 +561,7 @@ void MainWindow::createToolBars()
     m_toolBarModeling->addAction(m_actEditParameters);
     m_toolBarModeling->addAction(m_actNewSketch);
     m_toolBarModeling->addAction(m_actSketchOnFace);
+    m_toolBarModeling->addAction(m_actExtrudeUnified);
     m_toolBarModeling->addAction(m_actExtrude);
     m_toolBarModeling->addAction(m_actExtrudeBoss);
     m_toolBarModeling->addAction(m_actExtrudeCut);
@@ -611,10 +642,73 @@ void MainWindow::createDocks()
     addDockWidget(Qt::LeftDockWidgetArea, m_dockProperties);
     splitDockWidget(m_dockOperations, m_dockProperties, Qt::Vertical);
 
+    // Diagnóstico (P2): erros e avisos com operação afetada, descrição, causa provável,
+    // orientação e estado; duplo clique seleciona a operação ou o esboço na árvore.
+    // Textos com quebra de linha e sem largura mínima: o painel não alarga a área lateral (o
+    // visualizador mantém o tamanho); a linha selecionada aparece por extenso no detalhe.
+    m_diagnosticsSummary = new QLabel;
+    m_diagnosticsSummary->setObjectName("rotuloResumoDiagnostico");
+    m_diagnosticsSummary->setMargin(4);
+    m_diagnosticsSummary->setWordWrap(true);
+    m_diagnosticsSummary->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    m_diagnosticsDetail = new QLabel;
+    m_diagnosticsDetail->setObjectName("rotuloDetalheDiagnostico");
+    m_diagnosticsDetail->setMargin(4);
+    m_diagnosticsDetail->setWordWrap(true);
+    m_diagnosticsDetail->setTextFormat(Qt::RichText);
+    m_diagnosticsDetail->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    m_diagnosticsDetail->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    m_diagnostics = new QTreeWidget;
+    m_diagnostics->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Expanding);
+    m_diagnostics->setMinimumWidth(0);
+    m_diagnostics->setObjectName("listaDiagnostico");
+    m_diagnostics->setRootIsDecorated(false);
+    m_diagnostics->setWordWrap(true);
+    m_diagnostics->setAlternatingRowColors(true);
+    m_diagnostics->setHeaderLabels({tr("Tipo"), tr("Item"), tr("Descrição"), tr("Causa provável"), tr("Como corrigir"),
+                                    tr("Estado")});
+    m_diagnostics->setColumnWidth(0, 70);
+    m_diagnostics->setColumnWidth(1, 170);
+    m_diagnostics->setColumnWidth(2, 260);
+    m_diagnostics->setColumnWidth(3, 260);
+    m_diagnostics->setColumnWidth(4, 260);
+    connect(m_diagnostics, &QTreeWidget::itemDoubleClicked, this, [this](QTreeWidgetItem* item, int) {
+        if (item && !isEditingSketch())
+            selectTreeItem(item->data(0, kItemIdRole).toString());
+    });
+    connect(m_diagnostics, &QTreeWidget::currentItemChanged, this, [this](QTreeWidgetItem* item, QTreeWidgetItem*) {
+        if (!item)
+        {
+            m_diagnosticsDetail->clear();
+            return;
+        }
+        m_diagnosticsDetail->setText(tr("<b>%1 — %2</b><br>%3<br><b>Causa provável:</b> %4<br><b>Como corrigir:</b> %5"
+                                        "<br><b>Estado:</b> %6")
+                                         .arg(item->text(0).toHtmlEscaped(), item->text(1).toHtmlEscaped(),
+                                              item->text(2).toHtmlEscaped(), item->text(3).toHtmlEscaped(),
+                                              item->text(4).toHtmlEscaped(), item->text(5).toHtmlEscaped()));
+    });
+    auto* diagnosticsBox = new QWidget;
+    auto* diagnosticsLayout = new QVBoxLayout(diagnosticsBox);
+    diagnosticsLayout->setContentsMargins(0, 0, 0, 0);
+    diagnosticsLayout->addWidget(m_diagnosticsSummary);
+    diagnosticsLayout->addWidget(m_diagnostics, 1);
+    diagnosticsLayout->addWidget(m_diagnosticsDetail);
+    m_dockDiagnostics = new QDockWidget(tr("Diagnóstico"), this);
+    m_dockDiagnostics->setObjectName("dockDiagnostico");
+    m_dockDiagnostics->setAllowedAreas(Qt::BottomDockWidgetArea | Qt::LeftDockWidgetArea | Qt::RightDockWidgetArea);
+    m_dockDiagnostics->setWidget(diagnosticsBox);
+    // Em abas com Propriedades: a área do visualizador não muda; a aba vem para a frente quando
+    // surge um erro (o título mostra a contagem). Pode ser movido para baixo pelo usuário.
+    addDockWidget(Qt::LeftDockWidgetArea, m_dockDiagnostics);
+    tabifyDockWidget(m_dockProperties, m_dockDiagnostics);
+    m_dockProperties->raise();
+
     if (auto* menuView = menuBar()->findChild<QMenu*>("menuVisualizar"))
     {
         menuView->addAction(m_dockOperations->toggleViewAction());
         menuView->addAction(m_dockProperties->toggleViewAction());
+        menuView->addAction(m_dockDiagnostics->toggleViewAction());
     }
 }
 
@@ -685,6 +779,82 @@ void MainWindow::refreshDocumentViews(bool geometryChanged)
     rebuildTree();
     updateTitle();
     updateActionStates();
+    // Alteração aplicada: as recusas anteriores deixam de ser atuais.
+    if (geometryChanged)
+        m_rejected.clear();
+    refreshDiagnostics();
+}
+
+std::vector<cad::document::Diagnostic> MainWindow::diagnostics() const
+{
+    std::vector<cad::document::Diagnostic> list = cad::document::diagnose(m_document);
+    list.insert(list.end(), m_rejected.begin(), m_rejected.end());
+    return list;
+}
+
+void MainWindow::refreshDiagnostics()
+{
+    if (!m_diagnostics)
+        return;
+    const auto list = diagnostics();
+    m_diagnostics->clear();
+    int errors = 0, warnings = 0;
+    QStyle* st = style();
+    for (const auto& d : list)
+    {
+        const bool error = d.severity == cad::document::DiagnosticSeverity::Error;
+        (error ? errors : warnings)++;
+        auto* item = new QTreeWidgetItem(m_diagnostics);
+        item->setIcon(0, st->standardIcon(error ? QStyle::SP_MessageBoxCritical : QStyle::SP_MessageBoxWarning));
+        item->setText(0, QString::fromLatin1(cad::document::severityLabel(d.severity)));
+        item->setText(1, d.itemId.empty() ? tr("Documento")
+                                          : QStringLiteral("%1 (%2)").arg(QString::fromStdString(d.itemName),
+                                                                          QString::fromStdString(d.itemId)));
+        item->setText(2, QString::fromStdString(d.description));
+        item->setText(3, QString::fromStdString(d.cause));
+        item->setText(4, QString::fromStdString(d.guidance));
+        item->setText(5, QString::fromStdString(d.state));
+        for (int c = 1; c < 6; ++c)
+            item->setToolTip(c, item->text(c));
+        item->setData(0, kItemIdRole, QString::fromStdString(d.itemId));
+    }
+    // Primeira linha selecionada: o detalhe mostra causa e correção por extenso.
+    if (m_diagnostics->topLevelItemCount() > 0)
+        m_diagnostics->setCurrentItem(m_diagnostics->topLevelItem(0));
+    else
+        m_diagnosticsDetail->clear();
+    m_dockDiagnostics->setWindowTitle(errors + warnings == 0 ? tr("Diagnóstico")
+                                                             : tr("Diagnóstico (%1)").arg(errors + warnings));
+    // Erro novo: a aba do diagnóstico vem para a frente.
+    if (errors > m_lastDiagnosticErrors)
+        m_dockDiagnostics->raise();
+    m_lastDiagnosticErrors = errors;
+    if (errors == 0 && warnings == 0)
+        m_diagnosticsSummary->setText(tr("Sem erros nem avisos: todas as operações são válidas."));
+    else
+        m_diagnosticsSummary->setText(tr("%1 erro(s), %2 aviso(s). Duplo clique seleciona o item na árvore; "
+                                         "use Editar operação para corrigir.")
+                                          .arg(errors)
+                                          .arg(warnings));
+    m_diagnosticsSummary->setStyleSheet(errors > 0 ? QStringLiteral("color: #b00020;") : QString());
+}
+
+void MainWindow::recordRejected(const std::string& itemId, const std::string& itemName, OperationType type,
+                                const std::string& message)
+{
+    const cad::document::FailureExplanation e = cad::document::explainFailure(type, message);
+    cad::document::Diagnostic d;
+    d.severity = cad::document::DiagnosticSeverity::Error;
+    d.itemId = itemId;
+    d.itemName = itemName;
+    d.description = "Alteração recusada: " + message;
+    d.cause = e.cause;
+    d.guidance = e.guidance;
+    d.state = "Não aplicada (documento mantido no último estado válido)";
+    m_rejected.push_back(d);
+    if (m_rejected.size() > 5)
+        m_rejected.erase(m_rejected.begin());
+    refreshDiagnostics();
 }
 
 void MainWindow::updateActionStates()
@@ -699,6 +869,11 @@ void MainWindow::updateActionStates()
     m_actExtrude->setStatusTip(sketchSelected ? tr("Extruda o esboço selecionado como novo corpo independente")
                                               : tr("Selecione na árvore um esboço concluído para extrudar"));
     m_actExtrude->setToolTip(m_actExtrude->statusTip());
+    m_actExtrudeUnified->setEnabled(sketchSelected);
+    m_actExtrudeUnified->setStatusTip(sketchSelected ? tr("Extruda o esboço selecionado: novo corpo, adicionar ou remover "
+                                                          "material (escolha no diálogo)")
+                                                     : tr("Selecione na árvore um esboço concluído para extrudar"));
+    m_actExtrudeUnified->setToolTip(m_actExtrudeUnified->statusTip());
     const bool targetAvailable = sketchSelected && !m_document.activeBodies().empty();
     for (QAction* a : {m_actExtrudeBoss, m_actExtrudeCut})
     {
@@ -732,10 +907,18 @@ void MainWindow::updateActionStates()
         a->setEnabled(hasBody);
         a->setToolTip(hasBody ? a->statusTip() : tr("Fillet 3D e Chamfer 3D exigem um corpo sólido"));
     }
+    // Fluxo rápido (P1): fora do esboço, com uma face plana selecionada, Linha/Retângulo/Círculo/
+    // Arco abrem o esboço sobre a face já com a ferramenta.
+    if (!editing)
+    {
+        const bool quick = !finishing && planarFaceSelected();
+        for (QAction* a : {m_actToolLine, m_actToolRectangle, m_actToolCircle, m_actToolArc})
+            a->setEnabled(quick);
+    }
     if (finishing)
     {
-        for (QAction* a : {m_actExtrude, m_actEditOperation, m_actNewSketch, m_actEditSketch, m_actEditParameters, m_actNew,
-                           m_actOpen, m_actExampleBlock})
+        for (QAction* a : {m_actExtrude, m_actExtrudeUnified, m_actEditOperation, m_actNewSketch, m_actEditSketch,
+                           m_actEditParameters, m_actNew, m_actOpen, m_actExampleBlock})
             a->setEnabled(false);
     }
     else if (!editing)
@@ -929,6 +1112,8 @@ void MainWindow::rebuildTree()
                                                                                  : tr("Corte (remove do corpo)")),
                          "parametro");
                 addChild(tr("Corpo de destino: %1").arg(bodyDescription(op.targetId)), "referencia");
+                if (op.cutOutside)
+                    addChild(tr("Lado do corte: fora do perfil (interior preservado)"), "parametro");
             }
             if (op.endCondition == EndCondition::ThroughAll)
                 addChild(tr("Condição final: Atravessar tudo"), "parametro");
@@ -974,7 +1159,10 @@ void MainWindow::rebuildTree()
                              .arg(solidsText(op.result), num(cad::modeling::ShapeInspector::volume(op.result))),
                          "parametro");
         }
-        addChild(tr("Estado: %1").arg(statusName(op.status)), "estado");
+        addChild(op.status == OperationStatus::Invalid && !op.statusMessage.empty()
+                     ? tr("Estado: %1 — %2").arg(statusName(op.status), QString::fromStdString(op.statusMessage))
+                     : tr("Estado: %1").arg(statusName(op.status)),
+                 "estado");
         if (!toSelect && id == selectedId)
             toSelect = item;
         item->setExpanded(!consumer);
@@ -1093,6 +1281,8 @@ void MainWindow::showItemProperties(QTreeWidgetItem* item)
                              bodyDescription(op->targetId).toHtmlEscaped(),
                              op->endCondition == cad::document::EndCondition::ThroughAll ? tr("Atravessar tudo")
                                                                                          : tr("Profundidade definida"));
+        if (op->type == OperationType::Extrude && op->extrudeMode == cad::document::ExtrudeMode::Cut)
+            html += tr("<br>Cortar o lado de fora: %1").arg(op->cutOutside ? tr("sim") : tr("não"));
         if (op->type == OperationType::Extrude)
         {
             const Sketch* sketch = m_document.findSketch(op->sketchId);
@@ -1144,6 +1334,7 @@ bool MainWindow::applyParameters(const PartParameters& parameters)
     if (!result.ok)
     {
         statusBar()->showMessage(tr("Parâmetros recusados: %1").arg(QString::fromStdString(result.message)), 8000);
+        recordRejected(std::string(), "Parâmetros da peça", OperationType::Block, result.message);
         reportError(tr("Parâmetros da peça"),
                     tr("Os parâmetros não foram aplicados:\n%1\n\nA peça foi mantida no último estado válido.")
                         .arg(QString::fromStdString(result.message)));
@@ -1211,7 +1402,9 @@ void MainWindow::openDocument()
 bool MainWindow::openDocumentFrom(const QString& filePath)
 {
     CadDocument loaded;
-    const auto result = DocumentFile::load(filePath, loaded);
+    // Abertura tolerante (P2): operações que falham na reconstrução não impedem a abertura; ficam
+    // inválidas, com mensagem, no painel Diagnóstico (nada é descartado nem alterado).
+    const auto result = DocumentFile::load(filePath, loaded, true);
     const QString nativePath = QDir::toNativeSeparators(filePath);
     if (!result.ok)
     {
@@ -1228,6 +1421,18 @@ bool MainWindow::openDocumentFrom(const QString& filePath)
     m_lastDocumentDir = QFileInfo(filePath).absolutePath();
     refreshDocumentViews(true);
     m_viewer->viewIsometric(); // documento aberto: vista isométrica enquadrando sólido e esboços
+    if (!result.message.isEmpty())
+    {
+        // Aberto com erros: o painel Diagnóstico mostra causa e correção de cada operação.
+        m_dockDiagnostics->show();
+        m_dockDiagnostics->raise();
+        statusBar()->showMessage(tr("Documento aberto com erros: %1").arg(nativePath), 10000);
+        reportInfo(tr("Documento aberto com erros"),
+                   tr("%1\n\nAs operações inválidas foram mantidas sem alteração e a geometria exibida é o último "
+                      "estado válido. Corrija os parâmetros com Editar operação.")
+                       .arg(result.message));
+        return true;
+    }
     statusBar()->showMessage(tr("Documento aberto: %1").arg(nativePath), 5000);
     return true;
 }
@@ -1400,7 +1605,8 @@ void MainWindow::extrudeCommand(cad::document::ExtrudeMode mode)
     initial.name = m_document.defaultExtrusionName(mode);
     initial.sketchId = sketchId.toStdString();
     initial.depth = 10.0;
-    if (mode != ExtrudeMode::NewBody)
+    // O destino é preenchido mesmo para novo corpo: o diálogo único (P4) permite trocar o tipo.
+    if (!m_document.activeBodies().empty())
     {
         // Destino padrão: o corpo ativo que descende do corpo de suporte do esboço (esboço sobre
         // face); senão, o corpo ativo selecionado ou o primeiro.
@@ -1450,6 +1656,7 @@ bool MainWindow::addExtrusion(const cad::document::ExtrudeParameters& parameters
     if (!result.ok)
     {
         statusBar()->showMessage(tr("Extrusão recusada: %1").arg(QString::fromStdString(result.message)), 8000);
+        recordRejected(parameters.sketchId, "Nova extrusão", OperationType::Extrude, result.message);
         reportError(tr("Extrusão"), tr("A extrusão não foi criada:\n%1\n\nO documento foi mantido.")
                                         .arg(QString::fromStdString(result.message)));
         return false;
@@ -1513,6 +1720,7 @@ bool MainWindow::addBoolean(const cad::document::BooleanParameters& parameters)
     if (!result.ok)
     {
         statusBar()->showMessage(tr("Operação booleana recusada: %1").arg(QString::fromStdString(result.message)), 8000);
+        recordRejected(std::string(), "Nova operação booleana", OperationType::Boolean, result.message);
         reportError(tr("Operação booleana"), tr("A operação não foi criada:\n%1\n\nO documento foi mantido.")
                                                  .arg(QString::fromStdString(result.message)));
         return false;
@@ -1534,6 +1742,9 @@ bool MainWindow::updateBoolean(const QString& operationId, const cad::document::
     if (!result.ok)
     {
         statusBar()->showMessage(tr("Operação booleana não alterada: %1").arg(QString::fromStdString(result.message)), 8000);
+        const Operation* rejected = m_document.findOperation(operationId.toStdString());
+        recordRejected(operationId.toStdString(), rejected ? rejected->name : std::string(), OperationType::Boolean,
+                       result.message);
         reportError(tr("Operação booleana"), tr("A alteração não foi aplicada:\n%1\n\nA geometria foi mantida no último "
                                                 "estado válido.")
                                                  .arg(QString::fromStdString(result.message)));
@@ -1598,6 +1809,9 @@ bool MainWindow::updateExtrusion(const QString& operationId, const cad::document
     if (!result.ok)
     {
         statusBar()->showMessage(tr("Extrusão não alterada: %1").arg(QString::fromStdString(result.message)), 8000);
+        const Operation* rejected = m_document.findOperation(operationId.toStdString());
+        recordRejected(operationId.toStdString(), rejected ? rejected->name : std::string(), OperationType::Extrude,
+                       result.message);
         reportError(tr("Extrusão"), tr("Os parâmetros não foram aplicados:\n%1\n\nA geometria foi mantida no último "
                                        "estado válido.")
                                         .arg(QString::fromStdString(result.message)));
@@ -1629,6 +1843,7 @@ bool MainWindow::addFinish(OperationType type, const QString& sourceId, const QL
     if (!result.ok)
     {
         statusBar()->showMessage(tr("%1 recusado: %2").arg(operationTypeName(type), QString::fromStdString(result.message)), 8000);
+        recordRejected(std::string(), operationTypeName(type).toStdString(), type, result.message);
         reportError(operationTypeName(type), tr("A operação não foi criada:\n%1\n\nO documento foi mantido.")
                                                  .arg(QString::fromStdString(result.message)));
         return false;
@@ -1860,6 +2075,8 @@ void MainWindow::applyFinishDialog()
                                                  : m_document.updateFinish(id, p);
     if (!result.ok)
     {
+        recordRejected(m_finishEditId.toStdString(), p.name.empty() ? operationTypeName(type).toStdString() : p.name, type,
+                       result.message);
         reportError(operationTypeName(type), tr("A operação não foi aplicada:\n%1\n\nO documento foi mantido no último "
                                                 "estado válido.")
                                                  .arg(QString::fromStdString(result.message)));
@@ -1925,6 +2142,12 @@ void MainWindow::newSketch()
 {
     if (isEditingSketch())
         return;
+    // Fluxo rápido (P1): face plana selecionada → esboço sobre a face, sem perguntar o plano.
+    if (planarFaceSelected())
+    {
+        startSketchOnFace(selectedFace());
+        return;
+    }
     const auto plane = askSketchPlane();
     if (!plane)
     {
@@ -1940,6 +2163,7 @@ bool MainWindow::startNewSketch(PlaneType plane)
         return false;
     m_editSketch = m_document.createSketch(plane);
     m_editSketchIsNew = true;
+    m_editSketchOnFace = false;
     m_selectedEntity.clear();
     m_viewer->clearSelection();
     m_viewer->setDocumentSketches(displayedSketches(false));
@@ -1957,6 +2181,20 @@ TopoDS_Shape MainWindow::selectedFace() const
     if (selected.size() != 1 || selected.first().ShapeType() != TopAbs_FACE)
         return TopoDS_Shape();
     return selected.first();
+}
+
+bool MainWindow::planarFaceSelected() const
+{
+    const TopoDS_Shape face = selectedFace();
+    return !face.IsNull() && cad::modeling::planarFacePlane(TopoDS::Face(face)).has_value();
+}
+
+cad::document::ExtrudeMode MainWindow::defaultExtrudeMode() const
+{
+    const Sketch* sketch = m_document.findSketch(selectedSketchId().toStdString());
+    if (sketch && sketch->support() && !m_document.activeBodies().empty())
+        return cad::document::ExtrudeMode::Boss;
+    return cad::document::ExtrudeMode::NewBody;
 }
 
 void MainWindow::sketchOnSelectedFace()
@@ -1991,6 +2229,7 @@ bool MainWindow::startSketchOnFace(const TopoDS_Shape& face)
     }
     m_editSketch = *sketch;
     m_editSketchIsNew = true;
+    m_editSketchOnFace = true;
     m_selectedEntity.clear();
     m_viewer->clearSelection();
     m_viewer->setDocumentSketches(displayedSketches(false));
@@ -2025,6 +2264,7 @@ bool MainWindow::editSketch(const QString& sketchId)
         return false;
     m_editSketch = *sketch; // cópia de trabalho
     m_editSketchIsNew = false;
+    m_editSketchOnFace = false;
     m_selectedEntity.clear();
     m_viewer->clearSelection();
     m_viewer->setDocumentSketches(displayedSketches(false));
@@ -2049,6 +2289,7 @@ bool MainWindow::finishSketch()
         // Ex.: a alteração invalida uma extrusão dependente; o documento e o esboço salvo ficam
         // como estavam e a edição continua aberta para correção ou cancelamento.
         statusBar()->showMessage(tr("Esboço não concluído: %1").arg(QString::fromStdString(error)), 10000);
+        recordRejected(m_editSketch->id(), m_editSketch->name(), OperationType::Extrude, error);
         reportError(tr("Concluir esboço"),
                     tr("O esboço não pôde ser gravado:\n%1\n\nO documento foi mantido no último estado válido; "
                        "corrija o esboço ou cancele a edição.")
@@ -2073,11 +2314,39 @@ bool MainWindow::finishSketch()
     return true;
 }
 
+bool MainWindow::finishSketchCommand()
+{
+    if (!isEditingSketch())
+        return false;
+    const bool quick = m_editSketchIsNew && m_editSketchOnFace;
+    const std::string id = m_editSketch->id();
+    if (!finishSketch())
+        return false; // recusa registrada no diagnóstico por finishSketch()
+    m_editSketchOnFace = false;
+    if (!quick || !m_actAutoExtrude->isChecked())
+        return true;
+    // Fluxo rápido (P1): esboço novo sobre face com perfil fechado → diálogo de extrusão.
+    const Sketch* sketch = m_document.findSketch(id);
+    const cad::sketch::ProfileResult profile = sketch ? cad::sketch::buildProfile(*sketch) : cad::sketch::ProfileResult();
+    if (!profile.ok)
+    {
+        statusBar()->showMessage(tr("%1 concluído sem perfil fechado: extrusão não aberta (%2)")
+                                     .arg(QString::fromStdString(sketch ? sketch->name() : id),
+                                          QString::fromStdString(profile.message)),
+                                 8000);
+        return true;
+    }
+    selectTreeItem(QString::fromStdString(id));
+    extrudeCommand(defaultExtrudeMode());
+    return true;
+}
+
 void MainWindow::cancelSketch()
 {
     if (!isEditingSketch())
         return;
     m_editSketch.reset();
+    m_editSketchOnFace = false;
     m_selectedEntity.clear();
     m_viewer->exitSketchMode();
     setSketchModeUi(false);
@@ -2516,7 +2785,8 @@ std::optional<cad::document::ExtrudeParameters> MainWindow::askExtrusion(const c
                            [this, editId](const cad::document::ExtrudeParameters& p) {
                                return m_document.previewExtrusion(p, editId);
                            },
-                           editing, this, extrusionTargets(editId));
+                           editing, this, extrusionTargets(editId),
+                           [this](cad::document::ExtrudeMode mode) { return m_document.defaultExtrusionName(mode); });
     auto preview = [this](const cad::document::ExtrudeParameters& p, bool ok, bool show) {
         if (!show || !ok)
         {

@@ -6,6 +6,9 @@
 
 #include <BRep_Builder.hxx>
 #include <BRepBndLib.hxx>
+#include <BRepBuilderAPI_MakeFace.hxx>
+#include <gp_Ax3.hxx>
+#include <gp_Pln.hxx>
 #include <Bnd_Box.hxx>
 #include <TopoDS.hxx>
 #include <TopExp_Explorer.hxx>
@@ -158,6 +161,8 @@ ValidationResult CadDocument::validateExtrude(const ExtrudeParameters& p)
         return fail("targetId", "Selecione o corpo de destino da extrusão");
     if (p.endCondition == EndCondition::ThroughAll && p.mode != ExtrudeMode::Cut)
         return fail("endCondition", "\"Atravessar tudo\" só se aplica à Extrusão de Corte");
+    if (p.cutOutside && p.mode != ExtrudeMode::Cut)
+        return fail("cutOutside", "\"Cortar o lado de fora\" só se aplica à remoção de material (corte)");
     if (p.endCondition == EndCondition::ThroughAll)
     {
         if (trim(p.name).size() > kMaxNameLength)
@@ -175,7 +180,7 @@ ValidationResult CadDocument::validateExtrude(const ExtrudeParameters& p)
     return {};
 }
 
-bool CadDocument::fromData(const Data& data, CadDocument& out, std::string& error)
+bool CadDocument::fromData(const Data& data, CadDocument& out, std::string& error, bool allowInvalid)
 {
     // Esboços: ids "sk-N" únicos e contador coerente (entidades já validadas em Sketch::fromData).
     int maxSketch = 0;
@@ -226,7 +231,7 @@ bool CadDocument::fromData(const Data& data, CadDocument& out, std::string& erro
         }
         if (f.type == OperationType::Extrude)
         {
-            const ExtrudeParameters p{f.name, f.sketchId, f.parameter("depth"), f.reversed, f.extrudeMode, f.targetId, f.endCondition};
+            const ExtrudeParameters p = extrudeParametersOf(f);
             const ValidationResult v = validateExtrude(p);
             if (!v.ok)
             {
@@ -302,11 +307,23 @@ bool CadDocument::fromData(const Data& data, CadDocument& out, std::string& erro
 
     TopoDS_Shape shape;
     std::vector<cad::sketch::Sketch> sketches = data.sketches;
-    if (!rebuild(ops, sketches, shape, error))
+    std::vector<SketchIssue> issues;
+    if (allowInvalid)
+    {
+        // Referências estruturais continuam obrigatórias; falhas geométricas ficam registradas
+        // nas operações (estado e mensagem) sem descartar nem alterar nada.
+        std::vector<Operation> check = ops;
+        if (!checkReferences(check, error))
+            return false;
+        std::string rebuildError;
+        rebuild(ops, sketches, shape, rebuildError, &issues);
+    }
+    else if (!rebuild(ops, sketches, shape, error))
         return false;
 
     CadDocument doc(data.name);
     doc.m_operations = std::move(ops);
+    doc.m_sketchIssues = std::move(issues);
     doc.m_shape = shape;
     doc.m_revision = doc.m_operations.empty() ? 0 : 1;
     doc.m_sketches = std::move(sketches); // planes dos esboços sobre faces reconstruídos
@@ -382,11 +399,13 @@ bool CadDocument::commitSketch(const cad::sketch::Sketch& sketch, std::string& e
         std::vector<Operation> ops = m_operations;
         TopoDS_Shape shape;
         std::string rebuildError;
-        if (!rebuild(ops, sketches, shape, rebuildError))
+        std::vector<SketchIssue> issues;
+        if (!rebuildForCommit(ops, sketches, shape, rebuildError, issues))
         {
             error = "A alteração do esboço invalida uma operação dependente: " + rebuildError;
             return false;
         }
+        m_sketchIssues = std::move(issues);
         m_sketches = std::move(sketches);
         commit(std::move(ops), shape);
     }
@@ -497,8 +516,10 @@ ValidationResult CadDocument::setParameters(const PartParameters& parameters)
     TopoDS_Shape shape;
     std::string error;
     std::vector<cad::sketch::Sketch> sketches = m_sketches;
-    if (!rebuild(ops, sketches, shape, error))
+    std::vector<SketchIssue> issues;
+    if (!rebuildForCommit(ops, sketches, shape, error, issues))
         return ValidationResult{false, "", error};
+    m_sketchIssues = std::move(issues);
     commit(std::move(ops), std::move(sketches), shape);
     return {};
 }
@@ -579,9 +600,9 @@ cad::modeling::FeatureResult CadDocument::extrusionTool(const ExtrudeParameters&
     ExtrudeParameters p = parameters;
     p.mode = ExtrudeMode::NewBody; // só o prisma
     const bool through = parameters.endCondition == EndCondition::ThroughAll;
-    if (through)
+    if (through || (parameters.mode == ExtrudeMode::Cut && parameters.cutOutside))
     {
-        // Mesmo comprimento usado no corte: calculado pelo corte completo.
+        // Mesma ferramenta usada no corte (comprimento e região externa dependem do corpo).
         computeExtrusion(parameters, *sketch, t ? t->result : TopoDS_Shape(), &tool);
         r.ok = !tool.IsNull();
         r.shape = tool;
@@ -646,8 +667,47 @@ cad::modeling::FeatureResult CadDocument::computeExtrusion(const ExtrudeParamete
             *tool = prism.shape;
         return prism;
     }
+    TopoDS_Shape cutter = prism.shape;
+    if (p.mode == ExtrudeMode::Cut && p.cutOutside)
+    {
+        // Cortar o lado de fora: laje do plano do esboço que cobre o corpo de destino (com folga),
+        // varrida pela mesma extensão, menos o prisma do perfil.
+        const cad::sketch::SketchPlane& plane = sketch.plane();
+        Bnd_Box box;
+        BRepBndLib::Add(target, box);
+        double x0, y0, z0, x1, y1, z1;
+        box.Get(x0, y0, z0, x1, y1, z1);
+        double umin = 1e300, umax = -1e300, vmin = 1e300, vmax = -1e300;
+        for (double x : {x0, x1})
+            for (double y : {y0, y1})
+                for (double z : {z0, z1})
+                {
+                    const gp_Vec v(plane.origin(), gp_Pnt(x, y, z));
+                    umin = std::min(umin, v.Dot(gp_Vec(plane.horizontalAxis())));
+                    umax = std::max(umax, v.Dot(gp_Vec(plane.horizontalAxis())));
+                    vmin = std::min(vmin, v.Dot(gp_Vec(plane.verticalAxis())));
+                    vmax = std::max(vmax, v.Dot(gp_Vec(plane.verticalAxis())));
+                }
+        const double margin = std::max(1.0, 0.01 * std::sqrt(box.SquareExtent()));
+        const gp_Pln slabPlane(gp_Ax3(plane.origin(), plane.normal(), plane.horizontalAxis()));
+        const TopoDS_Face slabFace =
+            BRepBuilderAPI_MakeFace(slabPlane, umin - margin, umax + margin, vmin - margin, vmax + margin).Face();
+        const cad::modeling::FeatureResult slab = cad::modeling::extrudeFace(slabFace, gp_Vec(dir) * length);
+        if (!slab.ok)
+        {
+            r.message = "falha ao construir a região externa ao perfil: " + slab.message;
+            return r;
+        }
+        const cad::modeling::FeatureResult outside = cad::modeling::booleanOperation(BooleanKind::Cut, slab.shape, prism.shape);
+        if (!outside.ok)
+        {
+            r.message = "falha ao construir a região externa ao perfil: " + outside.message;
+            return r;
+        }
+        cutter = outside.shape;
+    }
     if (tool)
-        *tool = prism.shape;
+        *tool = cutter;
     if (p.mode == ExtrudeMode::Boss)
     {
         r = cad::modeling::booleanOperation(BooleanKind::Fuse, target, prism.shape);
@@ -665,12 +725,15 @@ cad::modeling::FeatureResult CadDocument::computeExtrusion(const ExtrudeParamete
         }
         return r;
     }
-    r = cad::modeling::booleanOperation(BooleanKind::Cut, target, prism.shape);
+    r = cad::modeling::booleanOperation(BooleanKind::Cut, target, cutter);
     if (r.ok && std::fabs(cad::modeling::ShapeInspector::volume(r.shape) - cad::modeling::ShapeInspector::volume(target))
                     < 1e-6)
     {
         r.ok = false;
-        r.message = "a ferramenta de corte não intersecta o corpo de destino (" + p.targetId + "); verifique o sentido";
+        r.message = p.cutOutside ? "não há material fora do perfil na extensão do corte (" + p.targetId
+                                       + "); verifique o sentido e a profundidade"
+                                 : "a ferramenta de corte não intersecta o corpo de destino (" + p.targetId
+                                       + "); verifique o sentido";
     }
     return r;
 }
@@ -714,7 +777,8 @@ ValidationResult CadDocument::updateExtrusion(const std::string& id, const Extru
     const Operation updated = makeExtrusion(id, p);
     if (updated.name == it->name && updated.sketchId == it->sketchId && updated.reversed == it->reversed
         && updated.parameter("depth") == it->parameter("depth") && updated.extrudeMode == it->extrudeMode
-        && updated.targetId == it->targetId && updated.endCondition == it->endCondition)
+        && updated.targetId == it->targetId && updated.endCondition == it->endCondition
+        && updated.cutOutside == it->cutOutside)
         return {};
     *it = updated;
     return applyOperations(std::move(ops), "profile");
@@ -724,15 +788,7 @@ ExtrudeParameters CadDocument::extrudeParameters(const std::string& id) const
 {
     ExtrudeParameters p;
     if (const Operation* op = findOperation(id); op && op->type == OperationType::Extrude)
-    {
-        p.name = op->name;
-        p.sketchId = op->sketchId;
-        p.depth = op->parameter("depth");
-        p.reversed = op->reversed;
-        p.mode = op->extrudeMode;
-        p.targetId = op->targetId;
-        p.endCondition = op->endCondition;
-    }
+        p = extrudeParametersOf(*op);
     return p;
 }
 
@@ -788,8 +844,23 @@ Operation CadDocument::makeExtrusion(const std::string& id, const ExtrudeParamet
     op.extrudeMode = parameters.mode;
     op.targetId = parameters.mode == ExtrudeMode::NewBody ? std::string() : parameters.targetId;
     op.endCondition = parameters.endCondition;
+    op.cutOutside = parameters.mode == ExtrudeMode::Cut && parameters.cutOutside;
     op.parameters = {{"depth", parameters.depth}};
     return op;
+}
+
+ExtrudeParameters CadDocument::extrudeParametersOf(const Operation& op)
+{
+    ExtrudeParameters p;
+    p.name = op.name;
+    p.sketchId = op.sketchId;
+    p.depth = op.parameter("depth");
+    p.reversed = op.reversed;
+    p.mode = op.extrudeMode;
+    p.targetId = op.targetId;
+    p.endCondition = op.endCondition;
+    p.cutOutside = op.cutOutside;
+    return p;
 }
 
 bool CadDocument::producesBody(OperationType type)
@@ -906,7 +977,7 @@ bool CadDocument::resolveSupport(cad::sketch::Sketch& sketch, const TopoDS_Shape
 }
 
 bool CadDocument::rebuild(std::vector<Operation>& operations, std::vector<cad::sketch::Sketch>& sketches,
-                          TopoDS_Shape& shape, std::string& error)
+                          TopoDS_Shape& shape, std::string& error, std::vector<SketchIssue>* issues)
 {
     if (!checkReferences(operations, error))
         return false;
@@ -937,15 +1008,58 @@ bool CadDocument::rebuild(std::vector<Operation>& operations, std::vector<cad::s
         resolvedSketches.insert(s.id());
         return true;
     };
-    bool ok = true;
+    // Uma falha não interrompe as operações independentes: só as que dependem (corpo de destino,
+    // de origem, operandos, corpo de suporte do esboço ou o bloco do furo) ficam bloqueadas.
+    std::string firstError;
+    std::set<std::string> invalid;
+    std::string blockId;
+    auto nameOf = [&operations](const std::string& id) {
+        for (const Operation& o : operations)
+            if (o.id == id)
+                return o.name + " (" + id + ")";
+        return id;
+    };
+    auto dependencies = [&](const Operation& op) {
+        std::vector<std::string> deps;
+        switch (op.type)
+        {
+        case OperationType::Block: break;
+        case OperationType::ThroughHole: deps.push_back(blockId); break;
+        case OperationType::Extrude:
+            if (op.extrudeMode != ExtrudeMode::NewBody)
+                deps.push_back(op.targetId);
+            for (const cad::sketch::Sketch& s : sketches)
+                if (s.id() == op.sketchId && s.support())
+                    deps.push_back(s.support()->bodyId);
+            break;
+        case OperationType::Boolean:
+            deps.push_back(op.operandA);
+            deps.push_back(op.operandB);
+            break;
+        case OperationType::Fillet3D:
+        case OperationType::Chamfer3D: deps.push_back(op.sourceId); break;
+        }
+        return deps;
+    };
     for (Operation& op : operations)
     {
         cad::modeling::FeatureResult r;
         op.result.Nullify();
-        if (!ok)
+        op.blockedBy.clear();
+        if (op.type == OperationType::Block)
+            blockId = op.id;
+        for (const std::string& dep : dependencies(op))
+            if (invalid.count(dep))
+            {
+                op.blockedBy = dep;
+                break;
+            }
+        if (!op.blockedBy.empty())
         {
             op.status = OperationStatus::Invalid;
-            op.statusMessage = "Operação anterior inválida";
+            op.statusMessage = "depende de operação inválida: " + nameOf(op.blockedBy);
+            invalid.insert(op.id);
+            ++current;
             continue;
         }
         switch (op.type)
@@ -975,8 +1089,7 @@ bool CadDocument::rebuild(std::vector<Operation>& operations, std::vector<cad::s
             // Esboço sobre face: plano recalculado a partir da face no corpo de suporte.
             if (!resolveSketchSupport(*it, r.message))
                 break;
-            const ExtrudeParameters p{op.name, op.sketchId, op.parameter("depth"), op.reversed,
-                                      op.extrudeMode, op.targetId, op.endCondition};
+            const ExtrudeParameters p = extrudeParametersOf(op);
             r = computeExtrusion(p, *it, op.extrudeMode == ExtrudeMode::NewBody ? TopoDS_Shape() : resultOf(op.targetId),
                                  nullptr);
             break;
@@ -996,23 +1109,36 @@ bool CadDocument::rebuild(std::vector<Operation>& operations, std::vector<cad::s
             op.result = r.shape;
         else
         {
-            ok = false;
-            error = op.name + ": " + r.message;
+            invalid.insert(op.id);
+            if (firstError.empty())
+                firstError = op.name + ": " + r.message;
         }
     }
-    if (!ok)
-        return false;
     // Esboços sobre faces não usados por extrusões também acompanham o corpo de suporte.
     current = operations.size();
     for (cad::sketch::Sketch& s : sketches)
-        if (!resolveSketchSupport(s, error))
-            return false;
+    {
+        std::string message;
+        if (s.support() && invalid.count(s.support()->bodyId))
+            message = s.name() + ": corpo de suporte inválido (" + nameOf(s.support()->bodyId) + ")";
+        else if (resolveSketchSupport(s, message))
+            continue;
+        if (issues)
+            issues->push_back(SketchIssue{s.id(), message});
+        else if (firstError.empty())
+            firstError = message;
+    }
 
-    // Resultado do documento: corpos ativos (não consumidos), sem união implícita.
+    // Resultado do documento: corpos ativos (não consumidos), sem união implícita. Corpo válido
+    // consumido por uma operação inválida continua exibido (último estado válido da cadeia).
     std::vector<TopoDS_Shape> solids;
     for (const Operation& op : operations)
-        if (producesBody(op.type) && op.consumedBy.empty() && !op.result.IsNull())
+    {
+        if (!producesBody(op.type) || op.result.IsNull())
+            continue;
+        if (op.consumedBy.empty() || invalid.count(op.consumedBy))
             solids.push_back(op.result);
+    }
     if (solids.empty())
         shape.Nullify();
     else if (solids.size() == 1)
@@ -1026,6 +1152,52 @@ bool CadDocument::rebuild(std::vector<Operation>& operations, std::vector<cad::s
             builder.Add(compound, s);
         shape = compound;
     }
+    if (!firstError.empty())
+    {
+        error = firstError;
+        return false;
+    }
+    return true;
+}
+
+bool CadDocument::hasInvalidOperations() const
+{
+    return std::any_of(m_operations.begin(), m_operations.end(),
+                       [](const Operation& op) { return op.status == OperationStatus::Invalid; });
+}
+
+bool CadDocument::rebuildForCommit(std::vector<Operation>& operations, std::vector<cad::sketch::Sketch>& sketches,
+                                   TopoDS_Shape& shape, std::string& error, std::vector<SketchIssue>& issues) const
+{
+    const bool tolerant = hasInvalidOperations() || !m_sketchIssues.empty();
+    // Referências estruturais (operandos inexistentes, ciclos) nunca são aceitas.
+    std::vector<Operation> check = operations;
+    if (!checkReferences(check, error))
+        return false;
+    issues.clear();
+    if (rebuild(operations, sketches, shape, error, tolerant ? &issues : nullptr))
+        return true;
+    if (!tolerant)
+        return false;
+    // Documento já com erros: aceito se não surgir nenhuma falha nova (a correção pode ser
+    // feita uma operação de cada vez, sem descartar nem alterar as outras).
+    for (const Operation& op : operations)
+    {
+        const Operation* before = findOperation(op.id);
+        if (op.status == OperationStatus::Invalid && (!before || before->status != OperationStatus::Invalid))
+        {
+            error = op.name + ": " + op.statusMessage;
+            return false;
+        }
+    }
+    for (const SketchIssue& issue : issues)
+        if (std::none_of(m_sketchIssues.begin(), m_sketchIssues.end(),
+                         [&](const SketchIssue& old) { return old.sketchId == issue.sketchId; }))
+        {
+            error = issue.message;
+            return false;
+        }
+    error.clear();
     return true;
 }
 
@@ -1239,7 +1411,8 @@ std::optional<cad::sketch::Sketch> CadDocument::createFaceSketch(const std::stri
         error = "Selecione uma face do corpo " + body->name;
         return std::nullopt;
     }
-    const TopoDS_Face f = TopoDS::Face(face);
+    // Face com a orientação do sólido (a normal externa depende dela).
+    const TopoDS_Face f = cad::modeling::faceInShape(body->result, face);
     const auto plane = cad::modeling::planarFacePlane(f);
     if (!plane)
     {
@@ -1427,9 +1600,12 @@ ValidationResult CadDocument::applyOperations(std::vector<Operation> operations,
 {
     TopoDS_Shape shape;
     std::string error;
-    if (!rebuild(operations, m_sketches, shape, error))
+    std::vector<cad::sketch::Sketch> sketches = m_sketches;
+    std::vector<SketchIssue> issues;
+    if (!rebuildForCommit(operations, sketches, shape, error, issues))
         return ValidationResult{false, field, error};
-    commit(std::move(operations), shape);
+    m_sketchIssues = std::move(issues);
+    commit(std::move(operations), std::move(sketches), shape);
     return {};
 }
 
