@@ -11,6 +11,8 @@
 // adicionar material ao corpo de destino; desmarcado = novo corpo. No corte fica sempre marcado.
 // "Cortar o lado de fora" (só no corte) remove o material fora do perfil dentro da extensão do
 // corte, preservando o material dentro do perfil (ver ExtrudeParameters::cutOutside).
+// Condições finais (E5.7.1 — P5): profundidade definida, plano médio, atravessar tudo (um ou dois
+// sentidos), até a próxima face e até a face (selecionada no visualizador); Direção 2 opcional.
 //
 // Sentido: novo corpo e saliência seguem a normal do plano local do esboço (para fora da face);
 // o corte segue o sentido oposto (para dentro da face). "Inverter sentido" troca o sentido.
@@ -31,6 +33,7 @@ class QDialogButtonBox;
 class QDoubleSpinBox;
 class QLabel;
 class QLineEdit;
+class QPushButton;
 
 namespace cad::app {
 
@@ -55,6 +58,11 @@ public:
     // Tipo de operação atual (Novo corpo / Saliência / Corte).
     cad::document::ExtrudeMode mode() const;
     void setMode(cad::document::ExtrudeMode mode);
+
+    // "Até a face" (E5.7.1): código de retorno de exec() quando o usuário pede para selecionar a
+    // face limite no visualizador (o diálogo é reaberto em seguida com setLimitFace()).
+    static constexpr int kPickLimitFace = 2;
+    void setLimitFace(const std::string& bodyId, const cad::modeling::FaceSignature& face, const QString& description);
 
     static QString modeTitle(cad::document::ExtrudeMode mode, bool editing);
 
@@ -81,6 +89,11 @@ private:
     QCheckBox* m_outside = nullptr;
     QComboBox* m_target = nullptr;
     QComboBox* m_end = nullptr;
+    QLabel* m_limitFace = nullptr;
+    QPushButton* m_pickLimit = nullptr;
+    QCheckBox* m_direction2 = nullptr;
+    QComboBox* m_end2 = nullptr;
+    QDoubleSpinBox* m_depth2 = nullptr;
     QDoubleSpinBox* m_depth = nullptr;
     QCheckBox* m_reversed = nullptr;
     QCheckBox* m_preview = nullptr;

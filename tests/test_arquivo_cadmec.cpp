@@ -1139,7 +1139,8 @@ void TestArquivoCadmec::rejeitaE55Invalido_data()
     QTest::newRow("aresta campo desconhecido") << e55Modified([&](QJsonObject& r) { setEdgeField(r, 1, "index", 3); });
     QTest::newRow("aresta nao remapeavel") << e55Modified([&](QJsonObject& r) {
         // Direção vertical com as normais da aresta superior frontal: nenhuma aresta tem esse papel.
-        setEdgeField(r, 1, "direction", QJsonArray{0.0, 0.0, 1.0}); });
+        setEdgeField(r, 1, "direction", QJsonArray{0.0, 0.0, 1.0});
+        setEdgeField(r, 1, "name", "op-9:inexistente|op-9:outra"); }); // nome topológico também perdido (E5.7.1)
     QTest::newRow("aresta ponto medio nao numerico") << e55Modified([&](QJsonObject& r) { setEdgeField(r, 1, "mid", QJsonArray{1.0, "x", 0.0}); });
 }
 
@@ -1329,7 +1330,8 @@ void TestArquivoCadmec::rejeitaE56Invalido_data()
     QTest::newRow("sistema local nao ortogonal") << e56Modified([&](QJsonObject& r) { editSupport(r, [](QJsonObject& s) {
         QJsonObject fr = s["frame"].toObject(); fr["xAxis"] = QJsonArray{0.0, 0.0, 1.0}; s["frame"] = fr; }); });
     QTest::newRow("face nao remapeavel") << e56Modified([&](QJsonObject& r) { editSupport(r, [](QJsonObject& s) {
-        QJsonObject f = s["face"].toObject(); f["normal"] = QJsonArray{0.6, 0.0, 0.8}; s["face"] = f; }); });
+        QJsonObject f = s["face"].toObject(); f["normal"] = QJsonArray{0.6, 0.0, 0.8};
+        f["name"] = "op-9:inexistente"; s["face"] = f; }); }); // nome topológico também perdido (E5.7.1)
     QTest::newRow("area da face invalida") << e56Modified([&](QJsonObject& r) { editSupport(r, [](QJsonObject& s) {
         QJsonObject f = s["face"].toObject(); f["area"] = -1.0; s["face"] = f; }); });
     QTest::newRow("modo de extrusao invalido") << e56Modified([&](QJsonObject& r) { setOpField(r, 1, "mode", "pocket"); });

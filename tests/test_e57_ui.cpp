@@ -425,11 +425,16 @@ void TestE57Ui::dialogoUnicoTiposEOpcoes()
         QCOMPARE(name->text(), QStringLiteral("Extrusão de Corte 1"));
         end->setCurrentIndex(end->findData(int(EndCondition::ThroughAll)));
         QVERIFY2(message->text().contains(QStringLiteral("113.716,81")), qPrintable(message->text()));
-        // Voltar a adicionar: atravessar tudo deixa de valer (só no corte).
+        // Voltar a adicionar: atravessar tudo continua valendo na saliência (E5.7.1, até o fim
+        // do corpo de destino); no novo corpo, sem destino, volta para profundidade definida.
         type->setCurrentIndex(type->findData(int(ExtrudeMode::Boss)));
-        QCOMPARE(end->currentData().toInt(), int(EndCondition::Blind));
+        QCOMPARE(end->currentData().toInt(), int(EndCondition::ThroughAll));
         auto* model = qobject_cast<QStandardItemModel*>(end->model());
-        QVERIFY(model && !model->item(end->findData(int(EndCondition::ThroughAll)))->isEnabled());
+        QVERIFY(model && model->item(end->findData(int(EndCondition::ThroughAll)))->isEnabled());
+        type->setCurrentIndex(type->findData(int(ExtrudeMode::NewBody)));
+        QCOMPARE(end->currentData().toInt(), int(EndCondition::Blind));
+        QVERIFY(!model->item(end->findData(int(EndCondition::ThroughAll)))->isEnabled());
+        type->setCurrentIndex(type->findData(int(ExtrudeMode::Boss)));
         // Nome editado pelo usuário não é substituído ao trocar o tipo.
         QTest::keyClicks(name, QStringLiteral(" X"));
         type->setCurrentIndex(type->findData(int(ExtrudeMode::Cut)));

@@ -195,6 +195,9 @@ protected:
     virtual std::optional<cad::sketch::SketchChamfer> askChamfer2D(const cad::sketch::SketchChamfer& initial);
     // Saliência que não toca o corpo: perguntar se deve ser criada como novo corpo.
     virtual bool askConvertToNewBody(const QString& message);
+    // "Até a face" (E5.7.1): face plana limite clicada no visualizador (corpo + referência
+    // persistente); vazio = cancelado (Esc).
+    virtual std::optional<std::pair<std::string, cad::modeling::FaceSignature>> askLimitFace();
 
 private:
     void createActions();

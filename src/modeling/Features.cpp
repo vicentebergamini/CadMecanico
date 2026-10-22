@@ -87,6 +87,8 @@ FeatureResult cutThroughHole(const TopoDS_Shape& base, double centerX, double ce
             return r;
         }
         r.shape = cut.Shape();
+        r.history = cut.History();
+        r.tool = cylinder.Shape();
     }
     catch (const Standard_Failure& e)
     {
@@ -114,7 +116,9 @@ FeatureResult extrudeFace(const TopoDS_Face& face, const gp_Vec& direction)
     }
     try
     {
-        BRepPrimAPI_MakePrism prism(face, direction, true /*copia a face*/, true);
+        // Sem cópia da face: o histórico (faces geradas por cada aresta do perfil) fica
+        // referenciado às arestas do perfil recebido (nomes persistentes, E5.7.1).
+        BRepPrimAPI_MakePrism prism(face, direction, false, true);
         prism.Build();
         if (!prism.IsDone())
         {
@@ -122,6 +126,12 @@ FeatureResult extrudeFace(const TopoDS_Face& face, const gp_Vec& direction)
             return r;
         }
         r.shape = prism.Shape();
+        r.firstFace = prism.FirstShape();
+        r.lastFace = prism.LastShape();
+        for (TopExp_Explorer ex(face, TopAbs_EDGE); ex.More(); ex.Next())
+            for (const TopoDS_Shape& g : prism.Generated(ex.Current()))
+                if (g.ShapeType() == TopAbs_FACE)
+                    r.generated.emplace_back(ex.Current(), g);
     }
     catch (const Standard_Failure& e)
     {
@@ -209,11 +219,12 @@ FeatureResult booleanOperation(BooleanKind kind, const TopoDS_Shape& a, const To
     try
     {
         // Os construtores executam a operação; o estado é verificado antes de usar o resultado.
-        auto take = [&raw](BRepAlgoAPI_BooleanOperation& op) {
+        auto take = [&raw, &r](BRepAlgoAPI_BooleanOperation& op) {
             if (!op.IsDone() || op.HasErrors())
                 return false;
             op.SimplifyResult(); // unifica faces/arestas coplanares criadas pela operação
             raw = op.Shape();
+            r.history = op.History(); // inclui a simplificação
             return true;
         };
         bool done = false;
@@ -342,6 +353,20 @@ FeatureResult finishEdges(const TopoDS_Shape& solid, const std::vector<TopoDS_Ed
             return r;
         }
         r.shape = builder.Shape();
+        // Histórico das faces (modificadas/removidas) e faces criadas a partir das arestas.
+        r.history = new BRepTools_History();
+        for (TopExp_Explorer ex(solid, TopAbs_FACE); ex.More(); ex.Next())
+        {
+            if (builder.IsDeleted(ex.Current()))
+                r.history->Remove(ex.Current());
+            for (const TopoDS_Shape& m : builder.Modified(ex.Current()))
+                if (m.ShapeType() == TopAbs_FACE && !m.IsSame(ex.Current()))
+                    r.history->AddModified(ex.Current(), m);
+        }
+        for (const TopoDS_Edge& e : edges)
+            for (const TopoDS_Shape& g : builder.Generated(e))
+                if (g.ShapeType() == TopAbs_FACE)
+                    r.generated.emplace_back(e, g);
     }
     catch (const Standard_Failure& e)
     {

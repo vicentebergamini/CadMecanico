@@ -88,9 +88,38 @@ ExtrusionDialog::ExtrusionDialog(const ExtrudeParameters& initial, const QString
 
     m_end = new QComboBox;
     m_end->setObjectName("campoCondicaoFinal");
-    m_end->addItem(tr("Profundidade definida"), int(EndCondition::Blind));
-    m_end->addItem(tr("Atravessar tudo"), int(EndCondition::ThroughAll));
+    for (EndCondition c : {EndCondition::Blind, EndCondition::MidPlane, EndCondition::ThroughAll,
+                           EndCondition::ThroughAllBoth, EndCondition::UpToNext, EndCondition::UpToFace})
+        m_end->addItem(tr(cad::document::endConditionLabel(c)), int(c));
     m_end->setCurrentIndex(m_end->findData(int(initial.endCondition)));
+
+    // Até a face: face limite escolhida no visualizador (o diálogo é reaberto em seguida).
+    m_limitFace = new QLabel(initial.limitBodyId.empty()
+                                 ? tr("(nenhuma — selecione no visualizador)")
+                                 : tr("%1 de %2").arg(QString::fromStdString(initial.limitFace.name),
+                                                       QString::fromStdString(initial.limitBodyId)));
+    m_limitFace->setObjectName("rotuloFaceLimite");
+    m_limitFace->setWordWrap(true);
+    m_pickLimit = new QPushButton(tr("Selecionar no visualizador..."));
+    m_pickLimit->setObjectName("botaoSelecionarFaceLimite");
+    connect(m_pickLimit, &QPushButton::clicked, this, [this] { done(kPickLimitFace); });
+
+    // Direção 2: extensão adicional no sentido oposto, com condição própria.
+    m_direction2 = new QCheckBox(tr("Direção 2 (sentido oposto)"));
+    m_direction2->setObjectName("opcaoDirecao2");
+    m_direction2->setChecked(initial.direction2);
+    m_end2 = new QComboBox;
+    m_end2->setObjectName("campoCondicaoFinal2");
+    for (EndCondition c : {EndCondition::Blind, EndCondition::ThroughAll})
+        m_end2->addItem(tr(cad::document::endConditionLabel(c)), int(c));
+    m_end2->setCurrentIndex(m_end2->findData(int(initial.endCondition2)));
+    m_depth2 = new QDoubleSpinBox;
+    m_depth2->setObjectName("campoProfundidade2");
+    m_depth2->setRange(-CadDocument::kMaxExtrudeDepth, CadDocument::kMaxExtrudeDepth);
+    m_depth2->setDecimals(2);
+    m_depth2->setSuffix(tr(" mm"));
+    m_depth2->setKeyboardTracking(false);
+    m_depth2->setValue(initial.depth2);
 
     m_depth = new QDoubleSpinBox;
     m_depth->setObjectName("campoProfundidade");
@@ -125,9 +154,14 @@ ExtrusionDialog::ExtrusionDialog(const ExtrudeParameters& initial, const QString
     form->addRow(QString(), m_merge);
     form->addRow(tr("Corpo de destino:"), m_target);
     form->addRow(tr("Condição final:"), m_end);
+    form->addRow(tr("Face limite:"), m_limitFace);
+    form->addRow(QString(), m_pickLimit);
     form->addRow(tr("Profundidade:"), m_depth);
     form->addRow(QString(), m_reversed);
     form->addRow(QString(), m_outside);
+    form->addRow(QString(), m_direction2);
+    form->addRow(tr("Condição da direção 2:"), m_end2);
+    form->addRow(tr("Profundidade da direção 2:"), m_depth2);
     form->addRow(QString(), m_preview);
 
     m_buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
@@ -156,7 +190,19 @@ ExtrusionDialog::ExtrusionDialog(const ExtrudeParameters& initial, const QString
     });
     connect(m_outside, &QCheckBox::toggled, this, &ExtrusionDialog::evaluate);
     connect(m_target, &QComboBox::currentIndexChanged, this, &ExtrusionDialog::evaluate);
-    connect(m_end, &QComboBox::currentIndexChanged, this, &ExtrusionDialog::evaluate);
+    connect(m_end, &QComboBox::currentIndexChanged, this, [this] {
+        updateWidgets();
+        evaluate();
+    });
+    connect(m_direction2, &QCheckBox::toggled, this, [this] {
+        updateWidgets();
+        evaluate();
+    });
+    connect(m_end2, &QComboBox::currentIndexChanged, this, [this] {
+        updateWidgets();
+        evaluate();
+    });
+    connect(m_depth2, &QDoubleSpinBox::valueChanged, this, &ExtrusionDialog::evaluate);
     connect(m_depth, &QDoubleSpinBox::valueChanged, this, &ExtrusionDialog::evaluate);
     connect(m_reversed, &QCheckBox::toggled, this, &ExtrusionDialog::evaluate);
     connect(m_preview, &QCheckBox::toggled, this, &ExtrusionDialog::evaluate);
@@ -174,6 +220,16 @@ void ExtrusionDialog::setMode(ExtrudeMode mode)
     m_mode->setCurrentIndex(m_mode->findData(int(mode)));
 }
 
+void ExtrusionDialog::setLimitFace(const std::string& bodyId, const cad::modeling::FaceSignature& face,
+                                   const QString& description)
+{
+    m_initial.limitBodyId = bodyId;
+    m_initial.limitFace = face;
+    m_limitFace->setText(description);
+    m_end->setCurrentIndex(m_end->findData(int(EndCondition::UpToFace)));
+    evaluate();
+}
+
 void ExtrusionDialog::updateWidgets()
 {
     m_updating = true;
@@ -186,12 +242,44 @@ void ExtrusionDialog::updateWidgets()
     }
     m_merge->setEnabled(!cut && m_target->count() > 0);
     m_target->setEnabled(m != ExtrudeMode::NewBody);
-    m_outside->setEnabled(cut);
-    // Atravessar tudo exige o corpo de destino (corte).
+    // Condições que dependem do corpo de destino ficam indisponíveis no novo corpo.
+    const bool hasTarget = m != ExtrudeMode::NewBody;
     if (auto* model = qobject_cast<QStandardItemModel*>(m_end->model()))
-        model->item(m_end->findData(int(EndCondition::ThroughAll)))->setEnabled(cut);
-    if (!cut && m_end->currentData().toInt() == int(EndCondition::ThroughAll))
+        for (EndCondition c : {EndCondition::ThroughAll, EndCondition::ThroughAllBoth, EndCondition::UpToNext})
+            model->item(m_end->findData(int(c)))->setEnabled(hasTarget);
+    const auto end = EndCondition(m_end->currentData().toInt());
+    if (!hasTarget && (end == EndCondition::ThroughAll || end == EndCondition::ThroughAllBoth || end == EndCondition::UpToNext))
+    {
+        const QSignalBlocker block(m_end);
         m_end->setCurrentIndex(m_end->findData(int(EndCondition::Blind)));
+    }
+    const auto current = EndCondition(m_end->currentData().toInt());
+    const bool prismatic = current == EndCondition::Blind || current == EndCondition::MidPlane
+                           || current == EndCondition::ThroughAll || current == EndCondition::ThroughAllBoth;
+    m_outside->setEnabled(cut && prismatic);
+    if (!m_outside->isEnabled())
+    {
+        const QSignalBlocker block(m_outside);
+        m_outside->setChecked(false);
+    }
+    m_limitFace->setEnabled(current == EndCondition::UpToFace);
+    m_pickLimit->setEnabled(current == EndCondition::UpToFace);
+    const bool dir2Allowed = current != EndCondition::MidPlane && current != EndCondition::ThroughAllBoth;
+    m_direction2->setEnabled(dir2Allowed);
+    if (!dir2Allowed)
+    {
+        const QSignalBlocker block(m_direction2);
+        m_direction2->setChecked(false);
+    }
+    if (auto* model = qobject_cast<QStandardItemModel*>(m_end2->model()))
+        model->item(m_end2->findData(int(EndCondition::ThroughAll)))->setEnabled(hasTarget);
+    if (!hasTarget && m_end2->currentData().toInt() == int(EndCondition::ThroughAll))
+    {
+        const QSignalBlocker block(m_end2);
+        m_end2->setCurrentIndex(m_end2->findData(int(EndCondition::Blind)));
+    }
+    m_end2->setEnabled(m_direction2->isChecked());
+    m_depth2->setEnabled(m_direction2->isChecked() && m_end2->currentData().toInt() == int(EndCondition::Blind));
     m_reversed->setText(cut ? tr("Inverter sentido (para fora da face)") : tr("Inverter sentido (oposto à normal do plano)"));
     m_direction->setText(cut ? tr("Sentido do corte: para dentro da face (oposto à normal do plano do esboço). "
                                   "A região removida aparece em vermelho.")
@@ -215,6 +303,9 @@ ExtrudeParameters ExtrusionDialog::parameters() const
     p.targetId = p.mode == ExtrudeMode::NewBody ? std::string() : m_target->currentData().toString().toStdString();
     p.endCondition = EndCondition(m_end->currentData().toInt());
     p.cutOutside = p.mode == ExtrudeMode::Cut && m_outside->isChecked();
+    p.direction2 = m_direction2->isChecked();
+    p.endCondition2 = EndCondition(m_end2->currentData().toInt());
+    p.depth2 = m_depth2->value();
     return p;
 }
 
@@ -233,7 +324,7 @@ void ExtrusionDialog::evaluate()
     if (m_updating)
         return;
     const ExtrudeParameters p = parameters();
-    m_depth->setEnabled(p.endCondition != EndCondition::ThroughAll);
+    m_depth->setEnabled(p.endCondition == EndCondition::Blind || p.endCondition == EndCondition::MidPlane);
     const cad::modeling::FeatureResult r = m_evaluator ? m_evaluator(p) : cad::modeling::FeatureResult();
     m_lastOk = r.ok;
     if (r.ok)

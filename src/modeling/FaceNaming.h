@@ -35,6 +35,7 @@ struct FaceSignature
     double offset = 0;  // N · P (mm)
     gp_Pnt centroid;
     double area = 0.0;
+    std::string name;   // nome topológico (E5.7.1, ver TopoNaming); vazio = só geometria
 };
 
 struct FaceMatch

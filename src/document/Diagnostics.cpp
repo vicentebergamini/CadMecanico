@@ -81,6 +81,29 @@ FailureExplanation explainFailure(OperationType type, const std::string& message
 std::vector<Diagnostic> diagnose(const CadDocument& document)
 {
     std::vector<Diagnostic> list;
+    // Avisos (E5.7.1): referência encontrada pela geometria e não pelo nome topológico.
+    auto geometricNote = [&list](const std::string& id, const std::string& name, const std::string& note) {
+        Diagnostic d;
+        d.severity = DiagnosticSeverity::Warning;
+        d.itemId = id;
+        d.itemName = name;
+        d.description = capitalized(note) + ".";
+        d.cause = "O nome topológico da face/aresta não existe mais no corpo reconstruído; a referência foi "
+                  "identificada pela geometria (mesmo plano ou mesma posição, sem ambiguidade).";
+        d.guidance = "Confira se a face/aresta usada é a desejada; se não for, edite a operação ou o esboço e "
+                     "selecione-a novamente.";
+        d.state = "Válida com aviso";
+        list.push_back(d);
+    };
+    for (const Operation& op : document.operations())
+        if (op.status == OperationStatus::Valid)
+            for (const std::string& note : op.notes)
+                geometricNote(op.id, op.name, note);
+    for (const SketchIssue& note : document.sketchNotes())
+    {
+        const cad::sketch::Sketch* s = document.findSketch(note.sketchId);
+        geometricNote(note.sketchId, s ? s->name() : note.sketchId, note.message);
+    }
     for (const Operation& op : document.operations())
     {
         if (op.status != OperationStatus::Invalid)

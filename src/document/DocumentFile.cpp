@@ -52,6 +52,15 @@ QJsonObject edgeToJson(const cad::modeling::EdgeSignature& s)
     };
 }
 
+// Referência de aresta com o nome topológico (esquema 9), quando houver.
+QJsonObject edgeRefToJson(const cad::modeling::EdgeSignature& s)
+{
+    QJsonObject o = edgeToJson(s);
+    if (!s.name.empty())
+        o.insert("name", QString::fromStdString(s.name));
+    return o;
+}
+
 bool readVec3(const QJsonValue& v, double out[3])
 {
     if (!v.isArray() || v.toArray().size() != 3)
@@ -67,7 +76,7 @@ bool readVec3(const QJsonValue& v, double out[3])
 }
 
 // Referência persistente de aresta (assinatura geométrica, ver EdgeNaming).
-bool readEdge(const QJsonValue& value, cad::modeling::EdgeSignature& s, QString& message)
+bool readEdge(const QJsonValue& value, cad::modeling::EdgeSignature& s, QString& message, int schema)
 {
     if (!value.isObject())
     {
@@ -75,7 +84,9 @@ bool readEdge(const QJsonValue& value, cad::modeling::EdgeSignature& s, QString&
         return false;
     }
     const QJsonObject o = value.toObject();
-    const QStringList allowed{"curve", "mid", "direction", "length", "radius", "normals"};
+    QStringList allowed{"curve", "mid", "direction", "length", "radius", "normals"};
+    if (schema >= 9)
+        allowed << "name"; // nome topológico (E5.7.1)
     for (auto it = o.begin(); it != o.end(); ++it)
         if (!allowed.contains(it.key()))
         {
@@ -131,7 +142,46 @@ bool readEdge(const QJsonValue& value, cad::modeling::EdgeSignature& s, QString&
         }
         s.normals.emplace_back(d[0], d[1], d[2]);
     }
+    s.name.clear();
+    if (o.contains("name"))
+    {
+        if (!o.value("name").isString() || o.value("name").toString().size() > 1000)
+        {
+            message = QStringLiteral("nome topológico da aresta inválido");
+            return false;
+        }
+        s.name = o.value("name").toString().toStdString();
+    }
     return true;
+}
+
+// Condição final no arquivo (esquema 7: blind/throughAll; esquema 9: demais condições da P5).
+const char* endConditionName(EndCondition c)
+{
+    switch (c)
+    {
+    case EndCondition::Blind:          return "blind";
+    case EndCondition::ThroughAll:     return "throughAll";
+    case EndCondition::ThroughAllBoth: return "throughAllBoth";
+    case EndCondition::UpToNext:       return "upToNext";
+    case EndCondition::UpToFace:       return "upToFace";
+    case EndCondition::MidPlane:       return "midPlane";
+    }
+    return "blind";
+}
+
+bool parseEndCondition(const QString& text, int schema, EndCondition& out)
+{
+    for (EndCondition c : {EndCondition::Blind, EndCondition::ThroughAll, EndCondition::ThroughAllBoth,
+                           EndCondition::UpToNext, EndCondition::UpToFace, EndCondition::MidPlane})
+        if (text == QLatin1String(endConditionName(c)))
+        {
+            if (schema < 9 && c != EndCondition::Blind && c != EndCondition::ThroughAll)
+                return false;
+            out = c;
+            return true;
+        }
+    return false;
 }
 
 const char* booleanName(BooleanKind k)
@@ -210,9 +260,42 @@ bool readXYZ(const QJsonValue& v, gp_XYZ& out, bool unit)
     return !unit || out.Modulus() > 1e-9;
 }
 
+// Assinatura de face plana (esquema 7: normal, offset, centroid, area; esquema 9: + name).
+bool readFace(const QJsonValue& value, cad::modeling::FaceSignature& face, int schema)
+{
+    if (!value.isObject())
+        return false;
+    const QJsonObject f = value.toObject();
+    const bool named = schema >= 9 && f.contains("name");
+    gp_XYZ normal, centroid;
+    if (!readXYZ(f.value("normal"), normal, true) || !readXYZ(f.value("centroid"), centroid, false)
+        || !f.value("offset").isDouble() || !std::isfinite(f.value("offset").toDouble()) || !f.value("area").isDouble()
+        || !(f.value("area").toDouble() > 0.0) || f.size() != (named ? 5 : 4))
+        return false;
+    if (named && (!f.value("name").isString() || f.value("name").toString().size() > 1000))
+        return false;
+    face.normal = gp_Dir(normal);
+    face.centroid = gp_Pnt(centroid);
+    face.offset = f.value("offset").toDouble();
+    face.area = f.value("area").toDouble();
+    face.name = named ? f.value("name").toString().toStdString() : std::string();
+    return true;
+}
+
+QJsonObject faceToJson(const cad::modeling::FaceSignature& face)
+{
+    QJsonObject o{{"normal", dir3(face.normal.XYZ())},
+                  {"offset", face.offset},
+                  {"centroid", dir3(face.centroid.XYZ())},
+                  {"area", face.area}};
+    if (!face.name.empty())
+        o.insert("name", QString::fromStdString(face.name));
+    return o;
+}
+
 // Suporte de esboço sobre face (esquema 7): corpo, assinatura da face e sistema local.
 bool readSupport(const QJsonValue& value, cad::sketch::SketchSupport& support, cad::sketch::SketchPlane& plane,
-                 QString& message)
+                 int schema, QString& message)
 {
     if (!value.isObject())
     {
@@ -232,11 +315,8 @@ bool readSupport(const QJsonValue& value, cad::sketch::SketchSupport& support, c
         return false;
     }
     support.bodyId = o.value("bodyId").toString().toStdString();
-    const QJsonObject f = o.value("face").toObject();
-    gp_XYZ normal, centroid, origin, xAxis, frameNormal;
-    if (!o.value("face").isObject() || !readXYZ(f.value("normal"), normal, true) || !readXYZ(f.value("centroid"), centroid, false)
-        || !f.value("offset").isDouble() || !std::isfinite(f.value("offset").toDouble()) || !f.value("area").isDouble()
-        || !(f.value("area").toDouble() > 0.0) || f.size() != 4)
+    gp_XYZ origin, xAxis, frameNormal;
+    if (!readFace(o.value("face"), support.face, schema))
     {
         message = QStringLiteral("assinatura da face de suporte inválida");
         return false;
@@ -249,10 +329,6 @@ bool readSupport(const QJsonValue& value, cad::sketch::SketchSupport& support, c
         message = QStringLiteral("sistema local do esboço inválido");
         return false;
     }
-    support.face.normal = gp_Dir(normal);
-    support.face.centroid = gp_Pnt(centroid);
-    support.face.offset = f.value("offset").toDouble();
-    support.face.area = f.value("area").toDouble();
     plane = cad::sketch::SketchPlane::fromFrame(gp_Pnt(origin), gp_Dir(frameNormal), gp_Dir(xAxis));
     return true;
 }
@@ -300,7 +376,7 @@ bool readSketch(const QJsonValue& value, int index, int schema, cad::sketch::Ske
     {
         SketchSupport s;
         QString m;
-        if (!readSupport(o.value("support"), s, facePlane, m))
+        if (!readSupport(o.value("support"), s, facePlane, schema, m))
         {
             message = where + QStringLiteral(": ") + m;
             return false;
@@ -538,10 +614,7 @@ QJsonObject sketchToJson(const cad::sketch::Sketch& sketch)
         const SketchPlane& p = sketch.plane();
         result.insert("support",
                       QJsonObject{{"bodyId", QString::fromStdString(s->bodyId)},
-                                  {"face", QJsonObject{{"normal", dir3(s->face.normal.XYZ())},
-                                                       {"offset", s->face.offset},
-                                                       {"centroid", dir3(s->face.centroid.XYZ())},
-                                                       {"area", s->face.area}}},
+                                  {"face", faceToJson(s->face)},
                                   {"frame", QJsonObject{{"origin", dir3(p.origin().XYZ())},
                                                         {"xAxis", dir3(p.horizontalAxis().XYZ())},
                                                         {"normal", dir3(p.normal().XYZ())}}}});
@@ -583,7 +656,7 @@ QByteArray DocumentFile::toJson(const CadDocument& document)
             o.insert("sourceId", QString::fromStdString(op.sourceId));
             QJsonArray edges;
             for (const auto& e : op.edges)
-                edges.append(edgeToJson(e));
+                edges.append(edgeRefToJson(e));
             o.insert("edges", edges);
             if (op.type == OperationType::Chamfer3D)
             {
@@ -608,7 +681,13 @@ QByteArray DocumentFile::toJson(const CadDocument& document)
                                                                                       : "newBody"));
             if (op.extrudeMode != ExtrudeMode::NewBody)
                 o.insert("targetId", QString::fromStdString(op.targetId));
-            o.insert("endCondition", QString::fromLatin1(op.endCondition == EndCondition::ThroughAll ? "throughAll" : "blind"));
+            o.insert("endCondition", QString::fromLatin1(endConditionName(op.endCondition)));
+            if (op.direction2)
+                o.insert("direction2", QJsonObject{{"endCondition", QString::fromLatin1(endConditionName(op.endCondition2))},
+                                                   {"depth", op.parameter("depth2")}});
+            if (op.endCondition == EndCondition::UpToFace)
+                o.insert("limitFace", QJsonObject{{"bodyId", QString::fromStdString(op.limitBodyId)},
+                                                  {"face", faceToJson(op.limitFace)}});
             if (op.extrudeMode == ExtrudeMode::Cut)
                 o.insert("cutOutside", op.cutOutside);
         }
@@ -759,6 +838,8 @@ FileResult DocumentFile::fromJson(const QByteArray& json, CadDocument& out, bool
         }
         if (schema >= 8 && !isBoolean && !isFinish)
             allowed << "cutOutside"; // esquema 8: corte do lado de fora do perfil
+        if (schema >= 9 && !isBoolean && !isFinish)
+            allowed << "direction2" << "limitFace"; // esquema 9: condições avançadas (P5)
         for (auto it = op.begin(); it != op.end(); ++it)
             if (!allowed.contains(it.key()))
                 return error(QStringLiteral("Operação %1: campo desconhecido \"%2\"").arg(i + 1).arg(it.key()));
@@ -844,7 +925,7 @@ FileResult DocumentFile::fromJson(const QByteArray& json, CadDocument& out, bool
             for (const QJsonValue& ev : op.value("edges").toArray())
             {
                 cad::modeling::EdgeSignature s;
-                if (!readEdge(ev, s, message))
+                if (!readEdge(ev, s, message, schema))
                     return error(QStringLiteral("Operação %1: %2").arg(i + 1).arg(message));
                 f.edges.push_back(s);
             }
@@ -871,13 +952,10 @@ FileResult DocumentFile::fromJson(const QByteArray& json, CadDocument& out, bool
                 e.extrudeMode = ExtrudeMode::Cut;
             else
                 return error(QStringLiteral("Operação %1: campo \"mode\" da extrusão inválido (newBody, boss ou cut)").arg(i + 1));
-            const QString end = op.value("endCondition").toString();
-            if (end == QLatin1String("blind"))
-                e.endCondition = EndCondition::Blind;
-            else if (end == QLatin1String("throughAll"))
-                e.endCondition = EndCondition::ThroughAll;
-            else
-                return error(QStringLiteral("Operação %1: campo \"endCondition\" inválido (blind ou throughAll)").arg(i + 1));
+            if (!parseEndCondition(op.value("endCondition").toString(), schema, e.endCondition))
+                return error(schema >= 9 ? QStringLiteral("Operação %1: campo \"endCondition\" inválido (blind, midPlane, throughAll, "
+                                                         "throughAllBoth, upToNext ou upToFace)").arg(i + 1)
+                                         : QStringLiteral("Operação %1: campo \"endCondition\" inválido (blind ou throughAll)").arg(i + 1));
             if (e.extrudeMode == ExtrudeMode::NewBody)
             {
                 if (op.contains("targetId"))
@@ -895,12 +973,39 @@ FileResult DocumentFile::fromJson(const QByteArray& json, CadDocument& out, bool
                 return error(QStringLiteral("Operação %1: \"cutOutside\" só se aplica ao corte").arg(i + 1));
             e.cutOutside = op.value("cutOutside").toBool();
         }
+        double depth2 = 0.0;
+        if (op.contains("direction2"))
+        {
+            // Esquema 9: direção 2 = condição (blind ou throughAll) e profundidade.
+            const QJsonObject d2 = op.value("direction2").toObject();
+            if (!op.value("direction2").isObject() || d2.size() != 2
+                || !parseEndCondition(d2.value("endCondition").toString(), schema, e.endCondition2)
+                || (e.endCondition2 != EndCondition::Blind && e.endCondition2 != EndCondition::ThroughAll)
+                || !d2.value("depth").isDouble() || !std::isfinite(d2.value("depth").toDouble()))
+                return error(QStringLiteral("Operação %1: campo \"direction2\" inválido").arg(i + 1));
+            e.direction2 = true;
+            depth2 = d2.value("depth").toDouble();
+        }
+        if (e.endCondition == EndCondition::UpToFace)
+        {
+            // Esquema 9: face limite = corpo + referência persistente (assinatura e nome).
+            const QJsonObject lf = op.value("limitFace").toObject();
+            if (!op.value("limitFace").isObject() || lf.size() != 2 || !lf.value("bodyId").isString()
+                || !isValidIdentifier(lf.value("bodyId").toString().toStdString())
+                || !readFace(lf.value("face"), e.limitFace, schema))
+                return error(QStringLiteral("Operação %1: face limite (\"limitFace\") ausente ou inválida").arg(i + 1));
+            e.limitBodyId = lf.value("bodyId").toString().toStdString();
+        }
+        else if (op.contains("limitFace"))
+            return error(QStringLiteral("Operação %1: \"limitFace\" só se aplica a \"upToFace\"").arg(i + 1));
         e.id = id.toString().toStdString();
         e.type = OperationType::Extrude;
         e.name = op.value("name").toString().toStdString();
         e.sketchId = op.value("sketchId").toString().toStdString();
         e.reversed = op.value("reversed").toBool();
         e.parameters = {{"depth", values[0]}};
+        if (e.direction2)
+            e.parameters.push_back({"depth2", depth2});
         data.features.push_back(e);
     }
 

@@ -3,8 +3,13 @@
 #include "modeling/Features.h"
 #include "modeling/ShapeInspector.h"
 #include "sketch/SketchProfile.h"
+#include "sketch/SketchShapes.h"
 
+#include <BRepAdaptor_Curve.hxx>
+#include <BRepBuilderAPI_MakeVertex.hxx>
+#include <BRepExtrema_DistShapeShape.hxx>
 #include <BRep_Builder.hxx>
+#include <BRep_Tool.hxx>
 #include <BRepBndLib.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <gp_Ax3.hxx>
@@ -14,8 +19,15 @@
 #include <TopExp_Explorer.hxx>
 #include <TopoDS_Compound.hxx>
 
+#include <Standard_Failure.hxx>
+#include <TopLoc_Location.hxx>
+#include <TopoDS_Vertex.hxx>
+#include <gp_Trsf.hxx>
+
 #include <algorithm>
+#include <functional>
 #include <cmath>
+#include <iterator>
 #include <set>
 #include <sstream>
 
@@ -123,7 +135,7 @@ CadDocument CadDocument::withTestPart(std::string name, const PartParameters& pa
         p = PartParameters(); // nunca deixa o exemplo sem geometria válida
     doc.m_operations = makeOperations(p, kDefaultBlockId, kDefaultHoleId);
     std::string error;
-    rebuild(doc.m_operations, doc.m_sketches, doc.m_shape, error);
+    rebuild(doc.m_operations, doc.m_sketches, doc.m_shape, error, &doc.m_log);
     doc.m_nextOperationNumber = 3;
     ++doc.m_revision;
     return doc;
@@ -159,25 +171,62 @@ ValidationResult CadDocument::validateExtrude(const ExtrudeParameters& p)
 {
     if (p.mode != ExtrudeMode::NewBody && p.targetId.empty())
         return fail("targetId", "Selecione o corpo de destino da extrusão");
-    if (p.endCondition == EndCondition::ThroughAll && p.mode != ExtrudeMode::Cut)
-        return fail("endCondition", "\"Atravessar tudo\" só se aplica à Extrusão de Corte");
-    if (p.cutOutside && p.mode != ExtrudeMode::Cut)
-        return fail("cutOutside", "\"Cortar o lado de fora\" só se aplica à remoção de material (corte)");
-    if (p.endCondition == EndCondition::ThroughAll)
-    {
-        if (trim(p.name).size() > kMaxNameLength)
-            return fail("name", "Nome longo demais");
-        return {}; // a extensão é calculada a partir do corpo de destino
-    }
-    if (!std::isfinite(p.depth))
-        return fail("depth", "Profundidade: valor não numérico");
-    if (p.depth < kMinExtrudeDepth)
-        return fail("depth", "A profundidade deve ser maior que zero (mínimo " + mm(kMinExtrudeDepth) + ")");
-    if (p.depth > kMaxExtrudeDepth)
-        return fail("depth", "A profundidade deve ser no máximo " + mm(kMaxExtrudeDepth));
     if (trim(p.name).size() > kMaxNameLength)
         return fail("name", "Nome longo demais");
+    const EndCondition end = p.endCondition;
+    // Condições que dependem do corpo de destino (extensão calculada a partir dele).
+    const bool needsTarget = end == EndCondition::ThroughAll || end == EndCondition::ThroughAllBoth
+                             || end == EndCondition::UpToNext;
+    if (needsTarget && p.mode == ExtrudeMode::NewBody)
+        return fail("endCondition", std::string("\"") + endConditionLabel(end)
+                                        + "\" depende do corpo de destino: use adicionar ou remover material");
+    if (end == EndCondition::UpToFace && p.limitBodyId.empty())
+        return fail("limitFace", "Selecione a face limite de \"Até a face\"");
+    const bool prismatic = end == EndCondition::Blind || end == EndCondition::MidPlane
+                           || end == EndCondition::ThroughAll || end == EndCondition::ThroughAllBoth;
+    if (p.cutOutside && p.mode != ExtrudeMode::Cut)
+        return fail("cutOutside", "\"Cortar o lado de fora\" só se aplica à remoção de material (corte)");
+    if (p.cutOutside && !prismatic)
+        return fail("cutOutside", std::string("\"Cortar o lado de fora\" não se aplica a \"") + endConditionLabel(end) + "\"");
+    auto checkDepth = [](double depth, const char* field, const char* label) -> ValidationResult {
+        if (!std::isfinite(depth))
+            return fail(field, std::string(label) + ": valor não numérico");
+        if (depth < kMinExtrudeDepth)
+            return fail(field, std::string(label) + " deve ser maior que zero (mínimo " + mm(kMinExtrudeDepth) + ")");
+        if (depth > kMaxExtrudeDepth)
+            return fail(field, std::string(label) + " deve ser no máximo " + mm(kMaxExtrudeDepth));
+        return {};
+    };
+    if (end == EndCondition::Blind || end == EndCondition::MidPlane)
+        if (const ValidationResult v = checkDepth(p.depth, "depth", "A profundidade"); !v.ok)
+            return v;
+    if (p.direction2)
+    {
+        if (end == EndCondition::MidPlane || end == EndCondition::ThroughAllBoth)
+            return fail("direction2", std::string("A direção 2 não se aplica a \"") + endConditionLabel(end) + "\"");
+        if (p.endCondition2 != EndCondition::Blind && p.endCondition2 != EndCondition::ThroughAll)
+            return fail("direction2", "Direção 2: use profundidade definida ou atravessar tudo");
+        if (p.endCondition2 == EndCondition::ThroughAll && p.mode == ExtrudeMode::NewBody)
+            return fail("direction2", "Direção 2: \"Atravessar tudo\" depende do corpo de destino");
+        if (p.endCondition2 == EndCondition::Blind)
+            if (const ValidationResult v = checkDepth(p.depth2, "depth2", "A profundidade da direção 2"); !v.ok)
+                return v;
+    }
     return {};
+}
+
+const char* endConditionLabel(EndCondition condition)
+{
+    switch (condition)
+    {
+    case EndCondition::Blind:          return "Profundidade definida";
+    case EndCondition::ThroughAll:     return "Atravessar tudo";
+    case EndCondition::ThroughAllBoth: return "Atravessar tudo (dois sentidos)";
+    case EndCondition::UpToNext:       return "Até a próxima face";
+    case EndCondition::UpToFace:       return "Até a face";
+    case EndCondition::MidPlane:       return "Plano médio";
+    }
+    return "";
 }
 
 bool CadDocument::fromData(const Data& data, CadDocument& out, std::string& error, bool allowInvalid)
@@ -307,7 +356,7 @@ bool CadDocument::fromData(const Data& data, CadDocument& out, std::string& erro
 
     TopoDS_Shape shape;
     std::vector<cad::sketch::Sketch> sketches = data.sketches;
-    std::vector<SketchIssue> issues;
+    RebuildLog log;
     if (allowInvalid)
     {
         // Referências estruturais continuam obrigatórias; falhas geométricas ficam registradas
@@ -316,14 +365,14 @@ bool CadDocument::fromData(const Data& data, CadDocument& out, std::string& erro
         if (!checkReferences(check, error))
             return false;
         std::string rebuildError;
-        rebuild(ops, sketches, shape, rebuildError, &issues);
+        rebuild(ops, sketches, shape, rebuildError, &log, true);
     }
-    else if (!rebuild(ops, sketches, shape, error))
+    else if (!rebuild(ops, sketches, shape, error, &log))
         return false;
 
     CadDocument doc(data.name);
     doc.m_operations = std::move(ops);
-    doc.m_sketchIssues = std::move(issues);
+    doc.m_log = std::move(log);
     doc.m_shape = shape;
     doc.m_revision = doc.m_operations.empty() ? 0 : 1;
     doc.m_sketches = std::move(sketches); // planes dos esboços sobre faces reconstruídos
@@ -399,13 +448,13 @@ bool CadDocument::commitSketch(const cad::sketch::Sketch& sketch, std::string& e
         std::vector<Operation> ops = m_operations;
         TopoDS_Shape shape;
         std::string rebuildError;
-        std::vector<SketchIssue> issues;
-        if (!rebuildForCommit(ops, sketches, shape, rebuildError, issues))
+        RebuildLog log;
+        if (!rebuildForCommit(ops, sketches, shape, rebuildError, log))
         {
             error = "A alteração do esboço invalida uma operação dependente: " + rebuildError;
             return false;
         }
-        m_sketchIssues = std::move(issues);
+        m_log = std::move(log);
         m_sketches = std::move(sketches);
         commit(std::move(ops), shape);
     }
@@ -516,10 +565,10 @@ ValidationResult CadDocument::setParameters(const PartParameters& parameters)
     TopoDS_Shape shape;
     std::string error;
     std::vector<cad::sketch::Sketch> sketches = m_sketches;
-    std::vector<SketchIssue> issues;
-    if (!rebuildForCommit(ops, sketches, shape, error, issues))
+    RebuildLog log;
+    if (!rebuildForCommit(ops, sketches, shape, error, log))
         return ValidationResult{false, "", error};
-    m_sketchIssues = std::move(issues);
+    m_log = std::move(log);
     commit(std::move(ops), std::move(sketches), shape);
     return {};
 }
@@ -551,6 +600,36 @@ std::string CadDocument::defaultExtrusionName(ExtrudeMode mode) const
     return "Extrusão " + std::to_string(n);
 }
 
+bool CadDocument::extrusionInput(const ExtrudeParameters& p, const std::string& editingId, ExtrusionInput& input,
+                                 std::string& error, bool checkConsumed) const
+{
+    input = ExtrusionInput();
+    input.opId = editingId.empty() ? "op-" + std::to_string(m_nextOperationNumber) : editingId;
+    if (p.mode != ExtrudeMode::NewBody)
+    {
+        const Operation* t = findOperation(p.targetId);
+        if (!t || !producesBody(t->type))
+        {
+            error = "Corpo de destino inexistente: " + p.targetId;
+            return false;
+        }
+        if (checkConsumed && !t->consumedBy.empty() && t->consumedBy != editingId)
+        {
+            error = "O corpo " + t->id + " já foi usado por " + t->consumedBy;
+            return false;
+        }
+        input.target = t->result;
+        input.targetNames = &t->faceNames;
+    }
+    if (p.endCondition == EndCondition::UpToFace)
+    {
+        input.limitFace = resolveFaceReference(p.limitBodyId, p.limitFace, &error);
+        if (input.limitFace.IsNull())
+            return false;
+    }
+    return true;
+}
+
 cad::modeling::FeatureResult CadDocument::previewExtrusion(const ExtrudeParameters& parameters,
                                                            const std::string& editingId) const
 {
@@ -567,23 +646,10 @@ cad::modeling::FeatureResult CadDocument::previewExtrusion(const ExtrudeParamete
         r.message = "Esboço de origem inexistente: " + parameters.sketchId;
         return r;
     }
-    TopoDS_Shape target;
-    if (parameters.mode != ExtrudeMode::NewBody)
-    {
-        const Operation* t = findOperation(parameters.targetId);
-        if (!t || !producesBody(t->type))
-        {
-            r.message = "Corpo de destino inexistente: " + parameters.targetId;
-            return r;
-        }
-        if (!t->consumedBy.empty() && t->consumedBy != editingId)
-        {
-            r.message = "O corpo " + t->id + " já foi usado por " + t->consumedBy;
-            return r;
-        }
-        target = t->result;
-    }
-    return computeExtrusion(parameters, *sketch, target, nullptr);
+    ExtrusionInput input;
+    if (!extrusionInput(parameters, editingId, input, r.message))
+        return r;
+    return computeExtrusion(parameters, *sketch, input, nullptr);
 }
 
 cad::modeling::FeatureResult CadDocument::extrusionTool(const ExtrudeParameters& parameters) const
@@ -595,122 +661,461 @@ cad::modeling::FeatureResult CadDocument::extrusionTool(const ExtrudeParameters&
         r.message = "Esboço de origem inexistente";
         return r;
     }
-    const Operation* t = parameters.mode == ExtrudeMode::NewBody ? nullptr : findOperation(parameters.targetId);
-    TopoDS_Shape tool;
-    ExtrudeParameters p = parameters;
-    p.mode = ExtrudeMode::NewBody; // só o prisma
-    const bool through = parameters.endCondition == EndCondition::ThroughAll;
-    if (through || (parameters.mode == ExtrudeMode::Cut && parameters.cutOutside))
-    {
-        // Mesma ferramenta usada no corte (comprimento e região externa dependem do corpo).
-        computeExtrusion(parameters, *sketch, t ? t->result : TopoDS_Shape(), &tool);
-        r.ok = !tool.IsNull();
-        r.shape = tool;
-        if (!r.ok)
-            r.message = "Ferramenta de corte indisponível";
+    ExtrusionInput input;
+    // Somente a ferramenta (pré-visualização, inclusive na edição): o destino pode estar consumido.
+    if (!extrusionInput(parameters, std::string(), input, r.message, false))
         return r;
-    }
-    if (parameters.mode == ExtrudeMode::Cut)
-        p.reversed = !p.reversed; // sentido do corte: para dentro da face
-    p.endCondition = EndCondition::Blind;
-    return computeExtrusion(p, *sketch, TopoDS_Shape(), nullptr);
+    // Mesma ferramenta usada na operação (extensões e região externa dependem do corpo e da face).
+    TopoDS_Shape tool;
+    const cad::modeling::FeatureResult full = computeExtrusion(parameters, *sketch, input, &tool);
+    r.ok = !tool.IsNull();
+    r.shape = tool;
+    if (!r.ok)
+        r.message = full.message.empty() ? "Ferramenta da extrusão indisponível" : full.message;
+    return r;
 }
 
-cad::modeling::FeatureResult CadDocument::computeExtrusion(const ExtrudeParameters& p, const cad::sketch::Sketch& sketch,
-                                                           const TopoDS_Shape& target, TopoDS_Shape* tool)
+namespace {
+
+// Rótulo de cada aresta do perfil: entidade do esboço de onde ela vem ("e-1", "e-2:3" = lado 3
+// do retângulo e-2). Comparação geométrica com as formas resolvidas das entidades.
+std::function<std::string(const TopoDS_Shape&)> profileEdgeLabels(const cad::sketch::Sketch& sketch)
 {
-    cad::modeling::FeatureResult r;
+    const auto shapes = cad::sketch::buildResolvedShapes(sketch);
+    return [shapes](const TopoDS_Shape& edge) -> std::string {
+        if (edge.IsNull() || edge.ShapeType() != TopAbs_EDGE)
+            return {};
+        try
+        {
+            BRepAdaptor_Curve c(TopoDS::Edge(edge));
+            const TopoDS_Vertex mid =
+                BRepBuilderAPI_MakeVertex(c.Value(0.5 * (c.FirstParameter() + c.LastParameter()))).Vertex();
+            for (const auto& [id, shape] : shapes)
+            {
+                if (shape.IsNull())
+                    continue;
+                int count = 0;
+                for (TopExp_Explorer ex(shape, TopAbs_EDGE); ex.More(); ex.Next())
+                    ++count;
+                int k = 0;
+                for (TopExp_Explorer ex(shape, TopAbs_EDGE); ex.More(); ex.Next(), ++k)
+                {
+                    BRepExtrema_DistShapeShape d(mid, ex.Current());
+                    if (d.IsDone() && d.Value() < 1e-5)
+                        return count > 1 ? id + ":" + std::to_string(k) : id;
+                }
+            }
+        }
+        catch (const Standard_Failure&)
+        {
+        }
+        return {};
+    };
+}
+
+// Maior projeção dos cantos da caixa sobre 'd' a partir de 'o' (−∞ para caixa vazia).
+double reach(const Bnd_Box& box, const gp_Pnt& o, const gp_Dir& d)
+{
+    if (box.IsVoid())
+        return -1e300;
+    double x0, y0, z0, x1, y1, z1;
+    box.Get(x0, y0, z0, x1, y1, z1);
+    double best = -1e300;
+    for (double x : {x0, x1})
+        for (double y : {y0, y1})
+            for (double z : {z0, z1})
+                best = std::max(best, gp_Vec(o, gp_Pnt(x, y, z)).Dot(gp_Vec(d)));
+    return best;
+}
+
+// Menor e maior distância (ao longo de 'd', a partir de 'o') dos vértices de um sólido.
+std::pair<double, double> extent(const TopoDS_Shape& s, const gp_Pnt& o, const gp_Dir& d)
+{
+    double lo = 1e300, hi = -1e300;
+    for (TopExp_Explorer ex(s, TopAbs_VERTEX); ex.More(); ex.Next())
+    {
+        const double t = gp_Vec(o, BRep_Tool::Pnt(TopoDS::Vertex(ex.Current()))).Dot(gp_Vec(d));
+        lo = std::min(lo, t);
+        hi = std::max(hi, t);
+    }
+    return {lo, hi};
+}
+
+TopoDS_Shape compoundOf(const std::vector<TopoDS_Shape>& solids)
+{
+    if (solids.size() == 1)
+        return solids.front();
+    BRep_Builder builder;
+    TopoDS_Compound compound;
+    builder.MakeCompound(compound);
+    for (const TopoDS_Shape& s : solids)
+        builder.Add(compound, s);
+    return compound;
+}
+
+} // namespace
+
+cad::modeling::FeatureResult CadDocument::computeExtrusion(const ExtrudeParameters& p, const cad::sketch::Sketch& sketch,
+                                                           const ExtrusionInput& input, TopoDS_Shape* tool,
+                                                           cad::modeling::FaceNames* names)
+{
+    using cad::modeling::FaceNames;
+    using cad::modeling::FeatureResult;
+    FeatureResult r;
     const cad::sketch::ProfileResult profile = cad::sketch::buildProfile(sketch);
     if (!profile.ok)
     {
         r.message = "perfil do " + sketch.name() + " inválido: " + profile.message;
         return r;
     }
+    const TopoDS_Shape& target = input.target;
     if (p.mode != ExtrudeMode::NewBody && target.IsNull())
     {
         r.message = "corpo de destino sem geometria (" + p.targetId + ")";
         return r;
     }
+    const std::string& op = input.opId;
+    const bool cut = p.mode == ExtrudeMode::Cut;
     // Sentido: normal do plano local do esboço (no corte, para dentro da face); invertível.
     gp_Dir dir = sketch.plane().normal();
-    if (p.mode == ExtrudeMode::Cut)
+    if (cut)
         dir.Reverse();
     if (p.reversed)
         dir.Reverse();
-    double length = p.depth;
-    if (p.mode == ExtrudeMode::Cut && p.endCondition == EndCondition::ThroughAll)
+    const gp_Pnt o = sketch.plane().origin();
+    Bnd_Box targetBox;
+    if (!target.IsNull())
+        BRepBndLib::Add(target, targetBox);
+    Bnd_Box limitBox;
+    if (!input.limitFace.IsNull())
+        BRepBndLib::Add(input.limitFace, limitBox);
+    Bnd_Box scaleBox = targetBox;
+    if (!limitBox.IsVoid())
+        scaleBox.Add(limitBox);
+    BRepBndLib::Add(profile.face, scaleBox);
+    const double diagonal = std::sqrt(scaleBox.SquareExtent());
+    const double margin = std::max(1.0, 0.01 * diagonal);
+    const double tol = 1e-6 * std::max(1.0, diagonal);
+    const char* sense = cut ? "do corte" : "da extrusão";
+
+    // 1. Extensões ao longo de 'dir' (s0 < s1), a partir do plano do esboço.
+    struct Segment
     {
-        // Atravessar tudo: extensão até o canto mais distante da caixa do corpo na direção do
-        // corte, medida a partir do plano do esboço, mais uma margem (1 mm ou 1% da diagonal).
-        Bnd_Box box;
-        BRepBndLib::Add(target, box);
-        double x0, y0, z0, x1, y1, z1;
-        box.Get(x0, y0, z0, x1, y1, z1);
-        const gp_Pnt o = sketch.plane().origin();
-        double farthest = -1e300;
-        for (double x : {x0, x1})
-            for (double y : {y0, y1})
-                for (double z : {z0, z1})
-                    farthest = std::max(farthest, gp_Vec(o, gp_Pnt(x, y, z)).Dot(gp_Vec(dir)));
-        if (farthest <= 1e-6)
+        double s0, s1;
+        bool second; // direção 2
+    };
+    std::vector<Segment> segments;
+    const double farPos = reach(targetBox, o, dir);
+    const double farNeg = reach(targetBox, o, dir.Reversed());
+    switch (p.endCondition)
+    {
+    case EndCondition::Blind:
+        segments.push_back({0.0, p.depth, false});
+        break;
+    case EndCondition::MidPlane:
+        segments.push_back({-0.5 * p.depth, 0.5 * p.depth, false});
+        break;
+    case EndCondition::ThroughAll:
+        if (farPos <= tol)
         {
-            r.message = "o corpo de destino não está no sentido do corte (inverta a direção)";
+            r.message = std::string("o corpo de destino não está no sentido ") + sense + " (inverta a direção)";
             return r;
         }
-        const double diagonal = std::sqrt(box.SquareExtent());
-        length = farthest + std::max(1.0, 0.01 * diagonal);
-    }
-    const cad::modeling::FeatureResult prism = cad::modeling::extrudeFace(profile.face, gp_Vec(dir) * length);
-    if (!prism.ok || p.mode == ExtrudeMode::NewBody)
+        segments.push_back({0.0, farPos + margin, false});
+        break;
+    case EndCondition::UpToNext:
+        if (farPos <= tol)
+        {
+            r.message = std::string("nenhuma face do corpo de destino à frente no sentido ") + sense
+                        + "; inverta a direção ou use profundidade definida";
+            return r;
+        }
+        segments.push_back({0.0, farPos + margin, false});
+        break;
+    case EndCondition::ThroughAllBoth:
+        if (farPos + farNeg <= tol)
+        {
+            r.message = "o corpo de destino não está em nenhum dos sentidos da extrusão";
+            return r;
+        }
+        segments.push_back({-(std::max(farNeg, 0.0) + margin), std::max(farPos, 0.0) + margin, false});
+        break;
+    case EndCondition::UpToFace:
     {
-        if (tool && prism.ok)
-            *tool = prism.shape;
-        return prism;
-    }
-    TopoDS_Shape cutter = prism.shape;
-    if (p.mode == ExtrudeMode::Cut && p.cutOutside)
-    {
-        // Cortar o lado de fora: laje do plano do esboço que cobre o corpo de destino (com folga),
-        // varrida pela mesma extensão, menos o prisma do perfil.
-        const cad::sketch::SketchPlane& plane = sketch.plane();
-        Bnd_Box box;
-        BRepBndLib::Add(target, box);
+        // Extensão até onde o plano da face (estendido) corta as retas que partem dos cantos do
+        // perfil no sentido da extrusão.
+        const auto plane = input.limitFace.IsNull() ? std::nullopt : cad::modeling::planarFacePlane(input.limitFace);
+        if (!plane)
+        {
+            r.message = "a face limite precisa ser plana";
+            return r;
+        }
+        const gp_Vec n(plane->Axis().Direction());
+        const double cosine = gp_Vec(dir).Dot(n);
+        if (std::fabs(cosine) < 1e-9)
+        {
+            r.message = std::string("a face limite é paralela ao sentido ") + sense;
+            return r;
+        }
+        Bnd_Box profileBox;
+        BRepBndLib::Add(profile.face, profileBox);
         double x0, y0, z0, x1, y1, z1;
-        box.Get(x0, y0, z0, x1, y1, z1);
-        double umin = 1e300, umax = -1e300, vmin = 1e300, vmax = -1e300;
+        profileBox.Get(x0, y0, z0, x1, y1, z1);
+        double far = -1e300;
         for (double x : {x0, x1})
             for (double y : {y0, y1})
                 for (double z : {z0, z1})
                 {
-                    const gp_Vec v(plane.origin(), gp_Pnt(x, y, z));
+                    // Distância ao longo de 'dir' a partir do plano do esboço até o plano limite.
+                    const gp_Pnt corner(x, y, z);
+                    const double start = gp_Vec(o, corner).Dot(gp_Vec(dir));
+                    far = std::max(far, start + gp_Vec(corner, plane->Location()).Dot(n) / cosine);
+                }
+        if (far <= tol)
+        {
+            r.message = std::string("a face limite não está no sentido ") + sense + " (inverta o sentido ou escolha outra face)";
+            return r;
+        }
+        segments.push_back({0.0, far + margin, false});
+        break;
+    }
+    }
+    if (p.direction2)
+    {
+        if (p.endCondition2 == EndCondition::ThroughAll)
+        {
+            if (farNeg <= tol)
+            {
+                r.message = "direção 2: o corpo de destino não está no sentido oposto";
+                return r;
+            }
+            segments.push_back({-(farNeg + margin), 0.0, true});
+        }
+        else
+            segments.push_back({-p.depth2, 0.0, true});
+    }
+
+    // 2. Prisma de cada extensão, com os nomes das faces (base/topo/laterais por entidade).
+    const auto labels = profileEdgeLabels(sketch);
+    auto buildPrism = [&](const Segment& s, FaceNames& n) -> FeatureResult {
+        TopoDS_Face base = profile.face;
+        if (std::fabs(s.s0) > 1e-12)
+        {
+            gp_Trsf t;
+            t.SetTranslation(gp_Vec(dir) * s.s0);
+            base = TopoDS::Face(profile.face.Moved(TopLoc_Location(t)));
+        }
+        FeatureResult pr = cad::modeling::extrudeFace(base, gp_Vec(dir) * (s.s1 - s.s0));
+        if (!pr.ok)
+            return pr;
+        n.add(pr.firstFace, op + (s.second ? ":topo2" : ":base"));
+        n.add(pr.lastFace, op + (s.second ? ":base2" : ":topo"));
+        cad::modeling::nameGenerated(n, pr, [&](const TopoDS_Shape& e) {
+            // Aresta deslocada: mesma TShape da aresta original do perfil.
+            TopoDS_Shape original = e;
+            for (TopExp_Explorer ex(profile.face, TopAbs_EDGE); ex.More(); ex.Next())
+                if (ex.Current().TShape() == e.TShape())
+                    original = ex.Current();
+            const std::string l = labels(original);
+            return op + (s.second ? ":lado2:" : ":lado:") + (l.empty() ? std::string("?") : l);
+        });
+        return pr;
+    };
+    FaceNames toolNames;
+    FeatureResult toolResult = buildPrism(segments[0], toolNames);
+    if (!toolResult.ok)
+        return toolResult;
+    if (segments.size() > 1)
+    {
+        FaceNames secondNames;
+        const FeatureResult second = buildPrism(segments[1], secondNames);
+        if (!second.ok)
+            return second;
+        FeatureResult both = cad::modeling::booleanOperation(BooleanKind::Fuse, toolResult.shape, second.shape);
+        if (!both.ok)
+        {
+            r.message = "falha ao unir as duas direções: " + both.message;
+            return r;
+        }
+        toolNames = cad::modeling::propagateNames({&toolNames, &secondNames}, both);
+        toolResult = both;
+    }
+
+    // 3. Condições que recortam a extensão longa: até a face e até a próxima.
+    if (p.endCondition == EndCondition::UpToFace)
+    {
+        const auto plane = cad::modeling::planarFacePlane(input.limitFace);
+        if (!plane)
+        {
+            r.message = "a face limite precisa ser plana";
+            return r;
+        }
+        const gp_Vec n(plane->Axis().Direction());
+        // Lado "além" da face: o oposto ao lado em que o perfil começa.
+        Bnd_Box profileBox;
+        BRepBndLib::Add(profile.face, profileBox);
+        double x0, y0, z0, x1, y1, z1;
+        profileBox.Get(x0, y0, z0, x1, y1, z1);
+        const gp_Pnt center(0.5 * (x0 + x1), 0.5 * (y0 + y1), 0.5 * (z0 + z1));
+        const double side = gp_Vec(plane->Location(), center).Dot(n);
+        if (std::fabs(side) <= tol)
+        {
+            r.message = "o perfil está sobre o plano da face limite";
+            return r;
+        }
+        // Semiespaço finito além do plano da face (laje grande), removido da extensão longa.
+        const double big = 4.0 * (diagonal + segments[0].s1) + 10.0;
+        // Plano centrado no ponto mais próximo do perfil (a laje cobre toda a extensão).
+        gp_Pln limitPlane = *plane;
+        limitPlane.SetLocation(center.Translated(-n * side));
+        const TopoDS_Face planeFace = BRepBuilderAPI_MakeFace(limitPlane, -big, big, -big, big).Face();
+        const FeatureResult beyond = cad::modeling::extrudeFace(planeFace, n * (side > 0.0 ? -big : big));
+        if (!beyond.ok)
+        {
+            r.message = "falha ao construir o limite da face: " + beyond.message;
+            return r;
+        }
+        FaceNames beyondNames;
+        beyondNames.add(beyond.firstFace, op + ":limite");
+        const FeatureResult trimmed = cad::modeling::booleanOperation(BooleanKind::Cut, toolResult.shape, beyond.shape);
+        if (!trimmed.ok)
+        {
+            r.message = "falha ao limitar a extrusão pela face: " + trimmed.message;
+            return r;
+        }
+        toolNames = cad::modeling::propagateNames({&toolNames, &beyondNames}, trimmed);
+        toolResult = trimmed;
+    }
+    else if (p.endCondition == EndCondition::UpToNext)
+    {
+        if (cut)
+        {
+            // Corte: a primeira região de material encontrada a partir do plano do esboço.
+            const FeatureResult common = cad::modeling::booleanOperation(BooleanKind::Common, target, toolResult.shape);
+            if (!common.ok)
+            {
+                r.message = "não há material no sentido do corte (até a próxima face)";
+                return r;
+            }
+            std::vector<std::pair<double, TopoDS_Shape>> parts;
+            for (TopExp_Explorer ex(common.shape, TopAbs_SOLID); ex.More(); ex.Next())
+                parts.emplace_back(extent(ex.Current(), o, dir).first, ex.Current());
+            const double first = std::min_element(parts.begin(), parts.end(), [](const auto& a, const auto& b) {
+                                     return a.first < b.first;
+                                 })->first;
+            std::vector<TopoDS_Shape> chosen;
+            for (const auto& [start, solid] : parts)
+                if (start <= first + 1e3 * tol)
+                    chosen.push_back(solid);
+            const FaceNames commonNames = cad::modeling::propagateNames({input.targetNames, &toolNames}, common);
+            toolResult.shape = compoundOf(chosen);
+            toolNames = commonNames;
+        }
+        else
+        {
+            // Saliência/novo corpo: do plano do esboço até encontrar o corpo de destino.
+            const FeatureResult ahead = cad::modeling::booleanOperation(BooleanKind::Cut, toolResult.shape, target);
+            if (!ahead.ok)
+            {
+                r.message = "a extrusão começa dentro do corpo de destino (até a próxima face)";
+                return r;
+            }
+            TopoDS_Shape start;
+            double startHi = 0.0;
+            for (TopExp_Explorer ex(ahead.shape, TopAbs_SOLID); ex.More(); ex.Next())
+            {
+                const auto [lo, hi] = extent(ex.Current(), o, dir);
+                if (lo <= 1e3 * tol && (start.IsNull() || hi < startHi))
+                {
+                    start = ex.Current();
+                    startHi = hi;
+                }
+            }
+            if (start.IsNull())
+            {
+                r.message = "a extrusão começa dentro do corpo de destino (até a próxima face)";
+                return r;
+            }
+            if (startHi >= segments[0].s1 - 1e3 * tol)
+            {
+                r.message = "nenhuma face do corpo de destino à frente no sentido da extrusão; use profundidade definida";
+                return r;
+            }
+            toolNames = cad::modeling::propagateNames({&toolNames, input.targetNames}, ahead);
+            toolResult.shape = start;
+        }
+    }
+
+    // 4. Corte do lado de fora: laje do plano do esboço com as mesmas extensões, menos o prisma.
+    TopoDS_Shape cutter = toolResult.shape;
+    FaceNames cutterNames = toolNames;
+    if (cut && p.cutOutside)
+    {
+        const cad::sketch::SketchPlane& plane = sketch.plane();
+        double umin = 1e300, umax = -1e300, vmin = 1e300, vmax = -1e300;
+        double x0, y0, z0, x1, y1, z1;
+        targetBox.Get(x0, y0, z0, x1, y1, z1);
+        for (double x : {x0, x1})
+            for (double y : {y0, y1})
+                for (double z : {z0, z1})
+                {
+                    const gp_Vec v(o, gp_Pnt(x, y, z));
                     umin = std::min(umin, v.Dot(gp_Vec(plane.horizontalAxis())));
                     umax = std::max(umax, v.Dot(gp_Vec(plane.horizontalAxis())));
                     vmin = std::min(vmin, v.Dot(gp_Vec(plane.verticalAxis())));
                     vmax = std::max(vmax, v.Dot(gp_Vec(plane.verticalAxis())));
                 }
-        const double margin = std::max(1.0, 0.01 * std::sqrt(box.SquareExtent()));
-        const gp_Pln slabPlane(gp_Ax3(plane.origin(), plane.normal(), plane.horizontalAxis()));
+        const gp_Pln slabPlane(gp_Ax3(o, plane.normal(), plane.horizontalAxis()));
         const TopoDS_Face slabFace =
             BRepBuilderAPI_MakeFace(slabPlane, umin - margin, umax + margin, vmin - margin, vmax + margin).Face();
-        const cad::modeling::FeatureResult slab = cad::modeling::extrudeFace(slabFace, gp_Vec(dir) * length);
-        if (!slab.ok)
+        TopoDS_Shape slab;
+        for (const Segment& s : segments)
         {
-            r.message = "falha ao construir a região externa ao perfil: " + slab.message;
-            return r;
+            gp_Trsf t;
+            t.SetTranslation(gp_Vec(dir) * s.s0);
+            const FeatureResult part =
+                cad::modeling::extrudeFace(TopoDS::Face(slabFace.Moved(TopLoc_Location(t))), gp_Vec(dir) * (s.s1 - s.s0));
+            if (!part.ok)
+            {
+                r.message = "falha ao construir a região externa ao perfil: " + part.message;
+                return r;
+            }
+            if (slab.IsNull())
+                slab = part.shape;
+            else
+            {
+                const FeatureResult joined = cad::modeling::booleanOperation(BooleanKind::Fuse, slab, part.shape);
+                if (!joined.ok)
+                {
+                    r.message = "falha ao construir a região externa ao perfil: " + joined.message;
+                    return r;
+                }
+                slab = joined.shape;
+            }
         }
-        const cad::modeling::FeatureResult outside = cad::modeling::booleanOperation(BooleanKind::Cut, slab.shape, prism.shape);
+        const FeatureResult outside = cad::modeling::booleanOperation(BooleanKind::Cut, slab, toolResult.shape);
         if (!outside.ok)
         {
             r.message = "falha ao construir a região externa ao perfil: " + outside.message;
             return r;
         }
+        cutterNames = cad::modeling::propagateNames({&toolNames}, outside);
         cutter = outside.shape;
     }
     if (tool)
         *tool = cutter;
-    if (p.mode == ExtrudeMode::Boss)
+
+    // 5. Aplicação no corpo de destino.
+    FaceNames resultNames;
+    if (p.mode == ExtrudeMode::NewBody)
     {
-        r = cad::modeling::booleanOperation(BooleanKind::Fuse, target, prism.shape);
+        r.ok = true;
+        r.shape = toolResult.shape;
+        resultNames = toolNames;
+    }
+    else if (p.mode == ExtrudeMode::Boss)
+    {
+        r = cad::modeling::booleanOperation(BooleanKind::Fuse, target, toolResult.shape);
         if (r.ok && cad::modeling::countSolids(r.shape) > cad::modeling::countSolids(target))
         {
             r.ok = false;
@@ -723,20 +1128,32 @@ cad::modeling::FeatureResult CadDocument::computeExtrusion(const ExtrudeParamete
             r.ok = false;
             r.message = "a saliência não adiciona material ao corpo de destino (volume dentro do corpo); verifique o sentido";
         }
-        return r;
+        if (r.ok)
+            resultNames = cad::modeling::propagateNames({input.targetNames, &toolNames}, r);
     }
-    r = cad::modeling::booleanOperation(BooleanKind::Cut, target, cutter);
-    if (r.ok && std::fabs(cad::modeling::ShapeInspector::volume(r.shape) - cad::modeling::ShapeInspector::volume(target))
-                    < 1e-6)
+    else
     {
-        r.ok = false;
-        r.message = p.cutOutside ? "não há material fora do perfil na extensão do corte (" + p.targetId
-                                       + "); verifique o sentido e a profundidade"
-                                 : "a ferramenta de corte não intersecta o corpo de destino (" + p.targetId
-                                       + "); verifique o sentido";
+        r = cad::modeling::booleanOperation(BooleanKind::Cut, target, cutter);
+        if (r.ok && std::fabs(cad::modeling::ShapeInspector::volume(r.shape) - cad::modeling::ShapeInspector::volume(target))
+                        < 1e-6)
+        {
+            r.ok = false;
+            r.message = p.cutOutside ? "não há material fora do perfil na extensão do corte (" + p.targetId
+                                           + "); verifique o sentido e a profundidade"
+                                     : "a ferramenta de corte não intersecta o corpo de destino (" + p.targetId
+                                           + "); verifique o sentido";
+        }
+        if (r.ok)
+            resultNames = cad::modeling::propagateNames({input.targetNames, &cutterNames}, r);
+    }
+    if (r.ok && names)
+    {
+        cad::modeling::completeNames(resultNames, r.shape, op + ":aux");
+        *names = resultNames;
     }
     return r;
 }
+
 ValidationResult CadDocument::addExtrusion(const ExtrudeParameters& parameters, std::string* newId)
 {
     ValidationResult v = validateExtrude(parameters);
@@ -778,7 +1195,10 @@ ValidationResult CadDocument::updateExtrusion(const std::string& id, const Extru
     if (updated.name == it->name && updated.sketchId == it->sketchId && updated.reversed == it->reversed
         && updated.parameter("depth") == it->parameter("depth") && updated.extrudeMode == it->extrudeMode
         && updated.targetId == it->targetId && updated.endCondition == it->endCondition
-        && updated.cutOutside == it->cutOutside)
+        && updated.cutOutside == it->cutOutside && updated.direction2 == it->direction2
+        && updated.endCondition2 == it->endCondition2 && updated.parameter("depth2") == it->parameter("depth2")
+        && updated.limitBodyId == it->limitBodyId && updated.limitFace.name == it->limitFace.name
+        && updated.limitFace.centroid.Distance(it->limitFace.centroid) < 1e-9)
         return {};
     *it = updated;
     return applyOperations(std::move(ops), "profile");
@@ -846,6 +1266,17 @@ Operation CadDocument::makeExtrusion(const std::string& id, const ExtrudeParamet
     op.endCondition = parameters.endCondition;
     op.cutOutside = parameters.mode == ExtrudeMode::Cut && parameters.cutOutside;
     op.parameters = {{"depth", parameters.depth}};
+    op.direction2 = parameters.direction2;
+    if (parameters.direction2)
+    {
+        op.endCondition2 = parameters.endCondition2;
+        op.parameters.push_back({"depth2", parameters.depth2});
+    }
+    if (parameters.endCondition == EndCondition::UpToFace)
+    {
+        op.limitBodyId = parameters.limitBodyId;
+        op.limitFace = parameters.limitFace;
+    }
     return op;
 }
 
@@ -860,6 +1291,12 @@ ExtrudeParameters CadDocument::extrudeParametersOf(const Operation& op)
     p.targetId = op.targetId;
     p.endCondition = op.endCondition;
     p.cutOutside = op.cutOutside;
+    p.direction2 = op.direction2;
+    p.endCondition2 = op.endCondition2;
+    if (op.direction2)
+        p.depth2 = op.parameter("depth2");
+    p.limitBodyId = op.limitBodyId;
+    p.limitFace = op.limitFace;
     return p;
 }
 
@@ -947,18 +1384,37 @@ bool CadDocument::checkReferences(std::vector<Operation>& operations, std::strin
                 findOp(*operand)->consumedBy = op.id;
             }
         }
+        // Até a face (E5.7.1): a face limite pertence a um corpo anterior (não é consumido).
+        if (op.type == OperationType::Extrude && op.endCondition == EndCondition::UpToFace)
+        {
+            const std::string label = op.name + " (" + op.id + ")";
+            if (op.limitBodyId.empty())
+            {
+                error = label + ": selecione a face limite";
+                return false;
+            }
+            if (!bodies.count(op.limitBodyId))
+            {
+                error = label + ": o corpo da face limite (" + op.limitBodyId
+                        + ") não existe antes da operação (dependência circular não permitida)";
+                return false;
+            }
+        }
         if (producesBody(op.type))
             bodies.insert(op.id);
     }
     return true;
 }
 
-bool CadDocument::resolveSupport(cad::sketch::Sketch& sketch, const TopoDS_Shape& body, std::string& error)
+bool CadDocument::resolveSupport(cad::sketch::Sketch& sketch, const TopoDS_Shape& body,
+                                 const cad::modeling::FaceNames* names, std::string& error, std::string* note)
 {
     if (!sketch.support())
         return true;
     cad::sketch::SketchSupport support = *sketch.support();
-    const cad::modeling::FaceMatch m = cad::modeling::resolvePlanarFace(body, support.face);
+    static const cad::modeling::FaceNames kNoNames;
+    const cad::modeling::FaceNames& faceNames = names ? *names : kNoNames;
+    const cad::modeling::NamedFaceMatch m = cad::modeling::resolveNamedFace(body, faceNames, support.face);
     if (!m.ok)
     {
         error = sketch.name() + ": " + m.message;
@@ -970,27 +1426,42 @@ bool CadDocument::resolveSupport(cad::sketch::Sketch& sketch, const TopoDS_Shape
         error = sketch.name() + ": face de suporte deixou de ser plana";
         return false;
     }
+    if (note && !m.byName && !support.face.name.empty())
+        *note = sketch.name() + ": face de suporte \"" + support.face.name
+                + "\" recuperada pela geometria (mesmo plano), não pelo nome topológico";
     sketch.setPlane(cad::sketch::SketchPlane::forPlane(*plane));
-    support.face = cad::modeling::describeFace(m.face); // referência acompanha a geometria
+    // A referência acompanha a geometria; o nome é o atual (documento antigo recebe o nome aqui).
+    const std::string name = faceNames.nameOf(m.face);
+    support.face = cad::modeling::describeFace(m.face);
+    support.face.name = name;
     sketch.setSupport(support);
     return true;
 }
 
 bool CadDocument::rebuild(std::vector<Operation>& operations, std::vector<cad::sketch::Sketch>& sketches,
-                          TopoDS_Shape& shape, std::string& error, std::vector<SketchIssue>* issues)
+                          TopoDS_Shape& shape, std::string& error, RebuildLog* log, bool tolerant)
 {
     if (!checkReferences(operations, error))
         return false;
 
     TopoDS_Shape part; // bloco (+ furo)
+    const cad::modeling::FaceNames* partNames = nullptr;
     double length = 0.0, width = 0.0;
     size_t current = 0;
-    // Somente resultados de operações anteriores à corrente (ordem de dependência).
-    auto resultOf = [&operations, &current](const std::string& id) {
+    // Somente resultados (e nomes de faces) de operações anteriores à corrente.
+    auto opBefore = [&operations, &current](const std::string& id) -> const Operation* {
         for (size_t i = 0; i < current && i < operations.size(); ++i)
             if (operations[i].id == id)
-                return operations[i].result;
-        return TopoDS_Shape();
+                return &operations[i];
+        return nullptr;
+    };
+    auto resultOf = [&](const std::string& id) {
+        const Operation* o = opBefore(id);
+        return o ? o->result : TopoDS_Shape();
+    };
+    auto namesOf = [&](const std::string& id) -> const cad::modeling::FaceNames* {
+        const Operation* o = opBefore(id);
+        return o ? &o->faceNames : nullptr;
     };
     std::set<std::string> resolvedSketches;
     auto resolveSketchSupport = [&](cad::sketch::Sketch& s, std::string& message) {
@@ -1003,13 +1474,17 @@ bool CadDocument::rebuild(std::vector<Operation>& operations, std::vector<cad::s
                       + " inexistente ou posterior à operação que usa o esboço";
             return false;
         }
-        if (!resolveSupport(s, body, message))
+        std::string note;
+        if (!resolveSupport(s, body, namesOf(s.support()->bodyId), message, &note))
             return false;
+        if (!note.empty() && log)
+            log->sketchNotes.push_back(SketchIssue{s.id(), note});
         resolvedSketches.insert(s.id());
         return true;
     };
     // Uma falha não interrompe as operações independentes: só as que dependem (corpo de destino,
-    // de origem, operandos, corpo de suporte do esboço ou o bloco do furo) ficam bloqueadas.
+    // de origem, operandos, corpo de suporte do esboço, corpo da face limite ou o bloco do furo)
+    // ficam bloqueadas.
     std::string firstError;
     std::set<std::string> invalid;
     std::string blockId;
@@ -1028,6 +1503,8 @@ bool CadDocument::rebuild(std::vector<Operation>& operations, std::vector<cad::s
         case OperationType::Extrude:
             if (op.extrudeMode != ExtrudeMode::NewBody)
                 deps.push_back(op.targetId);
+            if (op.endCondition == EndCondition::UpToFace)
+                deps.push_back(op.limitBodyId);
             for (const cad::sketch::Sketch& s : sketches)
                 if (s.id() == op.sketchId && s.support())
                     deps.push_back(s.support()->bodyId);
@@ -1044,7 +1521,10 @@ bool CadDocument::rebuild(std::vector<Operation>& operations, std::vector<cad::s
     for (Operation& op : operations)
     {
         cad::modeling::FeatureResult r;
+        cad::modeling::FaceNames names;
         op.result.Nullify();
+        op.faceNames = cad::modeling::FaceNames();
+        op.notes.clear();
         op.blockedBy.clear();
         if (op.type == OperationType::Block)
             blockId = op.id;
@@ -1069,13 +1549,23 @@ bool CadDocument::rebuild(std::vector<Operation>& operations, std::vector<cad::s
             width = op.parameter("width");
             r = cad::modeling::makeBlock(length, width, op.parameter("height"));
             if (r.ok)
+            {
                 part = r.shape;
+                names = cad::modeling::nameBoxFaces(r.shape, op.id);
+            }
             break;
         case OperationType::ThroughHole:
             // Relação geométrica: furo centrado na face superior do bloco.
             r = cad::modeling::cutThroughHole(part, length / 2.0, width / 2.0, op.parameter("radius"));
             if (r.ok)
+            {
                 part = r.shape;
+                cad::modeling::FaceNames tool;
+                for (TopExp_Explorer ex(r.tool, TopAbs_FACE); ex.More(); ex.Next())
+                    if (!cad::modeling::planarFacePlane(TopoDS::Face(ex.Current())))
+                        tool.add(ex.Current(), op.id + ":furo");
+                names = cad::modeling::propagateNames({partNames, &tool}, r);
+            }
             break;
         case OperationType::Extrude:
         {
@@ -1090,23 +1580,59 @@ bool CadDocument::rebuild(std::vector<Operation>& operations, std::vector<cad::s
             if (!resolveSketchSupport(*it, r.message))
                 break;
             const ExtrudeParameters p = extrudeParametersOf(op);
-            r = computeExtrusion(p, *it, op.extrudeMode == ExtrudeMode::NewBody ? TopoDS_Shape() : resultOf(op.targetId),
-                                 nullptr);
+            ExtrusionInput input;
+            input.opId = op.id;
+            if (op.extrudeMode != ExtrudeMode::NewBody)
+            {
+                input.target = resultOf(op.targetId);
+                input.targetNames = namesOf(op.targetId);
+            }
+            if (op.endCondition == EndCondition::UpToFace)
+            {
+                // Face limite pelo nome topológico (geometria como desempate/legado).
+                const TopoDS_Shape body = resultOf(op.limitBodyId);
+                static const cad::modeling::FaceNames kNoNames;
+                const cad::modeling::FaceNames* limitNames = namesOf(op.limitBodyId);
+                const cad::modeling::NamedFaceMatch m =
+                    cad::modeling::resolveNamedFace(body, limitNames ? *limitNames : kNoNames, op.limitFace);
+                if (!m.ok)
+                {
+                    r.message = "face limite — " + m.message;
+                    break;
+                }
+                if (!m.byName && !op.limitFace.name.empty())
+                    op.notes.push_back("face limite \"" + op.limitFace.name + "\" recuperada pela geometria");
+                input.limitFace = m.face;
+                const std::string name = limitNames ? limitNames->nameOf(m.face) : std::string();
+                op.limitFace = cad::modeling::describeFace(m.face);
+                op.limitFace.name = name;
+            }
+            r = computeExtrusion(p, *it, input, nullptr, &names);
             break;
         }
         case OperationType::Boolean:
             r = cad::modeling::booleanOperation(op.booleanKind, resultOf(op.operandA), resultOf(op.operandB));
+            if (r.ok)
+            {
+                names = cad::modeling::propagateNames({namesOf(op.operandA), namesOf(op.operandB)}, r);
+                cad::modeling::completeNames(names, r.shape, op.id + ":aux");
+            }
             break;
         case OperationType::Fillet3D:
         case OperationType::Chamfer3D:
-            r = computeFinish(op, resultOf(op.sourceId));
+            r = computeFinish(op, resultOf(op.sourceId), namesOf(op.sourceId), &names);
             break;
         }
         ++current;
         op.status = r.ok ? OperationStatus::Valid : OperationStatus::Invalid;
         op.statusMessage = r.message;
         if (r.ok)
+        {
             op.result = r.shape;
+            op.faceNames = std::move(names);
+            if (op.type == OperationType::Block || op.type == OperationType::ThroughHole)
+                partNames = &op.faceNames;
+        }
         else
         {
             invalid.insert(op.id);
@@ -1123,8 +1649,8 @@ bool CadDocument::rebuild(std::vector<Operation>& operations, std::vector<cad::s
             message = s.name() + ": corpo de suporte inválido (" + nameOf(s.support()->bodyId) + ")";
         else if (resolveSketchSupport(s, message))
             continue;
-        if (issues)
-            issues->push_back(SketchIssue{s.id(), message});
+        if (tolerant && log)
+            log->sketchIssues.push_back(SketchIssue{s.id(), message});
         else if (firstError.empty())
             firstError = message;
     }
@@ -1167,15 +1693,15 @@ bool CadDocument::hasInvalidOperations() const
 }
 
 bool CadDocument::rebuildForCommit(std::vector<Operation>& operations, std::vector<cad::sketch::Sketch>& sketches,
-                                   TopoDS_Shape& shape, std::string& error, std::vector<SketchIssue>& issues) const
+                                   TopoDS_Shape& shape, std::string& error, RebuildLog& log) const
 {
-    const bool tolerant = hasInvalidOperations() || !m_sketchIssues.empty();
+    const bool tolerant = hasInvalidOperations() || !m_log.sketchIssues.empty();
     // Referências estruturais (operandos inexistentes, ciclos) nunca são aceitas.
     std::vector<Operation> check = operations;
     if (!checkReferences(check, error))
         return false;
-    issues.clear();
-    if (rebuild(operations, sketches, shape, error, tolerant ? &issues : nullptr))
+    log = RebuildLog();
+    if (rebuild(operations, sketches, shape, error, &log, tolerant))
         return true;
     if (!tolerant)
         return false;
@@ -1190,8 +1716,8 @@ bool CadDocument::rebuildForCommit(std::vector<Operation>& operations, std::vect
             return false;
         }
     }
-    for (const SketchIssue& issue : issues)
-        if (std::none_of(m_sketchIssues.begin(), m_sketchIssues.end(),
+    for (const SketchIssue& issue : log.sketchIssues)
+        if (std::none_of(m_log.sketchIssues.begin(), m_log.sketchIssues.end(),
                          [&](const SketchIssue& old) { return old.sketchId == issue.sketchId; }))
         {
             error = issue.message;
@@ -1289,18 +1815,26 @@ cad::modeling::FeatureResult CadDocument::previewBoolean(const BooleanParameters
 
 // --- Acabamentos 3D -----------------------------------------------------------
 
-cad::modeling::FeatureResult CadDocument::computeFinish(Operation& op, const TopoDS_Shape& source)
+cad::modeling::FeatureResult CadDocument::computeFinish(Operation& op, const TopoDS_Shape& source,
+                                                        const cad::modeling::FaceNames* sourceNames,
+                                                        cad::modeling::FaceNames* names)
 {
     cad::modeling::FeatureResult r;
+    static const cad::modeling::FaceNames kNoNames;
+    const cad::modeling::FaceNames& srcNames = sourceNames ? *sourceNames : kNoNames;
     std::vector<TopoDS_Edge> found;
     for (size_t i = 0; i < op.edges.size(); ++i)
     {
-        const cad::modeling::EdgeMatch m = cad::modeling::resolveEdge(source, op.edges[i]);
+        // Pelo nome topológico (faces adjacentes); geometria como desempate/legado.
+        const cad::modeling::NamedEdgeMatch m = cad::modeling::resolveNamedEdge(source, srcNames, op.edges[i]);
         if (!m.ok)
         {
             r.message = "aresta " + std::to_string(i + 1) + " — " + m.message;
             return r;
         }
+        if (!m.byName && !op.edges[i].name.empty())
+            op.notes.push_back("aresta " + std::to_string(i + 1) + " (\"" + op.edges[i].name
+                               + "\") recuperada pela geometria, não pelo nome topológico");
         for (const TopoDS_Edge& e : found)
             if (e.IsSame(m.edge))
             {
@@ -1350,9 +1884,24 @@ cad::modeling::FeatureResult CadDocument::computeFinish(Operation& op, const Top
                                                                                                : op.parameter("distance2"));
     if (r.ok)
     {
-        // Referências acompanham a geometria do corpo de origem.
+        // Referências acompanham a geometria do corpo de origem (com o nome atual da aresta).
         for (size_t i = 0; i < op.edges.size(); ++i)
+        {
             op.edges[i] = cad::modeling::describeEdge(source, found[i]);
+            op.edges[i].name = cad::modeling::edgeName(source, srcNames, found[i]);
+        }
+        if (names)
+        {
+            // Faces do resultado: as do corpo de origem pelo histórico; as novas por aresta.
+            *names = cad::modeling::propagateNames({sourceNames}, r);
+            cad::modeling::nameGenerated(*names, r, [&](const TopoDS_Shape& e) {
+                for (size_t i = 0; i < found.size(); ++i)
+                    if (found[i].IsSame(e))
+                        return op.id + ":acab:" + std::to_string(i);
+                return std::string();
+            });
+            cad::modeling::completeNames(*names, r.shape, op.id + ":aux");
+        }
         if (advanced)
         {
             op.referenceNormals.clear();
@@ -1421,18 +1970,86 @@ std::optional<cad::sketch::Sketch> CadDocument::createFaceSketch(const std::stri
     }
     const std::string n = std::to_string(m_nextSketchNumber);
     cad::sketch::Sketch s("sk-" + n, "Esboço " + n, cad::sketch::SketchPlane::forPlane(*plane));
-    s.setSupport(cad::sketch::SketchSupport{bodyId, cad::modeling::describeFace(f)});
+    // Referência persistente: assinatura geométrica + nome topológico da face (E5.7.1).
+    cad::modeling::FaceSignature signature = cad::modeling::describeFace(f);
+    signature.name = body->faceNames.nameOf(f);
+    s.setSupport(cad::sketch::SketchSupport{bodyId, signature});
     return s;
 }
 
 TopoDS_Face CadDocument::supportFace(const std::string& sketchId) const
 {
     const cad::sketch::Sketch* s = findSketch(sketchId);
-    const Operation* body = s && s->support() ? findOperation(s->support()->bodyId) : nullptr;
-    if (!body)
+    return s && s->support() ? resolveFaceReference(s->support()->bodyId, s->support()->face) : TopoDS_Face();
+}
+
+std::string CadDocument::faceName(const std::string& bodyId, const TopoDS_Shape& face) const
+{
+    const Operation* body = findOperation(bodyId);
+    return body ? body->faceNames.nameOf(face) : std::string();
+}
+
+std::string CadDocument::edgeName(const std::string& bodyId, const TopoDS_Edge& edge) const
+{
+    const Operation* body = findOperation(bodyId);
+    return body ? cad::modeling::edgeName(body->result, body->faceNames, edge) : std::string();
+}
+
+std::optional<cad::modeling::FaceSignature> CadDocument::faceReference(const std::string& bodyId,
+                                                                       const TopoDS_Shape& face) const
+{
+    const Operation* body = findOperation(bodyId);
+    if (!body || face.IsNull() || face.ShapeType() != TopAbs_FACE)
+        return std::nullopt;
+    const TopoDS_Face f = cad::modeling::faceInShape(body->result, face);
+    if (f.IsNull() || !cad::modeling::planarFacePlane(f))
+        return std::nullopt;
+    cad::modeling::FaceSignature signature = cad::modeling::describeFace(f);
+    signature.name = body->faceNames.nameOf(f);
+    return signature;
+}
+
+TopoDS_Face CadDocument::resolveFaceReference(const std::string& bodyId, const cad::modeling::FaceSignature& face,
+                                              std::string* error) const
+{
+    const Operation* body = findOperation(bodyId);
+    if (!body || body->result.IsNull())
+    {
+        if (error)
+            *error = "corpo da face inexistente ou sem geometria (" + bodyId + ")";
         return TopoDS_Face();
-    const cad::modeling::FaceMatch m = cad::modeling::resolvePlanarFace(body->result, s->support()->face);
+    }
+    const cad::modeling::NamedFaceMatch m = cad::modeling::resolveNamedFace(body->result, body->faceNames, face);
+    if (!m.ok && error)
+        *error = m.message;
     return m.ok ? m.face : TopoDS_Face();
+}
+
+std::optional<std::pair<std::string, cad::modeling::FaceSignature>>
+CadDocument::limitFaceBefore(const std::string& operationId, const std::string& bodyId,
+                             const cad::modeling::FaceSignature& face) const
+{
+    const auto edited = std::find_if(m_operations.begin(), m_operations.end(),
+                                     [&](const Operation& op) { return op.id == operationId; });
+    if (edited == m_operations.end())
+        return std::make_pair(bodyId, face);
+    for (auto it = m_operations.begin(); it != edited; ++it)
+        if (it->id == bodyId)
+            return std::make_pair(bodyId, face); // o corpo já é anterior à operação
+    if (face.name.empty())
+        return std::nullopt;
+    for (auto it = std::make_reverse_iterator(edited); it != m_operations.rend(); ++it)
+    {
+        if (!producesBody(it->type) || it->result.IsNull())
+            continue;
+        const auto m = cad::modeling::resolveNamedFace(it->result, it->faceNames, face);
+        if (!m.ok || !m.byName)
+            continue;
+        const auto reference = faceReference(it->id, m.face);
+        if (reference && reference->normal.Angle(face.normal) < 1e-6 && std::fabs(reference->offset - face.offset) < 1e-6)
+            return std::make_pair(it->id, *reference);
+    }
+    return std::nullopt;
 }
 ValidationResult CadDocument::validateChamferMode(OperationType type, const FinishParameters& p)
 {
@@ -1486,7 +2103,12 @@ std::vector<cad::modeling::EdgeSignature> CadDocument::edgeSignatures(const std:
     if (!body)
         return signatures;
     for (const TopoDS_Edge& e : edges)
-        signatures.push_back(cad::modeling::describeEdge(body->result, e));
+    {
+        // Assinatura geométrica + nome topológico (faces adjacentes nomeadas, E5.7.1).
+        cad::modeling::EdgeSignature s = cad::modeling::describeEdge(body->result, e);
+        s.name = cad::modeling::edgeName(body->result, body->faceNames, e);
+        signatures.push_back(s);
+    }
     return signatures;
 }
 
@@ -1508,7 +2130,7 @@ cad::modeling::FeatureResult CadDocument::previewFinish(OperationType type, cons
         return r;
     }
     Operation op = makeFinish("preview", type, parameters);
-    return computeFinish(op, source->result);
+    return computeFinish(op, source->result, &source->faceNames);
 }
 
 ValidationResult CadDocument::addFinish(OperationType type, const FinishParameters& parameters, std::string* newId)
@@ -1589,7 +2211,7 @@ std::vector<TopoDS_Edge> CadDocument::resolvedFinishEdges(const std::string& id)
         return edges;
     for (const auto& s : op->edges)
     {
-        const cad::modeling::EdgeMatch m = cad::modeling::resolveEdge(source->result, s);
+        const cad::modeling::NamedEdgeMatch m = cad::modeling::resolveNamedEdge(source->result, source->faceNames, s);
         if (m.ok)
             edges.push_back(m.edge);
     }
@@ -1601,10 +2223,10 @@ ValidationResult CadDocument::applyOperations(std::vector<Operation> operations,
     TopoDS_Shape shape;
     std::string error;
     std::vector<cad::sketch::Sketch> sketches = m_sketches;
-    std::vector<SketchIssue> issues;
-    if (!rebuildForCommit(operations, sketches, shape, error, issues))
+    RebuildLog log;
+    if (!rebuildForCommit(operations, sketches, shape, error, log))
         return ValidationResult{false, field, error};
-    m_sketchIssues = std::move(issues);
+    m_log = std::move(log);
     commit(std::move(operations), std::move(sketches), shape);
     return {};
 }

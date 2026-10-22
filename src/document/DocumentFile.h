@@ -83,7 +83,15 @@
 // fora do perfil dentro da extensão do corte; ver ExtrudeParameters::cutOutside). Gravado em todo
 // corte; ausente = false.
 //
-// Arquivos das versões 1 a 7 continuam sendo lidos sem alteração; a gravação usa sempre a
+// Esquema versão 9 (E5.7.1):
+//   - referências persistentes com o nome topológico (ver TopoNaming): "name" na face de suporte
+//     dos esboços e em cada aresta de Fillet/Chamfer 3D (opcional: ausente = só geometria);
+//   - extrusão: "endCondition" também "midPlane" | "throughAllBoth" | "upToNext" | "upToFace";
+//     "direction2": { "endCondition": "blind" | "throughAll", "depth": 5 } (opcional);
+//     "limitFace": { "bodyId": "op-1", "face": { normal, offset, centroid, area, name } }
+//     (obrigatório em "upToFace").
+//
+// Arquivos das versões 1 a 8 continuam sendo lidos sem alteração; a gravação usa sempre a
 // versão atual. Documento cujas operações falham na reconstrução pode ser aberto com as operações
 // marcadas como inválidas (painel Diagnóstico) — ver fromJson.
 #pragma once
@@ -104,7 +112,7 @@ struct FileResult
 class DocumentFile
 {
 public:
-    static constexpr int kSchemaVersion = 8;
+    static constexpr int kSchemaVersion = 9;
     static constexpr qint64 kMaxFileSize = 4 * 1024 * 1024;
     static constexpr const char* kFormat = "cadmec";
     static constexpr const char* kExtension = "cadmec";

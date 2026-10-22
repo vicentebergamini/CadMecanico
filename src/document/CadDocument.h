@@ -18,6 +18,7 @@
 
 #include "modeling/EdgeNaming.h"
 #include "modeling/Features.h"
+#include "modeling/TopoNaming.h"
 #include "sketch/Sketch.h"
 
 #include <TopoDS_Shape.hxx>
@@ -67,11 +68,24 @@ enum class ExtrudeMode
     Cut
 };
 
-// Condição final: profundidade definida ou, no corte, atravessar todo o corpo de destino.
+// Condição final da extrusão (E5.6; ampliada na E5.7.1 — P5). Extensões medidas a partir do
+// plano do esboço ao longo do sentido da extrusão:
+//   Blind          profundidade definida [0, d];
+//   MidPlane       plano médio, simétrico ao plano do esboço [−d/2, d/2];
+//   ThroughAll     atravessar todo o corpo de destino no sentido escolhido;
+//   ThroughAllBoth atravessar todo o corpo de destino nos dois sentidos;
+//   UpToNext       até a próxima face do corpo de destino: o corte remove a primeira região de
+//                  material encontrada; a saliência cresce até encontrar o corpo;
+//   UpToFace       até a face plana selecionada (plano da face estendido), em qualquer corpo.
+// Comprimentos dependentes da geometria são calculados a cada reconstrução (nunca fixos).
 enum class EndCondition
 {
     Blind,
-    ThroughAll
+    ThroughAll,
+    ThroughAllBoth,
+    UpToNext,
+    UpToFace,
+    MidPlane
 };
 
 // Modo do Chamfer 3D (E5.6): distâncias iguais (E5.5), duas distâncias (D1 na face de
@@ -115,6 +129,11 @@ struct Operation
     EndCondition endCondition = EndCondition::Blind;
     // Corte: remover o lado de fora do perfil (E5.7, ver ExtrudeParameters::cutOutside).
     bool cutOutside = false;
+    // P5 (E5.7.1): direção 2 (parâmetro "depth2") e face limite de "até a face".
+    bool direction2 = false;
+    EndCondition endCondition2 = EndCondition::Blind;
+    std::string limitBodyId;
+    cad::modeling::FaceSignature limitFace;
 
     // Booleana: tipo e corpos operandos (ids de operações anteriores). Na subtração A é o corpo
     // principal e B a ferramenta de corte.
@@ -137,6 +156,10 @@ struct Operation
     std::string consumedBy;
     // Operação inválida da qual esta depende (calculado; vazio = a falha, se houver, é própria).
     std::string blockedBy;
+    // Nomes topológicos das faces do resultado (calculado; ver TopoNaming) e avisos de
+    // referências recuperadas só pela geometria (calculado).
+    cad::modeling::FaceNames faceNames;
+    std::vector<std::string> notes;
 
     // Valor do parâmetro 'key' (0 se ausente).
     double parameter(const std::string& key) const;
@@ -155,8 +178,18 @@ struct ExtrudeParameters
     // Somente corte (E5.7, "Cortar o lado de fora"): remove do corpo de destino o material FORA
     // do perfil dentro da extensão da extrusão (mesmo sentido e condição final); o material
     // dentro do perfil e o material além da extensão são preservados. Ferramenta = laje do plano
-    // do esboço cobrindo o corpo, varrida pela extensão, menos o prisma do perfil.
+    // do esboço cobrindo o corpo, varrida pela extensão, menos o prisma do perfil. Somente com as
+    // condições prismáticas (profundidade, plano médio, atravessar tudo, dois sentidos).
     bool cutOutside = false;
+    // Direção 2 (E5.7.1): extensão adicional no sentido oposto ao da direção 1, com condição
+    // própria (profundidade definida ou atravessar tudo). Não combina com plano médio nem com
+    // atravessar tudo nos dois sentidos.
+    bool direction2 = false;
+    EndCondition endCondition2 = EndCondition::Blind;
+    double depth2 = 10.0;
+    // Até a face (E5.7.1): corpo e referência persistente (assinatura + nome) da face limite.
+    std::string limitBodyId;
+    cad::modeling::FaceSignature limitFace;
 };
 
 // Parâmetros de uma operação booleana.
@@ -189,11 +222,20 @@ struct ValidationResult
     std::string message; // mensagem para o usuário
 };
 
-// Esboço sobre face cuja face de suporte não pôde ser recuperada (documento aberto com erros).
+// Esboço sobre face cuja face de suporte não pôde ser recuperada (documento aberto com erros), ou
+// aviso de referência recuperada só pela geometria (E5.7.1).
 struct SketchIssue
 {
     std::string sketchId;
     std::string message;
+};
+
+// Registro de uma reconstrução: esboços sem suporte (documento com erros) e avisos de suporte
+// recuperado pela geometria em vez do nome topológico.
+struct RebuildLog
+{
+    std::vector<SketchIssue> sketchIssues;
+    std::vector<SketchIssue> sketchNotes;
 };
 
 class CadDocument
@@ -342,7 +384,26 @@ public:
     // true se alguma operação está inválida (documento aberto com erros ou ainda não corrigido).
     bool hasInvalidOperations() const;
     // Esboços sobre face sem face de suporte recuperável (somente em documento com erros).
-    const std::vector<SketchIssue>& sketchIssues() const { return m_sketchIssues; }
+    const std::vector<SketchIssue>& sketchIssues() const { return m_log.sketchIssues; }
+    // Esboços cuja face de suporte foi recuperada só pela geometria (avisos, E5.7.1).
+    const std::vector<SketchIssue>& sketchNotes() const { return m_log.sketchNotes; }
+
+    // --- Referências topológicas (E5.7.1) -----------------------------------------------
+    // Nome topológico atual de uma face/aresta do corpo (vazio se o corpo não existir).
+    std::string faceName(const std::string& bodyId, const TopoDS_Shape& face) const;
+    std::string edgeName(const std::string& bodyId, const TopoDS_Edge& edge) const;
+    // Referência persistente (assinatura + nome) de uma face plana de um corpo, para "até a face".
+    std::optional<cad::modeling::FaceSignature> faceReference(const std::string& bodyId, const TopoDS_Shape& face) const;
+    // Face atual correspondente à referência (nula se não houver correspondência segura).
+    TopoDS_Face resolveFaceReference(const std::string& bodyId, const cad::modeling::FaceSignature& face,
+                                     std::string* error = nullptr) const;
+    // Face limite escolhida na peça exibida durante a edição de uma operação: a peça exibida já
+    // contém o resultado da própria operação (ou de posteriores). Devolve o corpo mais recente
+    // ANTERIOR à operação que contém a mesma face (mesmo nome e mesmo plano), com a referência
+    // refeita nesse corpo; nulo se a face só existe a partir da operação editada.
+    std::optional<std::pair<std::string, cad::modeling::FaceSignature>>
+    limitFaceBefore(const std::string& operationId, const std::string& bodyId,
+                    const cad::modeling::FaceSignature& face) const;
 
     bool isModified() const { return m_modified; }
     void setModified(bool modified) { m_modified = modified; }
@@ -373,15 +434,32 @@ private:
     static Operation makeBoolean(const std::string& id, const BooleanParameters& parameters);
     static Operation makeFinish(const std::string& id, OperationType type, const FinishParameters& parameters);
     static ValidationResult validateChamferMode(OperationType type, const FinishParameters& parameters);
-    // Calcula um acabamento a partir do sólido de origem e das assinaturas (atualizadas para as
-    // arestas encontradas).
-    static cad::modeling::FeatureResult computeFinish(Operation& op, const TopoDS_Shape& source);
-    // Extrusão de qualquer modo a partir do esboço (plano já resolvido) e do corpo de destino;
-    // 'tool' recebe o prisma.
+    // Calcula um acabamento a partir do sólido de origem e das referências (atualizadas para as
+    // arestas encontradas); 'names' recebe os nomes das faces do resultado.
+    static cad::modeling::FeatureResult computeFinish(Operation& op, const TopoDS_Shape& source,
+                                                      const cad::modeling::FaceNames* sourceNames,
+                                                      cad::modeling::FaceNames* names = nullptr);
+    // Entradas da extrusão: corpo de destino (saliência/corte) com os nomes das faces, face limite
+    // ("até a face") já resolvida e id da operação (prefixo dos nomes novos).
+    struct ExtrusionInput
+    {
+        TopoDS_Shape target;
+        const cad::modeling::FaceNames* targetNames = nullptr;
+        TopoDS_Face limitFace;
+        std::string opId = "extrusao";
+    };
+    // Extrusão de qualquer modo e condição final a partir do esboço (plano já resolvido); 'tool'
+    // recebe o volume adicionado/removido e 'names' os nomes das faces do resultado.
     static cad::modeling::FeatureResult computeExtrusion(const ExtrudeParameters& p, const cad::sketch::Sketch& sketch,
-                                                         const TopoDS_Shape& target, TopoDS_Shape* tool);
-    // Atualiza o plano de um esboço sobre face a partir do corpo de origem.
-    static bool resolveSupport(cad::sketch::Sketch& sketch, const TopoDS_Shape& body, std::string& error);
+                                                         const ExtrusionInput& input, TopoDS_Shape* tool,
+                                                         cad::modeling::FaceNames* names = nullptr);
+    // Entradas da extrusão a partir do documento atual (pré-visualização).
+    bool extrusionInput(const ExtrudeParameters& p, const std::string& editingId, ExtrusionInput& input,
+                        std::string& error, bool checkConsumed = true) const;
+    // Atualiza o plano de um esboço sobre face a partir do corpo de origem (pelo nome topológico,
+    // com a geometria como desempate/legado). 'note' recebe o aviso de recuperação geométrica.
+    static bool resolveSupport(cad::sketch::Sketch& sketch, const TopoDS_Shape& body,
+                               const cad::modeling::FaceNames* names, std::string& error, std::string* note = nullptr);
     // Referências entre operações: operandos existentes, anteriores, de corpos, distintos e
     // consumidos uma única vez. Preenche consumedBy.
     static bool checkReferences(std::vector<Operation>& operations, std::string& error);
@@ -392,14 +470,14 @@ private:
     // Uma falha não interrompe o cálculo das operações independentes; as dependentes ficam
     // inválidas com 'blockedBy'. Retorna false se houver alguma falha ('error' = a primeira);
     // 'shape' recebe sempre os corpos válidos (estado anterior à falha de cada cadeia). Com
-    // 'issues', esboços não usados cuja face de suporte se perdeu são registrados em vez
-    // de causar falha.
+    // 'tolerant', esboços não usados cuja face de suporte se perdeu são registrados em 'log' em
+    // vez de causar falha; avisos de recuperação geométrica vão para 'log' (se dado).
     static bool rebuild(std::vector<Operation>& operations, std::vector<cad::sketch::Sketch>& sketches,
-                        TopoDS_Shape& shape, std::string& error, std::vector<SketchIssue>* issues = nullptr);
+                        TopoDS_Shape& shape, std::string& error, RebuildLog* log = nullptr, bool tolerant = false);
     // Recalcula e decide se o novo estado pode ser aplicado: válido, ou — em documento que já
     // tem operações inválidas — sem novas operações inválidas (permite corrigir uma de cada vez).
     bool rebuildForCommit(std::vector<Operation>& operations, std::vector<cad::sketch::Sketch>& sketches,
-                          TopoDS_Shape& shape, std::string& error, std::vector<SketchIssue>& issues) const;
+                          TopoDS_Shape& shape, std::string& error, RebuildLog& log) const;
     // Aplica um novo estado (já recalculado) e marca o documento como modificado.
     void commit(std::vector<Operation> operations, TopoDS_Shape shape);
     void commit(std::vector<Operation> operations, std::vector<cad::sketch::Sketch> sketches, TopoDS_Shape shape);
@@ -410,7 +488,7 @@ private:
     bool m_modified = false;
     int m_revision = 0;
     std::vector<cad::sketch::Sketch> m_sketches;
-    std::vector<SketchIssue> m_sketchIssues;
+    RebuildLog m_log;
     int m_nextSketchNumber = 1;
     int m_nextOperationNumber = 1;
 };
@@ -427,5 +505,7 @@ int operationNumber(const std::string& operationId);
 const char* booleanKindLabel(BooleanKind kind);
 // Nome do modo de extrusão ("Novo corpo", "Saliência", "Corte").
 const char* extrudeModeLabel(ExtrudeMode mode);
+// Nome da condição final para a interface ("Profundidade definida", "Plano médio", ...).
+const char* endConditionLabel(EndCondition condition);
 
 } // namespace cad::document

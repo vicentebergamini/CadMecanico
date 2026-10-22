@@ -29,6 +29,7 @@
 #include <QScreen>
 #include <QStatusBar>
 #include <QTemporaryDir>
+#include <QScopeGuard>
 #include <QTest>
 #include <QTimer>
 #include <QTreeWidget>
@@ -415,6 +416,7 @@ void TestE56Ui::cortePeloDialogoAtravessarTudo()
     m_window->useRealExtrusionDialog = true;
     bool checked = false;
     whenDialogOpens<cad::app::ExtrusionDialog>([&](cad::app::ExtrusionDialog* d) {
+        const auto close = qScopeGuard([d] { if (d->isVisible()) d->reject(); }); // falha não deixa o diálogo aberto
         auto* target = d->findChild<QComboBox*>("campoCorpoDestino");
         auto* end = d->findChild<QComboBox*>("campoCondicaoFinal");
         auto* depth = d->findChild<QDoubleSpinBox*>("campoProfundidade");
@@ -429,7 +431,7 @@ void TestE56Ui::cortePeloDialogoAtravessarTudo()
         QVERIFY2(message->text().contains(QStringLiteral("116.858,41")), qPrintable(message->text()));
         QVERIFY(viewer()->aisContext()->IsDisplayed(viewer()->previewPresentation()));
         QVERIFY(viewer()->aisContext()->IsDisplayed(viewer()->operandAPresentation()));
-        end->setCurrentIndex(1); // Atravessar tudo
+        end->setCurrentIndex(end->findData(int(EndCondition::ThroughAll)));
         QVERIFY(!depth->isEnabled());
         QVERIFY2(message->text().contains(QStringLiteral("113.716,81")), qPrintable(message->text()));
         QCOMPARE(m_window->document().operations().size(), size_t(1)); // pré-visualização não altera
@@ -635,7 +637,8 @@ void TestE56Ui::fluxoSolidWorks()
     // 9. Extrusão de Corte → Atravessar tudo (diálogo real).
     m_window->useRealExtrusionDialog = true;
     whenDialogOpens<cad::app::ExtrusionDialog>([](cad::app::ExtrusionDialog* d) {
-        d->findChild<QComboBox*>("campoCondicaoFinal")->setCurrentIndex(1);
+        auto* end = d->findChild<QComboBox*>("campoCondicaoFinal");
+        end->setCurrentIndex(end->findData(int(EndCondition::ThroughAll)));
         d->findChild<QDialogButtonBox*>("botoesExtrusao")->button(QDialogButtonBox::Ok)->click();
     });
     action("actionExtrusaoCorte")->trigger();

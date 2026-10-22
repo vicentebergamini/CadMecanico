@@ -400,6 +400,7 @@ void testEsbocoSemSuporte()
         QJsonObject support = s.value("support").toObject();
         QJsonObject face = support.value("face").toObject();
         face.insert("normal", QJsonArray{0.6, 0.0, 0.8}); // nenhuma face do bloco tem essa normal
+        face.insert("name", QStringLiteral("op-1:inexistente")); // nem esse nome topológico (E5.7.1)
         support.insert("face", face);
         s.insert("support", support);
         sketches[i] = s;
@@ -416,6 +417,12 @@ void testEsbocoSemSuporte()
     const Diagnostic* d = findDiagnostic(list, b.circle);
     CAD_CHECK(d && d->severity == DiagnosticSeverity::Error && d->description.find("remapeável") != std::string::npos);
     CAD_CHECK_NEAR(ShapeInspector::volume(opened.shape()), kBox, 1e-6);
+    // Com o nome topológico válido, a mesma assinatura geométrica alterada é recuperada pelo nome.
+    QByteArray named = json;
+    named.replace("op-1:inexistente", "op-1:topo");
+    CadDocument recovered;
+    CAD_CHECK(DocumentFile::fromJson(named, recovered).ok);
+    CAD_CHECK(recovered.findSketch(b.circle)->plane().normal().IsEqual(gp_Dir(0, 0, 1), 1e-9));
 }
 
 void testFaceInclinadaDeChanfro()

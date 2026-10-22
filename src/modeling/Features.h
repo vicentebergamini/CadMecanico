@@ -1,12 +1,14 @@
 // Operações geométricas elementares usadas pelo documento paramétrico (sem dependência de Qt).
 #pragma once
 
+#include <BRepTools_History.hxx>
 #include <TopoDS_Edge.hxx>
 #include <TopoDS_Face.hxx>
 #include <TopoDS_Shape.hxx>
 #include <gp_Vec.hxx>
 
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace cad::modeling {
@@ -16,6 +18,17 @@ struct FeatureResult
     bool ok = false;
     std::string message;
     TopoDS_Shape shape;
+
+    // Histórico topológico (E5.7.1, nomes persistentes — ver TopoNaming): faces das entradas
+    // modificadas (inclusive divididas) ou removidas pela operação. Nulo se a operação não o
+    // fornece (bloco, prisma).
+    occ::handle<BRepTools_History> history;
+    // Prisma: face inicial (o próprio perfil) e face final.
+    TopoDS_Shape firstFace, lastFace;
+    // Faces criadas a partir de arestas de entrada (laterais do prisma; faces de fillet/chanfro).
+    std::vector<std::pair<TopoDS_Shape, TopoDS_Shape>> generated;
+    // Ferramenta auxiliar da operação (furo passante: o cilindro).
+    TopoDS_Shape tool;
 };
 
 // Bloco alinhado aos eixos, com canto na origem: [0,length] x [0,width] x [0,height].

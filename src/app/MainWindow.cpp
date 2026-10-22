@@ -33,6 +33,9 @@
 #include <QStandardPaths>
 #include <QStatusBar>
 #include <QStyle>
+#include <QEventLoop>
+#include <QShortcut>
+#include <QTimer>
 #include <QToolBar>
 #include <QTreeWidget>
 #include <QVBoxLayout>
@@ -142,6 +145,7 @@ QString parameterLabel(const std::string& key)
     if (key == "depth")  return MainWindow::tr("Profundidade");
     if (key == "distance") return MainWindow::tr("Distância");
     if (key == "distance2") return MainWindow::tr("Distância D2");
+    if (key == "depth2") return MainWindow::tr("Profundidade da direção 2");
     return QString::fromStdString(key);
 }
 
@@ -1115,10 +1119,20 @@ void MainWindow::rebuildTree()
                 if (op.cutOutside)
                     addChild(tr("Lado do corte: fora do perfil (interior preservado)"), "parametro");
             }
-            if (op.endCondition == EndCondition::ThroughAll)
-                addChild(tr("Condição final: Atravessar tudo"), "parametro");
-            else
+            if (op.endCondition == EndCondition::Blind)
                 addChild(tr("Profundidade: %1").arg(mm(op.parameter("depth"))), "parametro");
+            else
+                addChild(tr("Condição final: %1").arg(tr(cad::document::endConditionLabel(op.endCondition))), "parametro");
+            if (op.endCondition == EndCondition::MidPlane)
+                addChild(tr("Profundidade total: %1 (simétrica)").arg(mm(op.parameter("depth"))), "parametro");
+            if (op.endCondition == EndCondition::UpToFace)
+                addChild(tr("Face limite: %1 de %2").arg(QString::fromStdString(op.limitFace.name), bodyDescription(op.limitBodyId)),
+                         "referencia");
+            if (op.direction2)
+                addChild(op.endCondition2 == EndCondition::Blind
+                             ? tr("Direção 2: %1").arg(mm(op.parameter("depth2")))
+                             : tr("Direção 2: %1").arg(tr(cad::document::endConditionLabel(op.endCondition2))),
+                         "parametro");
             QString direction;
             if (sketch)
             {
@@ -1270,8 +1284,10 @@ void MainWindow::showItemProperties(QTreeWidgetItem* item)
             html += tr("<br>Mensagem: %1").arg(QString::fromStdString(op->statusMessage).toHtmlEscaped());
         for (const auto& p : op->parameters)
         {
-            if (p.key == "depth" && op->endCondition == cad::document::EndCondition::ThroughAll)
-                continue; // ignorada em "atravessar tudo"
+            // Profundidade ignorada nas condições que dependem da geometria.
+            if (p.key == "depth" && op->type == OperationType::Extrude && op->endCondition != cad::document::EndCondition::Blind
+                && op->endCondition != cad::document::EndCondition::MidPlane)
+                continue;
             html += p.key == "angle" ? tr("<br>Ângulo: %1°").arg(num(p.value))
                                      : tr("<br>%1: %2").arg(parameterLabel(p.key), mm(p.value));
         }
@@ -1279,10 +1295,16 @@ void MainWindow::showItemProperties(QTreeWidgetItem* item)
             html += tr("<br>Modo: %1<br>Corpo de destino: %2<br>Condição final: %3")
                         .arg(QString::fromUtf8(cad::document::extrudeModeLabel(op->extrudeMode)),
                              bodyDescription(op->targetId).toHtmlEscaped(),
-                             op->endCondition == cad::document::EndCondition::ThroughAll ? tr("Atravessar tudo")
-                                                                                         : tr("Profundidade definida"));
+                             tr(cad::document::endConditionLabel(op->endCondition)));
         if (op->type == OperationType::Extrude && op->extrudeMode == cad::document::ExtrudeMode::Cut)
             html += tr("<br>Cortar o lado de fora: %1").arg(op->cutOutside ? tr("sim") : tr("não"));
+        if (op->type == OperationType::Extrude && op->endCondition == cad::document::EndCondition::UpToFace)
+            html += tr("<br>Face limite: %1 de %2")
+                        .arg(QString::fromStdString(op->limitFace.name).toHtmlEscaped(), bodyDescription(op->limitBodyId).toHtmlEscaped());
+        if (op->type == OperationType::Extrude && op->direction2)
+            html += tr("<br>Direção 2: %1").arg(op->endCondition2 == cad::document::EndCondition::Blind
+                                                       ? mm(op->parameter("depth2"))
+                                                       : tr(cad::document::endConditionLabel(op->endCondition2)));
         if (op->type == OperationType::Extrude)
         {
             const Sketch* sketch = m_document.findSketch(op->sketchId);
@@ -2807,7 +2829,29 @@ std::optional<cad::document::ExtrudeParameters> MainWindow::askExtrusion(const c
             [&dialog, preview](const cad::modeling::FeatureResult& r, bool show) { preview(dialog.parameters(), r.ok, show); });
     // Força a primeira pré-visualização (o diálogo avaliou antes da conexão).
     preview(dialog.parameters(), m_document.previewExtrusion(dialog.parameters(), editId).ok, true);
-    const bool accepted = dialog.exec() == QDialog::Accepted;
+    int code = dialog.exec();
+    // Até a face: o diálogo fecha para a seleção da face limite e é reaberto com ela.
+    while (code == ExtrusionDialog::kPickLimitFace)
+    {
+        m_viewer->clearPreviewShape();
+        m_viewer->clearOperandHighlight();
+        auto face = askLimitFace();
+        // Na edição, a peça exibida já inclui a própria operação: a face é levada ao corpo anterior.
+        if (face && editing)
+        {
+            face = m_document.limitFaceBefore(editId, face->first, face->second);
+            if (!face)
+                statusBar()->showMessage(tr("A face limite deve existir antes desta operação: escolha uma face de "
+                                            "um corpo anterior (a face selecionada é criada pela própria operação "
+                                            "ou por uma posterior)"),
+                                         8000);
+        }
+        if (face)
+            dialog.setLimitFace(face->first, face->second,
+                                tr("%1 de %2").arg(QString::fromStdString(face->second.name), bodyDescription(face->first)));
+        code = dialog.exec();
+    }
+    const bool accepted = code == QDialog::Accepted;
     m_viewer->clearPreviewShape();
     m_viewer->clearOperandHighlight();
     if (!accepted)
@@ -2890,6 +2934,48 @@ std::optional<cad::sketch::SketchChamfer> MainWindow::askChamfer2D(const cad::sk
     if (dialog.exec() != QDialog::Accepted)
         return std::nullopt;
     return std::get<cad::sketch::SketchChamfer>(dialog.geometry());
+}
+
+std::optional<std::pair<std::string, cad::modeling::FaceSignature>> MainWindow::askLimitFace()
+{
+    m_viewer->clearSelection();
+    statusBar()->showMessage(tr("Até a face: clique na face plana limite no visualizador (Esc cancela)"));
+    QEventLoop loop;
+    bool cancelled = false;
+    const auto picked = connect(m_viewer, &cad::viewer::OcctViewerWidget::selectionChanged, &loop, [this, &loop] {
+        if (planarFaceSelected())
+            loop.quit();
+    });
+    QShortcut escape(QKeySequence(Qt::Key_Escape), this);
+    connect(&escape, &QShortcut::activated, &loop, [&] {
+        cancelled = true;
+        loop.quit();
+    });
+    QTimer timeout;
+    timeout.setSingleShot(true);
+    connect(&timeout, &QTimer::timeout, &loop, [&] {
+        cancelled = true;
+        loop.quit();
+    });
+    timeout.start(120000);
+    loop.exec();
+    disconnect(picked);
+    if (cancelled || !planarFaceSelected())
+    {
+        statusBar()->showMessage(tr("Seleção da face limite cancelada"), 5000);
+        return std::nullopt;
+    }
+    const TopoDS_Shape face = selectedFace();
+    const std::string body = m_document.bodyContainingFace(face);
+    const auto reference = body.empty() ? std::nullopt : m_document.faceReference(body, face);
+    if (!reference)
+    {
+        statusBar()->showMessage(tr("A face selecionada não é uma face plana de um corpo"), 5000);
+        return std::nullopt;
+    }
+    statusBar()->showMessage(tr("Face limite: %1 de %2").arg(QString::fromStdString(reference->name), bodyDescription(body)),
+                             5000);
+    return std::make_pair(body, *reference);
 }
 
 bool MainWindow::askConvertToNewBody(const QString& message)

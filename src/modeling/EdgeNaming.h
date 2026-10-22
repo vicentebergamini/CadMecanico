@@ -46,6 +46,7 @@ struct EdgeSignature
     double length = 0.0;
     double radius = 0.0;
     std::vector<gp_Dir> normals; // normais das faces adjacentes no ponto médio (1 ou 2)
+    std::string name;            // nome topológico (E5.7.1, ver TopoNaming); vazio = só geometria
 };
 
 struct EdgeMatch
