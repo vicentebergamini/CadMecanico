@@ -1,9 +1,11 @@
 // Janela principal do CAD Mecânico.
 #pragma once
 
+#include "discretization/Discretization.h"
 #include "document/CadDocument.h"
 #include "document/Diagnostics.h"
 #include "io/StlExporter.h"
+#include "viewer/OcctViewerWidget.h"
 
 #include <QMainWindow>
 #include <QPointer>
@@ -11,6 +13,8 @@
 
 #include <TopoDS_Shape.hxx>
 
+#include <atomic>
+#include <memory>
 #include <optional>
 
 class QAction;
@@ -29,6 +33,7 @@ class OcctViewerWidget;
 
 namespace cad::app {
 
+class DiscretizationDialog;
 class FinishDialog;
 
 class MainWindow : public QMainWindow
@@ -139,6 +144,27 @@ public:
     std::vector<cad::document::Diagnostic> diagnostics() const;
     QTreeWidget* diagnosticsList() const { return m_diagnostics; }
 
+    // --- Discretização volumétrica (E5.7.2) -------------------------------------------
+    // Gera a discretização do corpo ativo 'bodyId' (cálculo numa thread de trabalho sobre uma
+    // CÓPIA do sólido; a interface continua respondendo e mostra o progresso). Durante a geração
+    // os comandos que alteram o documento ficam indisponíveis; se ainda assim o sólido mudar, o
+    // resultado é descartado. Retorna false em erro ou cancelamento (o sólido nunca é alterado).
+    bool discretize(const QString& bodyId, const cad::discretization::Parameters& parameters);
+    // Pede a interrupção da geração em andamento.
+    void cancelDiscretization();
+    bool isDiscretizing() const { return m_discretizing; }
+    // Discretização atual (nula se não houver ou se o sólido de origem mudou).
+    std::shared_ptr<const cad::discretization::Discretization> discretization() const;
+    QString discretizationBody() const { return m_discretizationBody; }
+    // Resumo da última geração (texto exibido no diálogo, HTML).
+    QString discretizationSummary() const { return m_discretizationSummary; }
+    // Tempo da última atualização da visualização da discretização (s).
+    double discretizationDisplaySeconds() const { return m_discretizationDisplaySeconds; }
+    // Exporta a nuvem de nós (confirmação antes de sobrescrever). Retorna true se gravou.
+    bool exportNodesTo(const QString& filePath, cad::discretization::LengthUnit unit);
+    // Diálogo aberto pelo comando (nulo fora dele).
+    DiscretizationDialog* discretizationDialog() const;
+
 public slots:
     void exportStep();
     void showAbout();
@@ -162,6 +188,10 @@ public slots:
     void finishCommand(cad::document::OperationType type);
     void editOperation();
     void exportStl();
+    // Ferramentas > Discretização volumétrica; Arquivo > Exportar > Nuvem de pontos ASCII.
+    void discretizeCommand();
+    void exportNodeCloud();
+    void clearDiscretization();
 
     void newSketch();
     void editSelectedSketch();
@@ -198,6 +228,12 @@ protected:
     // "Até a face" (E5.7.1): face plana limite clicada no visualizador (corpo + referência
     // persistente); vazio = cancelado (Esc).
     virtual std::optional<std::pair<std::string, cad::modeling::FaceSignature>> askLimitFace();
+    // Nuvem de pontos ASCII (E5.7.2): caminho do arquivo (vazio = cancelado) e unidade (menu
+    // Arquivo > Exportar; no diálogo da discretização a unidade é escolhida no próprio diálogo).
+    virtual QString askNodeExportPath(const QString& suggestedPath, cad::discretization::LengthUnit unit);
+    virtual std::optional<cad::discretization::LengthUnit> askNodeExportUnit(cad::discretization::LengthUnit current);
+    // Abre o diálogo da discretização (modal) e atende seus pedidos até ser fechado.
+    virtual void runDiscretizationDialog(const QString& preselectedBody);
 
 private:
     void createActions();
@@ -242,6 +278,14 @@ private:
     void applyChamferOptions(cad::document::FinishParameters& p, const std::vector<TopoDS_Edge>& edges) const;
     void applyFinishDialog();
     void endFinish();
+    // Discretização: exportação com a unidade dada (pede o caminho), estimativa da grade para o
+    // diálogo, resumo do resultado e opções de exibição (ações do menu <-> visualizador).
+    bool exportNodeCloudWithUnit(cad::discretization::LengthUnit unit);
+    void updateDiscretizationEstimate();
+    QString describeDiscretization(const cad::discretization::Discretization& d) const;
+    void applyDiscretizationDisplay();
+    // Reexibe a discretização (se ainda válida) depois que o visualizador recebeu nova forma.
+    void restoreDiscretizationView();
 
     cad::document::CadDocument m_document;
     QString m_documentPath;
@@ -292,6 +336,13 @@ private:
     QAction* m_actDeleteEntity = nullptr;
     QAction* m_actFinishSketch = nullptr;
     QAction* m_actCancelSketch = nullptr;
+    QAction* m_actDiscretize = nullptr;
+    QAction* m_actExportNodes = nullptr;
+    QAction* m_actShowSolid = nullptr;
+    QAction* m_actShowVertexNodes = nullptr;
+    QAction* m_actShowCenterNodes = nullptr;
+    QAction* m_actShowCubeEdges = nullptr;
+    QAction* m_actClearDiscretization = nullptr;
     QActionGroup* m_sketchTools = nullptr;
     QToolBar* m_toolBarSketch = nullptr;
 
@@ -305,6 +356,18 @@ private:
     QPointer<FinishDialog> m_finishDialog;
     QString m_finishEditId;          // acabamento em edição (vazio ao criar)
     mutable QString m_finishSource;  // corpo de origem das arestas selecionadas
+
+    // Discretização volumétrica (sessão; parâmetros reaproveitados ao reabrir o diálogo).
+    std::shared_ptr<const cad::discretization::Discretization> m_discretization;
+    QString m_discretizationBody;
+    TopoDS_Shape m_discretizationSource; // resultado do corpo usado (validade: IsSame)
+    cad::discretization::Parameters m_discretizationParameters;
+    cad::discretization::LengthUnit m_nodeUnit = cad::discretization::LengthUnit::Millimeter;
+    QString m_discretizationSummary;
+    double m_discretizationDisplaySeconds = 0.0;
+    bool m_discretizing = false;
+    std::shared_ptr<std::atomic<bool>> m_discretizationCancel;
+    QPointer<DiscretizationDialog> m_discretizationDialog;
 
     QMenu* m_menuStandardViews = nullptr;
     QToolBar* m_toolBarFile = nullptr;

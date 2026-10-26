@@ -8,6 +8,7 @@ target_link_libraries(cad_viewer PUBLIC
     Qt6::OpenGLWidgets
     cad_sketch
     cad_modeling
+    cad_discretization
     TKernel TKMath TKBRep TKService TKV3d TKOpenGl
 )
 if(WIN32)

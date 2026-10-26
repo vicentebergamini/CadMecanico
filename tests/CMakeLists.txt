@@ -50,11 +50,14 @@ add_test(NAME e57 COMMAND test_e57)
 add_executable(test_e571 test_e571.cpp TestCheck.h)
 target_link_libraries(test_e571 PRIVATE cad_document cad_document_io cad_io)
 add_test(NAME e571 COMMAND test_e571)
+add_executable(test_e572 test_e572.cpp TestCheck.h)
+target_link_libraries(test_e572 PRIVATE cad_discretization cad_document TKBO psapi)
+add_test(NAME e572 COMMAND test_e572)
 # QtCore (JSON do .cadmec) no PATH em tempo de execução.
 set_tests_properties(e57 e571 PROPERTIES
     ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${QT6_INSTALL_PREFIX}/${QT6_INSTALL_BINS}")
 
-set_tests_properties(geometria step_roundtrip selecao_info documento esboco extrusao stl booleanas arcos_cantos2d acabamentos3d e56 e57 e571 PROPERTIES LABELS "core")
+set_tests_properties(geometria step_roundtrip selecao_info documento esboco extrusao stl booleanas arcos_cantos2d acabamentos3d e56 e57 e571 e572 PROPERTIES LABELS "core")
 
 # Formato .cadmec (QtCore, sem interface gráfica).
 qt_add_executable(test_arquivo_cadmec test_arquivo_cadmec.cpp)
@@ -134,6 +137,10 @@ qt_add_executable(test_e571_ui test_e571_ui.cpp ViewerTestUtils.h)
 set_target_properties(test_e571_ui PROPERTIES AUTOMOC ON WIN32_EXECUTABLE OFF)
 target_link_libraries(test_e571_ui PRIVATE cad_app cad_viewer cad_document_io cad_io cad_modeling Qt6::Test)
 
+qt_add_executable(test_e572_ui test_e572_ui.cpp ViewerTestUtils.h)
+set_target_properties(test_e572_ui PROPERTIES AUTOMOC ON WIN32_EXECUTABLE OFF)
+target_link_libraries(test_e572_ui PRIVATE cad_app cad_viewer cad_discretization cad_document_io cad_io cad_modeling Qt6::Test)
+
 qt_add_executable(test_e561_ui test_e561_ui.cpp ViewerTestUtils.h)
 set_target_properties(test_e561_ui PROPERTIES AUTOMOC ON WIN32_EXECUTABLE OFF)
 target_link_libraries(test_e561_ui PRIVATE cad_app cad_viewer cad_document_io cad_io cad_modeling Qt6::Test)
@@ -153,10 +160,11 @@ add_test(NAME e56_ui COMMAND test_e56_ui)
 add_test(NAME e561_ui COMMAND test_e561_ui)
 add_test(NAME e57_ui COMMAND test_e57_ui)
 add_test(NAME e571_ui COMMAND test_e571_ui)
+add_test(NAME e572_ui COMMAND test_e572_ui)
 add_test(NAME e561_ui_escala COMMAND test_e561_ui)
 
 set(_cad_gl_env "QT_QPA_PLATFORM=windows;QT_PLUGIN_PATH=${QT6_INSTALL_PREFIX}/${QT6_INSTALL_PLUGINS}")
-set_tests_properties(viewer app_viewer interacao esboco_ui documento_vazio extrusao_ui booleanas_ui e55_ui e56_ui e561_ui e57_ui e571_ui PROPERTIES
+set_tests_properties(viewer app_viewer interacao esboco_ui documento_vazio extrusao_ui booleanas_ui e55_ui e56_ui e561_ui e57_ui e571_ui e572_ui PROPERTIES
     LABELS "gui;opengl"
     TIMEOUT 300
     ENVIRONMENT "${_cad_gl_env}"

@@ -40,8 +40,17 @@
 #include <Select3D_SensitiveEntity.hxx>
 #include <StdSelect_BRepOwner.hxx>
 
+#include "discretization/Discretization.h"
 #include "modeling/ShapeInspector.h"
 #include "sketch/SketchShapes.h"
+
+#include <Graphic3d_ArrayOfPoints.hxx>
+#include <Graphic3d_ArrayOfSegments.hxx>
+#include <Graphic3d_AspectLine3d.hxx>
+#include <Graphic3d_AspectMarker3d.hxx>
+
+#include <chrono>
+#include <functional>
 
 #include <cmath>
 #include <V3d_AmbientLight.hxx>
@@ -77,6 +86,67 @@ const Quantity_Color kPreviewSolidColor(0.20, 0.75, 0.35, Quantity_TOC_sRGB);
 // Operandos das booleanas: A (corpo principal) azul, B (ferramenta) vermelho.
 const Quantity_Color kOperandAColor(0.15, 0.40, 0.95, Quantity_TOC_sRGB);
 const Quantity_Color kOperandBColor(0.95, 0.20, 0.15, Quantity_TOC_sRGB);
+
+// Discretização volumétrica (E5.7.2): nós dos vértices, nós centrais e contornos dos cubos.
+const Quantity_Color kVertexNodeColor(0.05, 0.25, 0.85, Quantity_TOC_sRGB);
+const Quantity_Color kCenterNodeColor(0.85, 0.10, 0.10, Quantity_TOC_sRGB);
+const Quantity_Color kCubeEdgeColor(0.25, 0.25, 0.25, Quantity_TOC_sRGB);
+constexpr double kNodePointScale = 2.0;
+constexpr double kSolidTransparencyWithNodes = 0.7;
+
+// Conjunto de segmentos exibido como um único objeto gráfico (uma primitiva), não selecionável.
+class SegmentSet : public AIS_InteractiveObject
+{
+public:
+    SegmentSet(const occ::handle<Graphic3d_ArrayOfSegments>& segments, const Quantity_Color& color)
+        : m_segments(segments), m_color(color)
+    {
+    }
+    bool AcceptDisplayMode(const int mode) const override { return mode == 0; }
+
+protected:
+    void Compute(const occ::handle<PrsMgr_PresentationManager>&, const occ::handle<Prs3d_Presentation>& prs,
+                 const int mode) override
+    {
+        if (mode != 0 || m_segments.IsNull())
+            return;
+        occ::handle<Graphic3d_Group> group = prs->NewGroup();
+        group->SetGroupPrimitivesAspect(new Graphic3d_AspectLine3d(m_color, Aspect_TOL_SOLID, 1.0));
+        group->AddPrimitiveArray(m_segments);
+    }
+    void ComputeSelection(const occ::handle<SelectMgr_Selection>&, const int) override {}
+
+private:
+    occ::handle<Graphic3d_ArrayOfSegments> m_segments;
+    Quantity_Color m_color;
+};
+
+// Nuvem de pontos exibida como um único objeto gráfico (marcadores agrupados), não selecionável.
+class PointSet : public AIS_InteractiveObject
+{
+public:
+    PointSet(const occ::handle<Graphic3d_ArrayOfPoints>& points, const Quantity_Color& color)
+        : m_points(points), m_color(color)
+    {
+    }
+    bool AcceptDisplayMode(const int mode) const override { return mode == 0; }
+
+protected:
+    void Compute(const occ::handle<PrsMgr_PresentationManager>&, const occ::handle<Prs3d_Presentation>& prs,
+                 const int mode) override
+    {
+        if (mode != 0 || m_points.IsNull())
+            return;
+        occ::handle<Graphic3d_Group> group = prs->NewGroup();
+        group->SetGroupPrimitivesAspect(new Graphic3d_AspectMarker3d(Aspect_TOM_BALL, m_color, kNodePointScale));
+        group->AddPrimitiveArray(m_points);
+    }
+    void ComputeSelection(const occ::handle<SelectMgr_Selection>&, const int) override {}
+
+private:
+    occ::handle<Graphic3d_ArrayOfPoints> m_points;
+    Quantity_Color m_color;
+};
 
 // Eixos de referência na origem global, com tamanho constante na tela (pixels lógicos).
 constexpr double kOriginAxesSize = 70.0;
@@ -410,6 +480,10 @@ void OcctViewerWidget::releaseGraphics()
     m_previewSolid.Nullify();
     m_operandA.Nullify();
     m_operandB.Nullify();
+    m_vertexNodes.Nullify();
+    m_centerNodes.Nullify();
+    m_cubeEdges.Nullify();
+    m_discretization.reset();
     m_sketchPlane.reset();
     m_view->Remove();
     m_view.Nullify();
@@ -422,6 +496,10 @@ void OcctViewerWidget::releaseGraphics()
 
 void OcctViewerWidget::setShape(const TopoDS_Shape& shape)
 {
+    // A discretização exibida pertence à forma anterior.
+    removeDiscretizationObjects();
+    m_discretization.reset();
+    m_discretizationStats = DiscretizationOverlayStats();
     if (!m_shape.IsNull())
     {
         m_context->ClearSelected(false);
@@ -965,6 +1043,9 @@ void OcctViewerWidget::enterSketchMode(const cad::sketch::Sketch& sketch)
         m_context->Erase(m_shape, false);
     for (const auto& s : m_documentSketchShapes)
         m_context->Erase(s, false);
+    for (const auto& o : {m_vertexNodes, m_centerNodes, m_cubeEdges})
+        if (!o.IsNull())
+            m_context->Erase(o, false);
     m_context->Erase(m_viewCube, false);
     m_context->Erase(m_originAxes, false);
     setupSketchNavigation(true);
@@ -1096,7 +1177,7 @@ void OcctViewerWidget::exitSketchMode()
     m_context->Display(m_originAxes, 0, -1, false);
     setupSketchNavigation(false);
     ResetPreviousMoveTo();
-    redrawScene();
+    applyDiscretizationDisplay(); // discretização e opção de ocultar o sólido (redesenha)
 }
 
 void OcctViewerWidget::setSketchTool(SketchTool tool)
@@ -1312,6 +1393,181 @@ void OcctViewerWidget::handleSketchClick(const QPointF& pos)
     removePreview();
     emit sketchGeometryRequested(snapGeometry(geometry));
     updateView();
+}
+
+} // namespace cad::viewer
+
+// --- Discretização volumétrica (E5.7.2) ------------------------------------------
+
+namespace cad::viewer {
+
+void OcctViewerWidget::removeDiscretizationObjects()
+{
+    if (!m_context.IsNull())
+        for (const auto& o : {m_vertexNodes, m_centerNodes, m_cubeEdges})
+            if (!o.IsNull())
+                m_context->Remove(o, false);
+    m_vertexNodes.Nullify();
+    m_centerNodes.Nullify();
+    m_cubeEdges.Nullify();
+}
+
+bool OcctViewerWidget::isSolidDisplayed() const
+{
+    return !m_context.IsNull() && !m_shape.IsNull() && m_context->IsDisplayed(m_shape);
+}
+
+void OcctViewerWidget::setDiscretizationDisplay(const DiscretizationDisplay& display)
+{
+    m_discretizationDisplay = display;
+    applyDiscretizationDisplay();
+}
+
+void OcctViewerWidget::applyDiscretizationDisplay()
+{
+    if (m_context.IsNull())
+        return;
+    const bool sketch = isSketchMode();
+    auto show = [this, sketch](const occ::handle<AIS_InteractiveObject>& o, bool on) {
+        if (o.IsNull())
+            return;
+        if (on && !sketch)
+        {
+            if (!m_context->IsDisplayed(o))
+                m_context->Display(o, 0, -1, false); // não selecionável
+        }
+        else if (m_context->IsDisplayed(o))
+            m_context->Erase(o, false);
+    };
+    show(m_vertexNodes, m_discretizationDisplay.vertexNodes);
+    show(m_centerNodes, m_discretizationDisplay.centerNodes);
+    show(m_cubeEdges, m_discretizationDisplay.cubeEdges);
+    if (!m_shape.IsNull() && !sketch)
+    {
+        const bool wantSolid = !hasDiscretization() || m_discretizationDisplay.solid;
+        const bool displayed = m_context->IsDisplayed(m_shape);
+        if (wantSolid && !displayed)
+        {
+            m_context->Display(m_shape, AIS_Shaded, AIS_Shape::SelectionMode(TopAbs_FACE), false);
+            activateSelectionModes();
+        }
+        else if (!wantSolid && displayed)
+        {
+            m_context->ClearSelected(false);
+            m_context->Erase(m_shape, false);
+        }
+        if (wantSolid)
+        {
+            // Sobreposição: o sólido fica translúcido para que os nós internos apareçam.
+            if (hasDiscretization())
+                m_context->SetTransparency(m_shape, kSolidTransparencyWithNodes, false);
+            else if (m_shape->Transparency() > 0.0)
+                m_context->UnsetTransparency(m_shape, false);
+        }
+    }
+    redrawScene();
+}
+
+void OcctViewerWidget::setDiscretization(std::shared_ptr<const cad::discretization::Discretization> data)
+{
+    using cad::discretization::Discretization;
+    removeDiscretizationObjects();
+    m_discretization = std::move(data);
+    m_discretizationStats = DiscretizationOverlayStats();
+    if (!m_discretization || m_context.IsNull() || m_discretization->empty())
+    {
+        applyDiscretizationDisplay();
+        return;
+    }
+    const auto t0 = std::chrono::steady_clock::now();
+    const Discretization& d = *m_discretization;
+    const auto& grid = d.grid();
+
+    // Nuvens de pontos (amostragem regular acima do limite).
+    auto cloud = [&d](std::int64_t first, std::int64_t count, std::int64_t& shown, bool& reduced,
+                      const Quantity_Color& color) {
+        const std::int64_t stride = std::max<std::int64_t>(1, (count + kMaxDisplayPoints - 1) / kMaxDisplayPoints);
+        reduced = stride > 1;
+        shown = (count + stride - 1) / stride;
+        occ::handle<Graphic3d_ArrayOfPoints> points = new Graphic3d_ArrayOfPoints(int(shown));
+        for (std::int64_t n = 0; n < count; n += stride)
+            points->AddVertex(gp_Pnt(d.node(first + n).position));
+        return occ::handle<AIS_InteractiveObject>(new PointSet(points, color));
+    };
+    bool reducedCenters = false;
+    m_vertexNodes = cloud(1, d.vertexNodeCount(), m_discretizationStats.vertexPoints,
+                          m_discretizationStats.reducedPoints, kVertexNodeColor);
+    m_centerNodes = cloud(d.vertexNodeCount() + 1, d.centerNodeCount(), m_discretizationStats.centerPoints,
+                          reducedCenters, kCenterNodeColor);
+    m_discretizationStats.reducedPoints = m_discretizationStats.reducedPoints || reducedCenters;
+
+    // Arestas únicas dos cubos aceitos: bit 1/2/4 = aresta X/Y/Z que começa no ponto da rede.
+    std::vector<std::uint8_t> marks(std::size_t(grid.latticeCount()), 0);
+    for (std::int64_t cell : d.cubeCells())
+    {
+        int i, j, k;
+        grid.cellIjk(cell, i, j, k);
+        for (int a = 0; a <= 1; ++a)
+            for (int b = 0; b <= 1; ++b)
+            {
+                marks[std::size_t(grid.latticeIndex(i, j + a, k + b))] |= 1;
+                marks[std::size_t(grid.latticeIndex(i + a, j, k + b))] |= 2;
+                marks[std::size_t(grid.latticeIndex(i + a, j + b, k))] |= 4;
+            }
+    }
+    // Aresta na superfície externa: nem todas as quatro células que a compartilham são aceitas.
+    auto onSurface = [&d](int axis, int i, int j, int k) {
+        int accepted = 0;
+        for (int a = -1; a <= 0; ++a)
+            for (int b = -1; b <= 0; ++b)
+            {
+                if (axis == 0)
+                    accepted += d.cellAccepted(i, j + a, k + b) ? 1 : 0;
+                else if (axis == 1)
+                    accepted += d.cellAccepted(i + a, j, k + b) ? 1 : 0;
+                else
+                    accepted += d.cellAccepted(i + a, j + b, k) ? 1 : 0;
+            }
+        return accepted < 4;
+    };
+    auto forEachEdge = [&](bool surfaceOnly, const std::function<void(int, int, int, int)>& visit) {
+        for (std::int64_t p = 0; p < std::int64_t(marks.size()); ++p)
+        {
+            if (!marks[std::size_t(p)])
+                continue;
+            int i, j, k;
+            grid.latticeIjk(p, i, j, k);
+            for (int axis = 0; axis < 3; ++axis)
+                if ((marks[std::size_t(p)] & (1 << axis)) && (!surfaceOnly || onSurface(axis, i, j, k)))
+                    visit(axis, i, j, k);
+        }
+    };
+    std::int64_t edges = 0;
+    forEachEdge(false, [&edges](int, int, int, int) { ++edges; });
+    bool surfaceOnly = false;
+    if (edges > kMaxDisplaySegments)
+    {
+        surfaceOnly = true;
+        edges = 0;
+        forEachEdge(true, [&edges](int, int, int, int) { ++edges; });
+    }
+    const std::int64_t stride = std::max<std::int64_t>(1, (edges + kMaxDisplaySegments - 1) / kMaxDisplaySegments);
+    const std::int64_t shownEdges = (edges + stride - 1) / stride;
+    occ::handle<Graphic3d_ArrayOfSegments> segments = new Graphic3d_ArrayOfSegments(int(2 * shownEdges));
+    std::int64_t n = 0;
+    forEachEdge(surfaceOnly, [&](int axis, int i, int j, int k) {
+        if (n++ % stride != 0)
+            return;
+        segments->AddVertex(gp_Pnt(grid.vertex(i, j, k)));
+        segments->AddVertex(gp_Pnt(grid.vertex(i + (axis == 0), j + (axis == 1), k + (axis == 2))));
+    });
+    m_cubeEdges = new SegmentSet(segments, kCubeEdgeColor);
+    m_discretizationStats.segments = shownEdges;
+    m_discretizationStats.surfaceEdgesOnly = surfaceOnly;
+    m_discretizationStats.reducedEdges = stride > 1;
+    m_discretizationStats.buildSeconds =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    applyDiscretizationDisplay();
 }
 
 } // namespace cad::viewer

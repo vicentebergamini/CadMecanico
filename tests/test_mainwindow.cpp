@@ -155,14 +155,21 @@ void TestMainWindow::menus()
     QStringList titles;
     for (QAction* a : m_window->menuBar()->actions())
         titles << plainText(a->text());
-    QCOMPARE(titles, QStringList({"Arquivo", "Editar", "Operações", "Esboço", "Visualizar", "Ajuda"}));
+    QCOMPARE(titles, QStringList({"Arquivo", "Editar", "Operações", "Esboço", "Ferramentas", "Visualizar", "Ajuda"}));
 
     auto* file = m_window->findChild<QMenu*>("menuArquivo");
     QVERIFY(file);
     QCOMPARE(actionTexts(file), QStringList({"Novo", "Exemplos", "Abrir...", "Salvar", "Salvar como...", "|", "Exportar", "|", "Sair"}));
     auto* exportMenu = m_window->findChild<QMenu*>("menuExportar");
     QVERIFY(exportMenu);
-    QCOMPARE(actionTexts(exportMenu), QStringList({"STEP (*.step)...", "STL (*.stl)..."}));
+    QCOMPARE(actionTexts(exportMenu), QStringList({"STEP (*.step)...", "STL (*.stl)...", "Nuvem de pontos ASCII (*.txt)..."}));
+    // E5.7.2: Ferramentas > Discretização volumétrica (exportação só com discretização gerada).
+    auto* tools = m_window->findChild<QMenu*>("menuFerramentas");
+    QVERIFY(tools);
+    QCOMPARE(actionTexts(tools), QStringList({"Discretização volumétrica...", "Exibição da discretização",
+                                              "Remover discretização da vista"}));
+    QVERIFY(action("actionDiscretizacao")->isEnabled());
+    QVERIFY(!action("actionExportarNuvemPontos")->isEnabled());
     auto* operations = m_window->findChild<QMenu*>("menuOperacoes");
     QVERIFY(operations);
     QCOMPARE(actionTexts(operations), QStringList({"Extrusão...", "Extrusão de Novo Corpo...", "Extrusão de Saliência...", "Extrusão de Corte...", "|", "União...", "Subtração...", "Interseção...", "|",

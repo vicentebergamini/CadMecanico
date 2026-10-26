@@ -19,10 +19,37 @@
 
 #include <QHash>
 
+#include <cstdint>
+#include <memory>
 #include <optional>
 #include <vector>
 
+namespace cad::discretization {
+class Discretization;
+}
+
 namespace cad::viewer {
+
+// Exibição da discretização volumétrica (E5.7.2).
+struct DiscretizationDisplay
+{
+    bool solid = true;       // sólido original (translúcido enquanto a discretização é exibida)
+    bool vertexNodes = true; // nós dos vértices (azul)
+    bool centerNodes = true; // nós centrais (vermelho)
+    bool cubeEdges = true;   // contornos dos cubos (cinza)
+};
+
+// Carga gráfica efetivamente enviada ao visualizador.
+struct DiscretizationOverlayStats
+{
+    std::int64_t vertexPoints = 0;
+    std::int64_t centerPoints = 0;
+    std::int64_t segments = 0;
+    bool reducedPoints = false; // amostragem dos nós (acima de kMaxDisplayPoints)
+    bool surfaceEdgesOnly = false; // só arestas da superfície externa da discretização
+    bool reducedEdges = false;  // amostragem das arestas (acima de kMaxDisplaySegments)
+    double buildSeconds = 0.0;
+};
 
 enum class StandardView
 {
@@ -114,6 +141,27 @@ public:
     void clearOperandHighlight() { setOperandHighlight(TopoDS_Shape(), TopoDS_Shape()); }
     const occ::handle<AIS_Shape>& operandAPresentation() const { return m_operandA; }
     const occ::handle<AIS_Shape>& operandBPresentation() const { return m_operandB; }
+
+    // --- Discretização volumétrica (E5.7.2) -----------------------------------
+    // Nós e contornos dos cubos exibidos como objetos AGRUPADOS (uma nuvem de pontos para os
+    // vértices, uma para os centros e um conjunto de segmentos para as arestas), não selecionáveis;
+    // o B-Rep do sólido não é alterado. Limites de carga: até kMaxDisplayPoints pontos por nuvem
+    // (acima disso, amostragem regular) e até kMaxDisplaySegments segmentos (acima disso, só as
+    // arestas da superfície externa da discretização e, se ainda exceder, amostragem). Nula remove.
+    // A discretização exibida é descartada em setShape() (pertence à forma anterior).
+    static constexpr std::int64_t kMaxDisplayPoints = 1'000'000;
+    static constexpr std::int64_t kMaxDisplaySegments = 1'500'000;
+    void setDiscretization(std::shared_ptr<const cad::discretization::Discretization> data);
+    void clearDiscretization() { setDiscretization(nullptr); }
+    bool hasDiscretization() const { return m_discretization != nullptr; }
+    void setDiscretizationDisplay(const DiscretizationDisplay& display);
+    const DiscretizationDisplay& discretizationDisplay() const { return m_discretizationDisplay; }
+    const DiscretizationOverlayStats& discretizationOverlayStats() const { return m_discretizationStats; }
+    occ::handle<AIS_InteractiveObject> vertexNodesPresentation() const { return m_vertexNodes; }
+    occ::handle<AIS_InteractiveObject> centerNodesPresentation() const { return m_centerNodes; }
+    occ::handle<AIS_InteractiveObject> cubeEdgesPresentation() const { return m_cubeEdges; }
+    // true se o sólido está exibido (falso quando ocultado pela opção da discretização).
+    bool isSolidDisplayed() const;
 
     // --- Esboços --------------------------------------------------------------
     // Esboços do documento exibidos fora da edição (somente visualização).
@@ -236,6 +284,17 @@ private:
     bool m_edgesOnly = false;
     // Ativa no objeto da peça os modos de seleção correspondentes ao modo atual.
     void activateSelectionModes();
+
+    // Discretização (E5.7.2)
+    void removeDiscretizationObjects();
+    // Exibe/oculta os objetos da discretização e o sólido conforme as opções e o modo atual.
+    void applyDiscretizationDisplay();
+    std::shared_ptr<const cad::discretization::Discretization> m_discretization;
+    DiscretizationDisplay m_discretizationDisplay;
+    DiscretizationOverlayStats m_discretizationStats;
+    occ::handle<AIS_InteractiveObject> m_vertexNodes;
+    occ::handle<AIS_InteractiveObject> m_centerNodes;
+    occ::handle<AIS_InteractiveObject> m_cubeEdges;
 };
 
 } // namespace cad::viewer

@@ -6,6 +6,7 @@ qt_add_library(cad_app STATIC
     BooleanDialog.h BooleanDialog.cpp
     FinishDialog.h FinishDialog.cpp
     StlExportDialog.h StlExportDialog.cpp
+    DiscretizationDialog.h DiscretizationDialog.cpp
 )
 set_target_properties(cad_app PROPERTIES AUTOMOC ON)
 target_include_directories(cad_app PUBLIC ${PROJECT_SOURCE_DIR}/src)
@@ -16,4 +17,5 @@ target_link_libraries(cad_app PUBLIC
     cad_document
     cad_document_io
     cad_viewer
+    cad_discretization
 )

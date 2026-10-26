@@ -20,6 +20,9 @@ endif()
 add_subdirectory(src/modeling)
 add_subdirectory(src/io)
 
+# Discretização volumétrica e exportação ASCII de nós (E5.7.2)
+add_subdirectory(src/discretization)
+
 # Esboços 2D, documento paramétrico e formato nativo .cadmec
 add_subdirectory(src/sketch)
 add_subdirectory(src/document)

@@ -1,6 +1,7 @@
 #include "app/MainWindow.h"
 
 #include "app/BooleanDialog.h"
+#include "app/DiscretizationDialog.h"
 #include "app/ExtrusionDialog.h"
 #include "app/FinishDialog.h"
 #include "app/ParametersDialog.h"
@@ -10,6 +11,8 @@
 #include "modeling/ShapeInspector.h"
 #include "sketch/SketchProfile.h"
 #include "sketch/SketchResolver.h"
+#include "discretization/NodeAsciiExporter.h"
+#include "discretization/VoxelDiscretizer.h"
 #include "document/DocumentFile.h"
 #include "io/StepExporter.h"
 #include "modeling/SubShapeInfo.h"
@@ -41,12 +44,15 @@
 #include <QVBoxLayout>
 #include <QWidget>
 
+#include <BRepBuilderAPI_Copy.hxx>
 #include <BRep_Builder.hxx>
 #include <Standard_Version.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Compound.hxx>
 
+#include <chrono>
 #include <filesystem>
+#include <thread>
 
 namespace cad::app {
 
@@ -461,6 +467,32 @@ void MainWindow::createActions()
     m_actViewRight = makeViewAction(tr("&Direita"), "actionVistaDireita", tr("Vista lateral direita (ortográfica)"));
     m_actViewIso   = makeViewAction(tr("&Isométrica"), "actionVistaIsometrica", tr("Vista isométrica"));
 
+    // Ferramentas: discretização volumétrica (E5.7.2)
+    m_actDiscretize = new QAction(tr("&Discretização volumétrica..."), this);
+    m_actDiscretize->setObjectName("actionDiscretizacao");
+    m_actDiscretize->setStatusTip(tr("Discretiza um sólido em cubos elementares de aresta lco (nós dos vértices e "
+                                     "centrais) e exporta a nuvem de pontos ASCII"));
+    connect(m_actDiscretize, &QAction::triggered, this, &MainWindow::discretizeCommand);
+    m_actExportNodes = new QAction(tr("&Nuvem de pontos ASCII (*.txt)..."), this);
+    m_actExportNodes->setObjectName("actionExportarNuvemPontos");
+    connect(m_actExportNodes, &QAction::triggered, this, &MainWindow::exportNodeCloud);
+    auto makeDisplayAction = [this](const QString& text, const char* name) {
+        auto* act = new QAction(text, this);
+        act->setObjectName(name);
+        act->setCheckable(true);
+        act->setChecked(true);
+        connect(act, &QAction::toggled, this, [this] { applyDiscretizationDisplay(); });
+        return act;
+    };
+    m_actShowSolid = makeDisplayAction(tr("Exibir &sólido original"), "actionExibirSolido");
+    m_actShowVertexNodes = makeDisplayAction(tr("Exibir nós dos &vértices"), "actionExibirNosVertices");
+    m_actShowCenterNodes = makeDisplayAction(tr("Exibir nós &centrais"), "actionExibirNosCentrais");
+    m_actShowCubeEdges = makeDisplayAction(tr("Exibir c&ontornos dos cubos"), "actionExibirContornosCubos");
+    m_actClearDiscretization = new QAction(tr("&Remover discretização da vista"), this);
+    m_actClearDiscretization->setObjectName("actionRemoverDiscretizacao");
+    m_actClearDiscretization->setStatusTip(tr("Descarta a discretização exibida (o sólido não é alterado)"));
+    connect(m_actClearDiscretization, &QAction::triggered, this, &MainWindow::clearDiscretization);
+
     // Ajuda
     m_actAbout = new QAction(tr("&Sobre o CAD Mecânico"), this);
     m_actAbout->setObjectName("actionSobre");
@@ -483,6 +515,7 @@ void MainWindow::createMenus()
     menuExport->setObjectName("menuExportar");
     menuExport->addAction(m_actExportStep);
     menuExport->addAction(m_actExportStl);
+    menuExport->addAction(m_actExportNodes);
     menuFile->addSeparator();
     menuFile->addAction(m_actQuit);
 
@@ -531,6 +564,17 @@ void MainWindow::createMenus()
     menuSketch->addAction(m_actCancelSketch);
     menuSketch->addSeparator();
     menuSketch->addAction(m_actAutoExtrude);
+
+    QMenu* menuTools = menuBar()->addMenu(tr("&Ferramentas"));
+    menuTools->setObjectName("menuFerramentas");
+    menuTools->addAction(m_actDiscretize);
+    QMenu* menuDiscretizationView = menuTools->addMenu(tr("&Exibição da discretização"));
+    menuDiscretizationView->setObjectName("menuExibicaoDiscretizacao");
+    menuDiscretizationView->addAction(m_actShowSolid);
+    menuDiscretizationView->addAction(m_actShowVertexNodes);
+    menuDiscretizationView->addAction(m_actShowCenterNodes);
+    menuDiscretizationView->addAction(m_actShowCubeEdges);
+    menuTools->addAction(m_actClearDiscretization);
 
     QMenu* menuView = menuBar()->addMenu(tr("&Visualizar"));
     menuView->setObjectName("menuVisualizar");
@@ -777,6 +821,7 @@ void MainWindow::refreshDocumentViews(bool geometryChanged)
     if (geometryChanged)
     {
         m_viewer->setShape(m_document.shape());
+        restoreDiscretizationView();
         updateSelectionStatus();
     }
     m_viewer->setDocumentSketches(displayedSketches(false));
@@ -919,6 +964,18 @@ void MainWindow::updateActionStates()
         for (QAction* a : {m_actToolLine, m_actToolRectangle, m_actToolCircle, m_actToolArc})
             a->setEnabled(quick);
     }
+    // Discretização (E5.7.2): um corpo sólido; exportação e exibição com discretização válida.
+    const bool discretized = discretization() != nullptr;
+    m_actDiscretize->setEnabled(!editing && !finishing && !m_discretizing && !m_document.activeBodies().empty());
+    m_actDiscretize->setToolTip(m_actDiscretize->isEnabled() ? m_actDiscretize->statusTip()
+                                                             : tr("A discretização volumétrica exige um corpo sólido"));
+    m_actExportNodes->setEnabled(discretized && !m_discretizing);
+    m_actExportNodes->setStatusTip(discretized ? tr("Exporta os nós da discretização (ID_node Coord_X Coord_Y Coord_Z)")
+                                               : tr("Gere antes a discretização (Ferramentas > Discretização volumétrica)"));
+    m_actExportNodes->setToolTip(m_actExportNodes->statusTip());
+    for (QAction* a : {m_actShowSolid, m_actShowVertexNodes, m_actShowCenterNodes, m_actShowCubeEdges,
+                       m_actClearDiscretization})
+        a->setEnabled(discretized && !m_discretizing);
     if (finishing)
     {
         for (QAction* a : {m_actExtrude, m_actExtrudeUnified, m_actEditOperation, m_actNewSketch, m_actEditSketch,
@@ -1529,6 +1586,13 @@ QString MainWindow::documentDirectory() const
 
 void MainWindow::closeEvent(QCloseEvent* event)
 {
+    // Geração em andamento: cancela e mantém a janela até a thread de trabalho terminar.
+    if (m_discretizing)
+    {
+        cancelDiscretization();
+        event->ignore();
+        return;
+    }
     // Esboço em edição não concluído é descartado (o documento não foi alterado por ele).
     if (isEditingSketch())
         cancelSketch();
@@ -3018,6 +3082,453 @@ MainWindow::SaveChoice MainWindow::askSaveChanges()
     if (answer == QMessageBox::Discard)
         return SaveChoice::Discard;
     return SaveChoice::Cancel;
+}
+
+} // namespace cad::app
+
+// --- Discretização volumétrica (E5.7.2) ------------------------------------------
+
+namespace cad::app {
+
+using cad::discretization::Discretization;
+using cad::discretization::LengthUnit;
+using cad::discretization::NodeAsciiExporter;
+using cad::discretization::Parameters;
+using cad::discretization::VoxelDiscretizer;
+
+namespace {
+
+QLocale brazil()
+{
+    return QLocale(QLocale::Portuguese, QLocale::Brazil);
+}
+
+QString decimal(double v, int decimals)
+{
+    return brazil().toString(v, 'f', decimals);
+}
+
+QString integer(std::int64_t v)
+{
+    return brazil().toString(qlonglong(v));
+}
+
+QString unitDescription(LengthUnit unit)
+{
+    return unit == LengthUnit::Meter ? MainWindow::tr("metros (m)") : MainWindow::tr("milímetros (mm)");
+}
+
+} // namespace
+
+std::shared_ptr<const Discretization> MainWindow::discretization() const
+{
+    if (!m_discretization)
+        return nullptr;
+    // Válida enquanto o corpo de origem for o mesmo sólido (qualquer recálculo gera outro).
+    const Operation* op = m_document.findOperation(m_discretizationBody.toStdString());
+    if (!op || !op->consumedBy.empty() || op->result.IsNull() || !op->result.IsSame(m_discretizationSource))
+        return nullptr;
+    return m_discretization;
+}
+
+DiscretizationDialog* MainWindow::discretizationDialog() const
+{
+    return m_discretizationDialog.data();
+}
+
+void MainWindow::applyDiscretizationDisplay()
+{
+    cad::viewer::DiscretizationDisplay d;
+    d.solid = m_actShowSolid->isChecked();
+    d.vertexNodes = m_actShowVertexNodes->isChecked();
+    d.centerNodes = m_actShowCenterNodes->isChecked();
+    d.cubeEdges = m_actShowCubeEdges->isChecked();
+    m_viewer->setDiscretizationDisplay(d);
+    if (m_discretizationDialog)
+        m_discretizationDialog->setDisplay(d);
+}
+
+void MainWindow::restoreDiscretizationView()
+{
+    if (!m_discretization)
+        return;
+    const auto d = discretization();
+    if (!d)
+    {
+        m_discretization.reset();
+        m_discretizationBody.clear();
+        m_discretizationSource.Nullify();
+        m_discretizationSummary.clear();
+        statusBar()->showMessage(tr("Discretização descartada: o sólido de origem foi alterado"), 8000);
+        return;
+    }
+    const auto t0 = std::chrono::steady_clock::now();
+    m_viewer->setDiscretization(d);
+    applyDiscretizationDisplay();
+    m_discretizationDisplaySeconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+}
+
+void MainWindow::clearDiscretization()
+{
+    if (m_discretizing)
+        return;
+    m_discretization.reset();
+    m_discretizationBody.clear();
+    m_discretizationSource.Nullify();
+    m_discretizationSummary.clear();
+    m_viewer->clearDiscretization();
+    if (m_discretizationDialog)
+        m_discretizationDialog->setResult(QString(), QString(), Parameters());
+    updateActionStates();
+    statusBar()->showMessage(tr("Discretização removida da vista (o sólido não foi alterado)"), 5000);
+}
+
+void MainWindow::discretizeCommand()
+{
+    if (isEditingSketch() || m_finishDialog || m_discretizing)
+        return;
+    const std::vector<std::string> bodies = m_document.activeBodies();
+    if (bodies.empty())
+    {
+        reportError(tr("Discretização volumétrica"),
+                    tr("O documento não contém sólido.\n\nCrie uma extrusão ou abra uma peça com sólido."));
+        return;
+    }
+    // Um único sólido é pré-selecionado; com vários, o usuário escolhe explicitamente no diálogo
+    // (sólidos distintos nunca são combinados).
+    runDiscretizationDialog(bodies.size() == 1 ? QString::fromStdString(bodies.front()) : QString());
+}
+
+void MainWindow::runDiscretizationDialog(const QString& preselectedBody)
+{
+    std::vector<DiscretizationDialog::Body> list;
+    for (const std::string& id : m_document.activeBodies())
+        list.push_back({QString::fromStdString(id), bodyDescription(id)});
+    DiscretizationDialog dialog(list, preselectedBody, m_discretizationParameters, m_nodeUnit,
+                                m_viewer->discretizationDisplay(), this);
+    m_discretizationDialog = &dialog;
+    if (discretization())
+        dialog.setResult(m_discretizationSummary, m_discretizationBody, m_discretization->parameters());
+    connect(&dialog, &DiscretizationDialog::generateRequested, this,
+            [this, &dialog] { discretize(dialog.bodyId(), dialog.parameters()); });
+    connect(&dialog, &DiscretizationDialog::exportRequested, this, [this, &dialog] {
+        m_nodeUnit = dialog.unit();
+        exportNodeCloudWithUnit(dialog.unit());
+    });
+    connect(&dialog, &DiscretizationDialog::cancelRequested, this, &MainWindow::cancelDiscretization);
+    connect(&dialog, &DiscretizationDialog::parametersChanged, this, &MainWindow::updateDiscretizationEstimate);
+    connect(&dialog, &DiscretizationDialog::displayChanged, this, [this, &dialog] {
+        const cad::viewer::DiscretizationDisplay d = dialog.display();
+        {
+            const QSignalBlocker b1(m_actShowSolid), b2(m_actShowVertexNodes), b3(m_actShowCenterNodes),
+                b4(m_actShowCubeEdges);
+            m_actShowSolid->setChecked(d.solid);
+            m_actShowVertexNodes->setChecked(d.vertexNodes);
+            m_actShowCenterNodes->setChecked(d.centerNodes);
+            m_actShowCubeEdges->setChecked(d.cubeEdges);
+        }
+        applyDiscretizationDisplay();
+    });
+    updateDiscretizationEstimate();
+    dialog.exec();
+    m_nodeUnit = dialog.unit();
+    m_discretizationDialog = nullptr;
+    updateActionStates();
+}
+
+void MainWindow::updateDiscretizationEstimate()
+{
+    DiscretizationDialog* dialog = m_discretizationDialog.data();
+    if (!dialog)
+        return;
+    const Operation* op = m_document.findOperation(dialog->bodyId().toStdString());
+    if (!op || op->result.IsNull())
+    {
+        dialog->setEstimate(tr("Selecione o sólido que será discretizado."), false);
+        return;
+    }
+    const auto e = VoxelDiscretizer::estimate(op->result, dialog->parameters().lco);
+    QString text = QString::fromStdString(e.message);
+    if (e.ok)
+        text += tr("; caixa envolvente (%1; %2; %3) a (%4; %5; %6) mm")
+                    .arg(decimal(e.boxMin.X(), 3), decimal(e.boxMin.Y(), 3), decimal(e.boxMin.Z(), 3),
+                         decimal(e.boxMax.X(), 3), decimal(e.boxMax.Y(), 3), decimal(e.boxMax.Z(), 3));
+    dialog->setEstimate(text, e.ok);
+}
+
+void MainWindow::cancelDiscretization()
+{
+    if (!m_discretizing || !m_discretizationCancel)
+        return;
+    m_discretizationCancel->store(true);
+    if (m_discretizationDialog)
+        m_discretizationDialog->setMessage(tr("Cancelando a geração..."), false);
+}
+
+bool MainWindow::discretize(const QString& bodyId, const Parameters& parameters)
+{
+    const QString title = tr("Discretização volumétrica");
+    DiscretizationDialog* dialog = m_discretizationDialog.data();
+    auto fail = [&](const QString& message) {
+        statusBar()->showMessage(message, 8000);
+        if (dialog)
+            dialog->setMessage(message, true);
+        else
+            reportError(title, message);
+        return false;
+    };
+    if (m_discretizing)
+        return false;
+    const std::vector<std::string> bodies = m_document.activeBodies();
+    const Operation* op = m_document.findOperation(bodyId.toStdString());
+    if (!op || op->result.IsNull() || std::find(bodies.begin(), bodies.end(), op->id) == bodies.end())
+        return fail(tr("Selecione um sólido ativo do documento para discretizar."));
+    const TopoDS_Shape source = op->result;
+    const auto estimate = VoxelDiscretizer::estimate(source, parameters.lco);
+    if (!estimate.ok)
+        return fail(QString::fromStdString(estimate.message));
+
+    // O cálculo usa uma cópia independente (a forma exibida guarda a malha de visualização).
+    TopoDS_Shape copy;
+    try
+    {
+        copy = BRepBuilderAPI_Copy(source, true, false).Shape();
+    }
+    catch (const Standard_Failure& e)
+    {
+        return fail(tr("Não foi possível preparar o sólido: %1").arg(QString::fromUtf8(e.what())));
+    }
+
+    // Nada pode alterar o documento durante a geração.
+    m_discretizing = true;
+    std::vector<std::pair<QPointer<QAction>, bool>> savedActions;
+    for (QAction* a : findChildren<QAction*>(Qt::FindDirectChildrenOnly))
+    {
+        savedActions.emplace_back(a, a->isEnabled());
+        a->setEnabled(false);
+    }
+    m_operationsTree->setEnabled(false);
+    if (dialog)
+    {
+        dialog->setRunning(true);
+        dialog->setMessage(tr("Gerando a discretização (%1)...").arg(QString::fromStdString(estimate.message)), false);
+    }
+    auto cancel = std::make_shared<std::atomic<bool>>(false);
+    auto progress = std::make_shared<std::atomic<int>>(0);
+    auto done = std::make_shared<std::atomic<bool>>(false);
+    auto result = std::make_shared<cad::discretization::DiscretizeResult>();
+    m_discretizationCancel = cancel;
+    std::thread worker([copy, parameters, cancel, progress, done, result] {
+        *result = VoxelDiscretizer::run(copy, parameters, [cancel, progress](double f) {
+            progress->store(int(f * 1000.0));
+            return !cancel->load();
+        });
+        done->store(true);
+    });
+    QEventLoop loop;
+    QTimer timer;
+    timer.setInterval(50);
+    connect(&timer, &QTimer::timeout, &loop, [&] {
+        const int permille = progress->load();
+        if (dialog)
+            dialog->setProgress(permille / 1000.0);
+        statusBar()->showMessage(tr("Discretizando... %1 %").arg(permille / 10));
+        if (done->load())
+            loop.quit();
+    });
+    timer.start();
+    loop.exec();
+    timer.stop();
+    worker.join();
+
+    m_discretizing = false;
+    m_discretizationCancel.reset();
+    for (const auto& [action, enabled] : savedActions)
+        if (action)
+            action->setEnabled(enabled);
+    m_operationsTree->setEnabled(true);
+    if (dialog)
+        dialog->setRunning(false);
+    updateActionStates();
+
+    if (result->cancelled)
+    {
+        const QString message = tr("Geração cancelada. O sólido e a discretização anterior não foram alterados.");
+        statusBar()->showMessage(message, 8000);
+        if (dialog)
+            dialog->setMessage(message, false);
+        return false;
+    }
+    if (!result->ok)
+        return fail(QString::fromStdString(result->message));
+    const Operation* now = m_document.findOperation(bodyId.toStdString());
+    if (!now || !now->result.IsSame(source))
+        return fail(tr("O sólido foi alterado durante a geração; o resultado foi descartado."));
+    if (!result->data || result->data->empty())
+        return fail(tr("Nenhum cubo satisfaz o critério de inclusão com lco = %1 mm. Reduza lco ou escolha outro "
+                       "critério.")
+                        .arg(decimal(parameters.lco, 4)));
+
+    m_discretization = result->data;
+    m_discretizationBody = bodyId;
+    m_discretizationSource = source;
+    m_discretizationParameters = parameters;
+    const auto t0 = std::chrono::steady_clock::now();
+    m_viewer->setDiscretization(m_discretization);
+    applyDiscretizationDisplay();
+    m_viewer->repaint();
+    m_discretizationDisplaySeconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    m_discretizationSummary = describeDiscretization(*m_discretization);
+    if (dialog)
+    {
+        dialog->setResult(m_discretizationSummary, bodyId, parameters);
+        dialog->setMessage(tr("Discretização gerada. O sólido original não foi alterado."), false);
+    }
+    statusBar()->showMessage(tr("Discretização: %1 cubos, %2 nós (%3 vértices + %4 centrais)")
+                                 .arg(integer(m_discretization->cubeCount()), integer(m_discretization->totalNodeCount()),
+                                      integer(m_discretization->vertexNodeCount()),
+                                      integer(m_discretization->centerNodeCount())),
+                             10000);
+    updateActionStates();
+    return true;
+}
+
+QString MainWindow::describeDiscretization(const Discretization& d) const
+{
+    const auto& g = d.grid();
+    const auto& st = d.stats();
+    const double vCad = st.solidVolume;
+    const double vCubes = d.cubeVolume();
+    const double diff = vCubes - vCad;
+    const double percent = vCad > 0.0 ? 100.0 * diff / vCad : 0.0;
+    const auto& overlay = m_viewer->discretizationOverlayStats();
+    QString display = tr("%1 nós de vértices, %2 nós centrais e %3 arestas exibidos em %4 s")
+                          .arg(integer(overlay.vertexPoints), integer(overlay.centerPoints), integer(overlay.segments),
+                               decimal(m_discretizationDisplaySeconds, 3));
+    if (overlay.reducedPoints || overlay.surfaceEdgesOnly || overlay.reducedEdges)
+        display += tr(" (carga gráfica reduzida: %1)")
+                       .arg(overlay.surfaceEdgesOnly ? tr("somente arestas da superfície externa") : tr("amostragem"));
+    auto row = [](const QString& label, const QString& value) {
+        return QStringLiteral("<tr><td>%1</td><td><b>%2</b></td></tr>").arg(label, value);
+    };
+    QString html = QStringLiteral("<table cellspacing='2'>");
+    html += row(tr("Sólido:"), bodyDescription(m_discretizationBody.toStdString()).toHtmlEscaped());
+    html += row(tr("lco:"), tr("%1 mm").arg(decimal(g.lco, 4)));
+    html += row(tr("Critério de inclusão:"),
+                QString::fromUtf8(cad::discretization::criterionLabel(d.parameters().criterion)));
+    html += row(tr("Grade (origem, mm):"), tr("%1 × %2 × %3 candidatos; (%4; %5; %6)")
+                                               .arg(g.nx)
+                                               .arg(g.ny)
+                                               .arg(g.nz)
+                                               .arg(decimal(g.origin.X(), 4), decimal(g.origin.Y(), 4),
+                                                    decimal(g.origin.Z(), 4)));
+    html += row(tr("Cubos:"), integer(d.cubeCount()));
+    html += row(tr("Nós dos vértices:"), integer(d.vertexNodeCount()));
+    html += row(tr("Nós centrais:"), integer(d.centerNodeCount()));
+    html += row(tr("Total de nós:"), integer(d.totalNodeCount()));
+    html += row(tr("Volume do sólido CAD:"), tr("%1 mm³").arg(decimal(vCad, 3)));
+    html += row(tr("Volume representado pelos cubos:"), tr("%1 mm³").arg(decimal(vCubes, 3)));
+    html += row(tr("Diferença (cubos − CAD):"), tr("%1 mm³ (%2 %)").arg(decimal(diff, 3), decimal(percent, 3)));
+    html += row(tr("Tempo de processamento:"), tr("%1 s (classificação %2 s; numeração %3 s)")
+                                                   .arg(decimal(st.totalSeconds, 3), decimal(st.classificationSeconds, 3),
+                                                        decimal(st.numberingSeconds, 3)));
+    html += row(tr("Visualização:"), display);
+    html += QStringLiteral("</table>");
+    html += tr("<p>A diferença de volume é uma medida da aproximação geométrica por cubos (degraus nas superfícies "
+               "não alinhadas à grade), não necessariamente um erro de cálculo.</p>");
+    return html;
+}
+
+void MainWindow::exportNodeCloud()
+{
+    if (!discretization())
+    {
+        reportError(tr("Exportar nuvem de pontos ASCII"),
+                    tr("Não há discretização válida para exportar.\n\nGere a discretização em Ferramentas > "
+                       "Discretização volumétrica."));
+        return;
+    }
+    const auto unit = askNodeExportUnit(m_nodeUnit);
+    if (!unit)
+    {
+        statusBar()->showMessage(tr("Exportação cancelada"), 5000);
+        return;
+    }
+    m_nodeUnit = *unit;
+    exportNodeCloudWithUnit(*unit);
+}
+
+bool MainWindow::exportNodeCloudWithUnit(LengthUnit unit)
+{
+    const QString name = QString::fromStdString(NodeAsciiExporter::suggestedFileName(m_document.name()));
+    QString path = askNodeExportPath(QDir(m_lastExportDir).filePath(name), unit);
+    if (path.isEmpty())
+    {
+        statusBar()->showMessage(tr("Exportação cancelada"), 5000);
+        return false;
+    }
+    if (QFileInfo(path).suffix().isEmpty())
+        path += QStringLiteral(".txt");
+    const bool ok = exportNodesTo(path, unit);
+    if (ok)
+        m_lastExportDir = QFileInfo(path).absolutePath();
+    return ok;
+}
+
+bool MainWindow::exportNodesTo(const QString& filePath, LengthUnit unit)
+{
+    const QString title = tr("Exportar nuvem de pontos ASCII");
+    const QString nativePath = QDir::toNativeSeparators(filePath);
+    const auto d = discretization();
+    if (!d)
+    {
+        reportError(title, tr("Não há discretização válida para exportar."));
+        return false;
+    }
+    if (QFileInfo::exists(filePath) && !confirmOverwrite(nativePath))
+    {
+        statusBar()->showMessage(tr("Exportação cancelada: arquivo existente mantido"), 5000);
+        return false;
+    }
+    QApplication::setOverrideCursor(Qt::WaitCursor);
+    const auto r = NodeAsciiExporter().write(*d, std::filesystem::path(filePath.toStdWString()), unit, true);
+    QApplication::restoreOverrideCursor();
+    if (!r.ok)
+    {
+        statusBar()->showMessage(tr("Falha na exportação da nuvem de pontos"), 8000);
+        reportError(title, tr("Não foi possível exportar o arquivo:\n%1\n\n%2")
+                               .arg(nativePath, QString::fromStdString(r.message)));
+        return false;
+    }
+    statusBar()->showMessage(tr("Nuvem de pontos exportada: %1 (%2 nós, %3)")
+                                 .arg(nativePath, integer(r.lines), QString::fromUtf8(cad::discretization::unitSymbol(unit))),
+                             8000);
+    reportInfo(title, tr("Arquivo exportado e conferido:\n%1\n\nUnidade das coordenadas: %2\nNós: %3 (%4 dos vértices + "
+                         "%5 centrais)\nColunas: ID_node Coord_X Coord_Y Coord_Z (separadas por espaço, ponto "
+                         "decimal)\nTempo: %6 s")
+                          .arg(nativePath, unitDescription(unit), integer(r.lines), integer(d->vertexNodeCount()),
+                               integer(d->centerNodeCount()), decimal(r.seconds, 3)));
+    return true;
+}
+
+QString MainWindow::askNodeExportPath(const QString& suggestedPath, LengthUnit unit)
+{
+    // A confirmação de sobrescrita é feita em exportNodesTo().
+    return QFileDialog::getSaveFileName(this, tr("Exportar nuvem de pontos ASCII — %1").arg(unitDescription(unit)),
+                                        suggestedPath, tr("Arquivos de texto (*.txt);;Todos os arquivos (*)"), nullptr,
+                                        QFileDialog::DontConfirmOverwrite);
+}
+
+std::optional<LengthUnit> MainWindow::askNodeExportUnit(LengthUnit current)
+{
+    const QStringList items{unitDescription(LengthUnit::Millimeter), unitDescription(LengthUnit::Meter)};
+    bool ok = false;
+    const QString choice = QInputDialog::getItem(this, tr("Exportar nuvem de pontos ASCII"),
+                                                 tr("Unidade das coordenadas exportadas:"), items,
+                                                 current == LengthUnit::Meter ? 1 : 0, false, &ok);
+    if (!ok)
+        return std::nullopt;
+    return items.indexOf(choice) == 1 ? LengthUnit::Meter : LengthUnit::Millimeter;
 }
 
 } // namespace cad::app
