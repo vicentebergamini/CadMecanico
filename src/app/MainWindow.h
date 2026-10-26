@@ -162,6 +162,9 @@ public:
     double discretizationDisplaySeconds() const { return m_discretizationDisplaySeconds; }
     // Exporta a nuvem de nós (confirmação antes de sobrescrever). Retorna true se gravou.
     bool exportNodesTo(const QString& filePath, cad::discretization::LengthUnit unit);
+    // Exporta a geometria discretizada em comandos ANSYS APDL /PREP7 (E5.7.2.2) com a
+    // discretização atual (confirmação antes de sobrescrever). Retorna true se gravou.
+    bool exportApdlTo(const QString& filePath, cad::discretization::LengthUnit unit, bool includeClear);
     // Diálogo aberto pelo comando (nulo fora dele).
     DiscretizationDialog* discretizationDialog() const;
 
@@ -232,6 +235,8 @@ protected:
     // Arquivo > Exportar; no diálogo da discretização a unidade é escolhida no próprio diálogo).
     virtual QString askNodeExportPath(const QString& suggestedPath, cad::discretization::LengthUnit unit);
     virtual std::optional<cad::discretization::LengthUnit> askNodeExportUnit(cad::discretization::LengthUnit current);
+    // Exportação ANSYS APDL (E5.7.2.2): caminho do arquivo .inp (vazio = cancelado).
+    virtual QString askApdlExportPath(const QString& suggestedPath);
     // Abre o diálogo da discretização (modal) e atende seus pedidos até ser fechado.
     virtual void runDiscretizationDialog(const QString& preselectedBody);
 
@@ -281,6 +286,7 @@ private:
     // Discretização: exportação com a unidade dada (pede o caminho), estimativa da grade para o
     // diálogo, resumo do resultado e opções de exibição (ações do menu <-> visualizador).
     bool exportNodeCloudWithUnit(cad::discretization::LengthUnit unit);
+    bool exportApdlWithOptions(cad::discretization::LengthUnit unit, bool includeClear);
     void updateDiscretizationEstimate();
     QString describeDiscretization(const cad::discretization::Discretization& d) const;
     void applyDiscretizationDisplay();
@@ -363,6 +369,9 @@ private:
     TopoDS_Shape m_discretizationSource; // resultado do corpo usado (validade: IsSame)
     cad::discretization::Parameters m_discretizationParameters;
     cad::discretization::LengthUnit m_nodeUnit = cad::discretization::LengthUnit::Millimeter;
+    // Exportação APDL: metros e /CLEAR habilitado por padrão (reproduzem o exemplo de referência).
+    cad::discretization::LengthUnit m_apdlUnit = cad::discretization::LengthUnit::Meter;
+    bool m_apdlIncludeClear = true;
     QString m_discretizationSummary;
     double m_discretizationDisplaySeconds = 0.0;
     bool m_discretizing = false;

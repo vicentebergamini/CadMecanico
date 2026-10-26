@@ -3,8 +3,9 @@
 // Não calcula nada: emite pedidos (gerar, exportar, cancelar) atendidos pela janela principal, que
 // executa o cálculo fora da thread da interface e informa progresso e resultado.
 //
-// Botões: "Gerar discretização", "Exportar ASCII" (habilitado quando há resultado para os
-// parâmetros atuais), "Cancelar" (interrompe a geração em andamento; sem geração, fecha a janela)
+// Botões: "Gerar discretização", "Exportar ASCII" e "Exportar ANSYS APDL" (E5.7.2.2; ambos
+// independentes e habilitados somente quando há resultado para os parâmetros atuais — alterar lco
+// exige regenerar), "Cancelar" (interrompe a geração em andamento; sem geração, fecha a janela)
 // e "Fechar". Durante a geração os parâmetros ficam bloqueados e fechar a janela pede o
 // cancelamento. Nada disso altera o sólido.
 #pragma once
@@ -45,6 +46,10 @@ public:
     QString bodyId() const; // vazio = nenhum sólido escolhido
     cad::discretization::Parameters parameters() const;
     cad::discretization::LengthUnit unit() const;
+    // Opções da exportação ANSYS APDL (/PREP7): unidade das coordenadas e inclusão de /CLEAR.
+    void setApdlOptions(cad::discretization::LengthUnit unit, bool includeClear);
+    cad::discretization::LengthUnit apdlUnit() const;
+    bool apdlIncludeClear() const;
     cad::viewer::DiscretizationDisplay display() const;
     void setDisplay(const cad::viewer::DiscretizationDisplay& display);
     // Mensagem de validação dos campos (vazia se válidos).
@@ -62,6 +67,7 @@ public:
 signals:
     void generateRequested();
     void exportRequested();
+    void apdlExportRequested();
     void cancelRequested();
     void displayChanged();
     void parametersChanged();
@@ -77,6 +83,8 @@ private:
     QDoubleSpinBox* m_lco = nullptr;
     QComboBox* m_criterion = nullptr;
     QComboBox* m_unit = nullptr;
+    QComboBox* m_apdlUnit = nullptr;
+    QCheckBox* m_apdlClear = nullptr;
     QLabel* m_estimate = nullptr;
     QProgressBar* m_progress = nullptr;
     QLabel* m_result = nullptr;
@@ -87,6 +95,7 @@ private:
     QCheckBox* m_showEdges = nullptr;
     QPushButton* m_generate = nullptr;
     QPushButton* m_export = nullptr;
+    QPushButton* m_exportApdl = nullptr;
     QPushButton* m_cancel = nullptr;
     QPushButton* m_close = nullptr;
     bool m_running = false;

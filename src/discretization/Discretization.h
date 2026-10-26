@@ -111,6 +111,8 @@ public:
     NodeInfo node(std::int64_t id, LengthUnit unit = LengthUnit::Millimeter) const;
     // ID global do vértice no ponto (i, j, k) da rede (0 se não usado).
     std::int64_t vertexId(int i, int j, int k) const;
+    // ID_cube da célula (i, j, k) (0 se a célula não foi aceita). Busca binária nos cubos aceitos.
+    std::int64_t cubeId(int i, int j, int k) const;
 
     // Memória aproximada das estruturas (bytes).
     std::size_t memoryBytes() const;

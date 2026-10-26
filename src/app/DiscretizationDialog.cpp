@@ -61,11 +61,37 @@ DiscretizationDialog::DiscretizationDialog(const std::vector<Body>& bodies, cons
     m_unit->setCurrentIndex(m_unit->findData(int(unit)));
     m_unit->setToolTip(tr("Unidade das coordenadas no arquivo ASCII (não altera IDs, ordem nem a geometria)"));
 
+    // Exportação ANSYS APDL (/PREP7) (E5.7.2.2): opções independentes da exportação ASCII.
+    m_apdlUnit = new QComboBox;
+    m_apdlUnit->setObjectName("campoUnidadeApdl");
+    m_apdlUnit->addItem(tr("Metros (m)"), int(LengthUnit::Meter));
+    m_apdlUnit->addItem(tr("Milímetros (mm)"), int(LengthUnit::Millimeter));
+    m_apdlUnit->setCurrentIndex(0); // metros: reproduz o arquivo de exemplo
+    m_apdlUnit->setToolTip(tr("Unidade das coordenadas dos comandos N no arquivo APDL (não altera IDs, ordem nem "
+                              "a geometria). O APDL não impõe um sistema de unidades: materiais e cargas "
+                              "acrescentados depois devem ser coerentes com esta unidade."));
+    m_apdlClear = new QCheckBox(tr("Incluir /CLEAR no início do arquivo"));
+    m_apdlClear->setObjectName("opcaoApdlClear");
+    m_apdlClear->setChecked(true);
+    m_apdlClear->setToolTip(tr("/CLEAR apaga todo o banco de dados corrente do ANSYS (modelo, nós, elementos e "
+                               "resultados) quando o arquivo é lido"));
+    auto* clearWarning = new QLabel(tr("Atenção: com /CLEAR, ler o arquivo no ANSYS apaga o banco de dados corrente "
+                                       "(modelo e resultados em memória). Desmarque para acrescentar a geometria a "
+                                       "um modelo já aberto."));
+    clearWarning->setObjectName("avisoApdlClear");
+    clearWarning->setWordWrap(true);
+    auto* apdlBox = new QGroupBox(tr("Exportação ANSYS APDL (/PREP7)"));
+    apdlBox->setObjectName("grupoExportacaoApdl");
+    auto* apdlForm = new QFormLayout(apdlBox);
+    apdlForm->addRow(tr("Unidade das coordenadas:"), m_apdlUnit);
+    apdlForm->addRow(m_apdlClear);
+    apdlForm->addRow(clearWarning);
+
     auto* form = new QFormLayout;
     form->addRow(tr("Sólido selecionado:"), m_body);
     form->addRow(tr("Comprimento da aresta — lco:"), m_lco);
     form->addRow(tr("Critério de inclusão dos cubos:"), m_criterion);
-    form->addRow(tr("Unidade da exportação:"), m_unit);
+    form->addRow(tr("Unidade da exportação ASCII:"), m_unit);
 
     m_estimate = new QLabel;
     m_estimate->setObjectName("rotuloEstimativa");
@@ -128,6 +154,8 @@ DiscretizationDialog::DiscretizationDialog(const std::vector<Body>& bodies, cons
     m_generate->setDefault(true);
     m_export = new QPushButton(tr("Exportar ASCII..."));
     m_export->setObjectName("botaoExportar");
+    m_exportApdl = new QPushButton(tr("Exportar ANSYS APDL..."));
+    m_exportApdl->setObjectName("botaoExportarApdl");
     m_cancel = new QPushButton(tr("Cancelar"));
     m_cancel->setObjectName("botaoCancelar");
     m_close = new QPushButton(tr("Fechar"));
@@ -142,6 +170,7 @@ DiscretizationDialog::DiscretizationDialog(const std::vector<Body>& bodies, cons
         emit generateRequested();
     });
     connect(m_export, &QPushButton::clicked, this, &DiscretizationDialog::exportRequested);
+    connect(m_exportApdl, &QPushButton::clicked, this, &DiscretizationDialog::apdlExportRequested);
     connect(m_cancel, &QPushButton::clicked, this, [this] {
         if (m_running)
             emit cancelRequested();
@@ -152,6 +181,7 @@ DiscretizationDialog::DiscretizationDialog(const std::vector<Body>& bodies, cons
     auto* buttons = new QHBoxLayout;
     buttons->addWidget(m_generate);
     buttons->addWidget(m_export);
+    buttons->addWidget(m_exportApdl);
     buttons->addStretch();
     buttons->addWidget(m_cancel);
     buttons->addWidget(m_close);
@@ -164,10 +194,11 @@ DiscretizationDialog::DiscretizationDialog(const std::vector<Body>& bodies, cons
     layout->addWidget(resultArea, 1);
     layout->addWidget(note);
     layout->addWidget(displayBox);
+    layout->addWidget(apdlBox);
     layout->addWidget(m_message);
     layout->addLayout(buttons);
     setMinimumWidth(620);
-    resize(700, 760);
+    resize(700, 860);
 
     auto changed = [this] {
         setMessage(QString(), false);
@@ -196,6 +227,22 @@ Parameters DiscretizationDialog::parameters() const
 LengthUnit DiscretizationDialog::unit() const
 {
     return LengthUnit(m_unit->currentData().toInt());
+}
+
+void DiscretizationDialog::setApdlOptions(LengthUnit unit, bool includeClear)
+{
+    m_apdlUnit->setCurrentIndex(m_apdlUnit->findData(int(unit)));
+    m_apdlClear->setChecked(includeClear);
+}
+
+LengthUnit DiscretizationDialog::apdlUnit() const
+{
+    return LengthUnit(m_apdlUnit->currentData().toInt());
+}
+
+bool DiscretizationDialog::apdlIncludeClear() const
+{
+    return m_apdlClear->isChecked();
 }
 
 cad::viewer::DiscretizationDisplay DiscretizationDialog::display() const
@@ -271,12 +318,18 @@ bool DiscretizationDialog::resultMatchesFields() const
 
 void DiscretizationDialog::updateState()
 {
-    for (QWidget* w : std::initializer_list<QWidget*>{m_body, m_lco, m_criterion, m_unit, m_generate, m_close})
+    for (QWidget* w : std::initializer_list<QWidget*>{m_body, m_lco, m_criterion, m_unit, m_apdlUnit, m_apdlClear,
+                                                      m_generate, m_close})
         w->setEnabled(!m_running);
     const bool current = resultMatchesFields();
     m_export->setEnabled(!m_running && current);
     m_export->setToolTip(current ? tr("Salva a tabela de nós (ID_node Coord_X Coord_Y Coord_Z)")
                                  : tr("Gere a discretização com os parâmetros atuais para exportar"));
+    m_exportApdl->setEnabled(!m_running && current);
+    m_exportApdl->setToolTip(current ? tr("Salva a geometria discretizada em comandos ANSYS APDL /PREP7 (N, ET,1,165 "
+                                          "e EN de dois nós), sem propriedades físicas nem solução")
+                                     : tr("Gere a discretização com os parâmetros atuais (lco, critério e sólido) "
+                                          "para exportar"));
     m_cancel->setToolTip(m_running ? tr("Interrompe a geração sem alterar o sólido")
                                    : tr("Fecha a janela sem alterar o sólido"));
     // Resultado de outros parâmetros continua visível, marcado como desatualizado.

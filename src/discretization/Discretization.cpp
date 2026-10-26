@@ -1,5 +1,6 @@
 #include "discretization/Discretization.h"
 
+#include <algorithm>
 #include <cmath>
 #include <limits>
 
@@ -65,6 +66,15 @@ std::int64_t Discretization::vertexId(int i, int j, int k) const
     if (i < 0 || j < 0 || k < 0 || i > m_grid.nx || j > m_grid.ny || k > m_grid.nz)
         return 0;
     return m_latticeId[std::size_t(m_grid.latticeIndex(i, j, k))];
+}
+
+std::int64_t Discretization::cubeId(int i, int j, int k) const
+{
+    if (!cellAccepted(i, j, k))
+        return 0;
+    const std::int64_t cell = m_grid.cellIndex(i, j, k);
+    const auto it = std::lower_bound(m_cubes.begin(), m_cubes.end(), cell);
+    return it != m_cubes.end() && *it == cell ? std::int64_t(it - m_cubes.begin()) + 1 : 0;
 }
 
 CubeInfo Discretization::cube(std::int64_t index) const

@@ -11,6 +11,7 @@
 #include "modeling/ShapeInspector.h"
 #include "sketch/SketchProfile.h"
 #include "sketch/SketchResolver.h"
+#include "discretization/ApdlExporter.h"
 #include "discretization/NodeAsciiExporter.h"
 #include "discretization/VoxelDiscretizer.h"
 #include "document/DocumentFile.h"
@@ -3090,6 +3091,7 @@ MainWindow::SaveChoice MainWindow::askSaveChanges()
 
 namespace cad::app {
 
+using cad::discretization::ApdlExporter;
 using cad::discretization::Discretization;
 using cad::discretization::LengthUnit;
 using cad::discretization::NodeAsciiExporter;
@@ -3215,6 +3217,12 @@ void MainWindow::runDiscretizationDialog(const QString& preselectedBody)
         m_nodeUnit = dialog.unit();
         exportNodeCloudWithUnit(dialog.unit());
     });
+    dialog.setApdlOptions(m_apdlUnit, m_apdlIncludeClear);
+    connect(&dialog, &DiscretizationDialog::apdlExportRequested, this, [this, &dialog] {
+        m_apdlUnit = dialog.apdlUnit();
+        m_apdlIncludeClear = dialog.apdlIncludeClear();
+        exportApdlWithOptions(m_apdlUnit, m_apdlIncludeClear);
+    });
     connect(&dialog, &DiscretizationDialog::cancelRequested, this, &MainWindow::cancelDiscretization);
     connect(&dialog, &DiscretizationDialog::parametersChanged, this, &MainWindow::updateDiscretizationEstimate);
     connect(&dialog, &DiscretizationDialog::displayChanged, this, [this, &dialog] {
@@ -3232,6 +3240,8 @@ void MainWindow::runDiscretizationDialog(const QString& preselectedBody)
     updateDiscretizationEstimate();
     dialog.exec();
     m_nodeUnit = dialog.unit();
+    m_apdlUnit = dialog.apdlUnit();
+    m_apdlIncludeClear = dialog.apdlIncludeClear();
     m_discretizationDialog = nullptr;
     updateActionStates();
 }
@@ -3509,6 +3519,82 @@ bool MainWindow::exportNodesTo(const QString& filePath, LengthUnit unit)
                           .arg(nativePath, unitDescription(unit), integer(r.lines), integer(d->vertexNodeCount()),
                                integer(d->centerNodeCount()), decimal(r.seconds, 3)));
     return true;
+}
+
+bool MainWindow::exportApdlWithOptions(LengthUnit unit, bool includeClear)
+{
+    const QString name = QString::fromStdString(ApdlExporter::suggestedFileName(m_document.name()));
+    QString path = askApdlExportPath(QDir(m_lastExportDir).filePath(name));
+    if (path.isEmpty())
+    {
+        statusBar()->showMessage(tr("Exportação cancelada"), 5000);
+        return false;
+    }
+    if (QFileInfo(path).suffix().isEmpty())
+        path += QStringLiteral(".inp");
+    const bool ok = exportApdlTo(path, unit, includeClear);
+    if (ok)
+        m_lastExportDir = QFileInfo(path).absolutePath();
+    return ok;
+}
+
+bool MainWindow::exportApdlTo(const QString& filePath, LengthUnit unit, bool includeClear)
+{
+    const QString title = tr("Exportar ANSYS APDL (/PREP7)");
+    const QString nativePath = QDir::toNativeSeparators(filePath);
+    // Somente a discretização válida atual (os parâmetros do diálogo precisam coincidir com ela:
+    // alterar lco exige regenerar antes de exportar).
+    const auto d = discretization();
+    if (!d)
+    {
+        reportError(title, tr("Não há discretização válida para exportar.\n\nGere a discretização em Ferramentas > "
+                              "Discretização volumétrica."));
+        return false;
+    }
+    if (QFileInfo::exists(filePath) && !confirmOverwrite(nativePath))
+    {
+        statusBar()->showMessage(tr("Exportação cancelada: arquivo existente mantido"), 5000);
+        return false;
+    }
+    cad::discretization::ApdlOptions options;
+    options.unit = unit;
+    options.includeClear = includeClear;
+    options.partName = m_document.name();
+    QApplication::setOverrideCursor(Qt::WaitCursor);
+    const auto r = ApdlExporter().write(*d, std::filesystem::path(filePath.toStdWString()), options, true);
+    QApplication::restoreOverrideCursor();
+    if (!r.ok)
+    {
+        statusBar()->showMessage(tr("Falha na exportação ANSYS APDL"), 8000);
+        reportError(title, tr("Não foi possível exportar o arquivo:\n%1\n\n%2")
+                               .arg(nativePath, QString::fromStdString(r.message)));
+        return false;
+    }
+    statusBar()->showMessage(tr("ANSYS APDL exportado: %1 (%2 nós, %3 elementos, %4)")
+                                 .arg(nativePath, integer(r.nodes), integer(r.links.total()),
+                                      QString::fromUtf8(cad::discretization::unitSymbol(unit))),
+                             8000);
+    reportInfo(title,
+               tr("Arquivo exportado e conferido:\n%1\n\nUnidade das coordenadas: %2\nNós: %3 (%4 dos vértices + "
+                  "%5 centrais)\nElementos ET,1,165 (dois nós): %6\n  • arestas entre vértices: %7\n  • ligações "
+                  "entre centros: %8\n  • ligações centro-vértice: %9\n%10\nSomente geometria (/PREP7): sem "
+                  "materiais, propriedades, carregamentos, condições de contorno ou solução.\nTempo: %11 s")
+                   .arg(nativePath, unitDescription(unit), integer(r.nodes), integer(d->vertexNodeCount()),
+                        integer(d->centerNodeCount()), integer(r.links.total()), integer(r.links.vertexEdges),
+                        integer(r.links.centerCenter), integer(r.links.centerVertex))
+                   .arg(includeClear ? tr("Atenção: o arquivo contém /CLEAR — ao ser lido, apaga o banco de dados "
+                                          "corrente do ANSYS.")
+                                     : tr("/CLEAR omitido: o banco de dados corrente do ANSYS será mantido."),
+                        decimal(r.seconds, 3)));
+    return true;
+}
+
+QString MainWindow::askApdlExportPath(const QString& suggestedPath)
+{
+    // A confirmação de sobrescrita é feita em exportApdlTo().
+    return QFileDialog::getSaveFileName(this, tr("Exportar ANSYS APDL (/PREP7)"), suggestedPath,
+                                        tr("Arquivos de entrada ANSYS (*.inp);;Todos os arquivos (*)"), nullptr,
+                                        QFileDialog::DontConfirmOverwrite);
 }
 
 QString MainWindow::askNodeExportPath(const QString& suggestedPath, LengthUnit unit)
