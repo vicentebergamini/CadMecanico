@@ -144,6 +144,11 @@ public:
     std::vector<cad::document::Diagnostic> diagnostics() const;
     QTreeWidget* diagnosticsList() const { return m_diagnostics; }
 
+    // --- Propriedades físicas do modelo MED (E5.7.4a) ------------------------------------
+    // Valida e grava as propriedades no documento ativo (a geometria não muda); erros são
+    // informados e o documento não muda. Retorna true se aplicou.
+    bool applyDemProperties(const cad::dem::DemProperties& properties);
+
     // --- Discretização volumétrica (E5.7.2) -------------------------------------------
     // Gera a discretização do corpo ativo 'bodyId' (cálculo numa thread de trabalho sobre uma
     // CÓPIA do sólido; a interface continua respondendo e mostra o progresso). Durante a geração
@@ -195,6 +200,8 @@ public slots:
     void discretizeCommand();
     void exportNodeCloud();
     void clearDiscretization();
+    // Análise MED > Propriedades do Modelo (E5.7.4a).
+    void editDemProperties();
 
     void newSketch();
     void editSelectedSketch();
@@ -239,6 +246,8 @@ protected:
     virtual QString askApdlExportPath(const QString& suggestedPath);
     // Abre o diálogo da discretização (modal) e atende seus pedidos até ser fechado.
     virtual void runDiscretizationDialog(const QString& preselectedBody);
+    // Diálogo "Propriedades Físicas — Modelo MED" (E5.7.4a); vazio = cancelado.
+    virtual std::optional<cad::dem::DemProperties> askDemProperties(const std::optional<cad::dem::DemProperties>& current);
 
 private:
     void createActions();
@@ -349,6 +358,7 @@ private:
     QAction* m_actShowCenterNodes = nullptr;
     QAction* m_actShowCubeEdges = nullptr;
     QAction* m_actClearDiscretization = nullptr;
+    QAction* m_actDemProperties = nullptr;
     QActionGroup* m_sketchTools = nullptr;
     QToolBar* m_toolBarSketch = nullptr;
 

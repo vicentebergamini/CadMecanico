@@ -4,7 +4,7 @@ add_library(cad_document STATIC
     Diagnostics.h Diagnostics.cpp
 )
 target_include_directories(cad_document PUBLIC ${PROJECT_SOURCE_DIR}/src)
-target_link_libraries(cad_document PUBLIC cad_modeling cad_sketch)
+target_link_libraries(cad_document PUBLIC cad_modeling cad_sketch cad_dem)
 
 # Persistência .cadmec (JSON via QtCore).
 add_library(cad_document_io STATIC

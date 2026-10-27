@@ -1,5 +1,7 @@
 #include "document/DocumentFile.h"
 
+#include "dem/DemUnits.h"
+
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -622,6 +624,72 @@ QJsonObject sketchToJson(const cad::sketch::Sketch& sketch)
     return result;
 }
 
+QJsonObject demPropertiesToJson(const cad::dem::DemProperties& p)
+{
+    return QJsonObject{
+        {"unitSystem", QString::fromLatin1(cad::dem::units::kUnitSystem)},
+        {"material", QJsonObject{{cad::dem::kFieldDensity, p.material.density},
+                                 {cad::dem::kFieldPoissonRatio, p.material.poissonRatio},
+                                 {cad::dem::kFieldYoungModulus, p.material.youngModulus},
+                                 {cad::dem::kFieldFractureEnergy, p.material.fractureEnergy}}},
+        {"model", QJsonObject{{cad::dem::kFieldFailureFactor, p.model.failureFactor},
+                              {cad::dem::kFieldCorrcaf, cad::dem::ModelParameters::corrcaf()}}},
+    };
+}
+
+// Lê um objeto com exatamente as chaves numéricas dadas (finitas).
+bool readNumbers(const QJsonValue& value, const QStringList& keys, QList<double>& values)
+{
+    if (!value.isObject() || value.toObject().size() != keys.size())
+        return false;
+    values.clear();
+    for (const QString& key : keys)
+    {
+        const QJsonValue v = value.toObject().value(key);
+        if (!v.isDouble() || !std::isfinite(v.toDouble()))
+            return false;
+        values << v.toDouble();
+    }
+    return true;
+}
+
+// Propriedades MED (esquema 10). As regras de valor (cad::dem::validate) são aplicadas em
+// CadDocument::fromData; aqui só a estrutura, os tipos e CORRCAF = 1.
+bool readDemProperties(const QJsonValue& value, cad::dem::DemProperties& out, QString& message)
+{
+    using namespace cad::dem;
+    const QJsonObject o = value.toObject();
+    if (!value.isObject() || o.size() != 3 || o.value("unitSystem").toString() != QLatin1String(units::kUnitSystem))
+    {
+        message = QStringLiteral("propriedades MED: estrutura inválida (esperado unitSystem \"SI\", material e model)");
+        return false;
+    }
+    QList<double> material, model;
+    if (!readNumbers(o.value("material"), {kFieldDensity, kFieldPoissonRatio, kFieldYoungModulus, kFieldFractureEnergy},
+                     material))
+    {
+        message = QStringLiteral("propriedades MED: \"material\" exige density, poissonRatio, youngModulus e "
+                                 "fractureEnergy numéricos");
+        return false;
+    }
+    if (!readNumbers(o.value("model"), {kFieldFailureFactor, kFieldCorrcaf}, model))
+    {
+        message = QStringLiteral("propriedades MED: \"model\" exige failureFactor e corrcaf numéricos");
+        return false;
+    }
+    if (model[1] != ModelParameters::corrcaf())
+    {
+        message = QStringLiteral("propriedades MED: CORRCAF deve ser igual a 1 (encontrado %1)").arg(model[1]);
+        return false;
+    }
+    out.material.density = material[0];
+    out.material.poissonRatio = material[1];
+    out.material.youngModulus = material[2];
+    out.material.fractureEnergy = material[3];
+    out.model.failureFactor = model[0];
+    return true;
+}
+
 } // namespace
 
 QByteArray DocumentFile::toJson(const CadDocument& document)
@@ -694,19 +762,21 @@ QByteArray DocumentFile::toJson(const CadDocument& document)
         operations.append(o);
     }
 
+    QJsonObject doc{
+        {"name", QString::fromStdString(document.name())},
+        {"unit", QString::fromLatin1(document.unit())},
+        {"operations", operations},
+        {"nextOperationNumber", document.nextOperationNumber()},
+        {"nextSketchNumber", document.nextSketchNumber()},
+        {"sketches", sketches},
+    };
+    if (document.demProperties())
+        doc.insert("demProperties", demPropertiesToJson(*document.demProperties()));
     const QJsonObject root{
         {"format", QString::fromLatin1(kFormat)},
         {"schemaVersion", kSchemaVersion},
         {"generator", QStringLiteral("CadMecanico")},
-        {"document",
-         QJsonObject{
-             {"name", QString::fromStdString(document.name())},
-             {"unit", QString::fromLatin1(document.unit())},
-             {"operations", operations},
-             {"nextOperationNumber", document.nextOperationNumber()},
-             {"nextSketchNumber", document.nextSketchNumber()},
-             {"sketches", sketches},
-         }},
+        {"document", doc},
     };
     return QJsonDocument(root).toJson(QJsonDocument::Indented);
 }
@@ -1042,6 +1112,18 @@ FileResult DocumentFile::fromJson(const QByteArray& json, CadDocument& out, bool
                 return error(message);
             sketches.push_back(sketch);
         }
+    }
+
+    // Propriedades MED (esquema 10, opcionais).
+    if (doc.contains("demProperties"))
+    {
+        if (schema < 10)
+            return error(QStringLiteral("Campo \"demProperties\" não pertence ao esquema %1").arg(schema));
+        cad::dem::DemProperties dem;
+        QString message;
+        if (!readDemProperties(doc.value("demProperties"), dem, message))
+            return error(QStringLiteral("Dados inválidos: %1").arg(message));
+        data.demProperties = dem;
     }
 
     // Limites geométricos e reconstrução (fromData só altera 'out' em caso de sucesso).

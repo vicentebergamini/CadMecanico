@@ -1,6 +1,7 @@
 #include "app/MainWindow.h"
 
 #include "app/BooleanDialog.h"
+#include "app/DemPropertiesDialog.h"
 #include "app/DiscretizationDialog.h"
 #include "app/ExtrusionDialog.h"
 #include "app/FinishDialog.h"
@@ -494,6 +495,13 @@ void MainWindow::createActions()
     m_actClearDiscretization->setStatusTip(tr("Descarta a discretização exibida (o sólido não é alterado)"));
     connect(m_actClearDiscretization, &QAction::triggered, this, &MainWindow::clearDiscretization);
 
+    // Análise MED (E5.7.4a)
+    m_actDemProperties = new QAction(tr("&Propriedades do Modelo..."), this);
+    m_actDemProperties->setObjectName("actionPropriedadesModeloMED");
+    m_actDemProperties->setStatusTip(tr("Propriedades físicas do material e parâmetros do modelo MED do projeto "
+                                        "(unidades SI)"));
+    connect(m_actDemProperties, &QAction::triggered, this, &MainWindow::editDemProperties);
+
     // Ajuda
     m_actAbout = new QAction(tr("&Sobre o CAD Mecânico"), this);
     m_actAbout->setObjectName("actionSobre");
@@ -576,6 +584,10 @@ void MainWindow::createMenus()
     menuDiscretizationView->addAction(m_actShowCenterNodes);
     menuDiscretizationView->addAction(m_actShowCubeEdges);
     menuTools->addAction(m_actClearDiscretization);
+
+    QMenu* menuDem = menuBar()->addMenu(tr("Análise &MED"));
+    menuDem->setObjectName("menuAnaliseMED");
+    menuDem->addAction(m_actDemProperties);
 
     QMenu* menuView = menuBar()->addMenu(tr("&Visualizar"));
     menuView->setObjectName("menuVisualizar");
@@ -977,6 +989,8 @@ void MainWindow::updateActionStates()
     for (QAction* a : {m_actShowSolid, m_actShowVertexNodes, m_actShowCenterNodes, m_actShowCubeEdges,
                        m_actClearDiscretization})
         a->setEnabled(discretized && !m_discretizing);
+    // Propriedades MED (E5.7.4a): disponíveis em qualquer documento, fora dos modos de edição.
+    m_actDemProperties->setEnabled(!editing && !finishing && !m_discretizing);
     if (finishing)
     {
         for (QAction* a : {m_actExtrude, m_actExtrudeUnified, m_actEditOperation, m_actNewSketch, m_actEditSketch,
@@ -1404,6 +1418,9 @@ void MainWindow::showItemProperties(QTreeWidgetItem* item)
                    .arg(m_document.operations().size() + m_document.sketches().size())
                    .arg(m_documentPath.isEmpty() ? tr("(não salvo)") : QDir::toNativeSeparators(m_documentPath).toHtmlEscaped(),
                         m_document.isModified() ? tr("sim") : tr("não"));
+        html += tr("<br>Propriedades MED: %1")
+                    .arg(m_document.demProperties() ? tr("definidas (SI; Análise MED &gt; Propriedades do Modelo)")
+                                                    : tr("não definidas"));
     }
     m_properties->setText(html);
 }
@@ -1436,6 +1453,36 @@ void MainWindow::editParameters()
     if (*parameters == m_document.parameters())
         return;
     applyParameters(*parameters);
+}
+
+bool MainWindow::applyDemProperties(const cad::dem::DemProperties& properties)
+{
+    const bool changed = m_document.demProperties() != properties;
+    const auto result = m_document.setDemProperties(properties);
+    if (!result.ok)
+    {
+        statusBar()->showMessage(tr("Propriedades MED recusadas: %1").arg(QString::fromStdString(result.message)), 8000);
+        reportError(tr("Propriedades Físicas — Modelo MED"),
+                    tr("As propriedades não foram aplicadas:\n%1\n\nO projeto não foi alterado.")
+                        .arg(QString::fromStdString(result.message)));
+        return false;
+    }
+    refreshDocumentViews(false);
+    statusBar()->showMessage(changed ? tr("Propriedades do modelo MED aplicadas ao projeto")
+                                     : tr("Propriedades do modelo MED sem alteração"),
+                             5000);
+    return true;
+}
+
+void MainWindow::editDemProperties()
+{
+    const auto properties = askDemProperties(m_document.demProperties());
+    if (!properties)
+    {
+        statusBar()->showMessage(tr("Edição das propriedades MED cancelada"), 5000);
+        return;
+    }
+    applyDemProperties(*properties);
 }
 
 void MainWindow::newDocument()
@@ -2836,6 +2883,14 @@ std::optional<PartParameters> MainWindow::askParameters(const PartParameters& cu
     if (dialog.exec() != QDialog::Accepted)
         return std::nullopt;
     return dialog.parameters();
+}
+
+std::optional<cad::dem::DemProperties> MainWindow::askDemProperties(const std::optional<cad::dem::DemProperties>& current)
+{
+    DemPropertiesDialog dialog(current, this);
+    if (dialog.exec() != QDialog::Accepted)
+        return std::nullopt;
+    return dialog.properties();
 }
 
 QString MainWindow::askOpenPath(const QString& directory)

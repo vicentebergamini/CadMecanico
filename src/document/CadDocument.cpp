@@ -378,6 +378,16 @@ bool CadDocument::fromData(const Data& data, CadDocument& out, std::string& erro
     doc.m_sketches = std::move(sketches); // planes dos esboços sobre faces reconstruídos
     doc.m_nextSketchNumber = data.nextSketchNumber;
     doc.m_nextOperationNumber = nextOp;
+    if (data.demProperties)
+    {
+        const cad::dem::PropertyValidation v = cad::dem::validate(*data.demProperties);
+        if (!v.ok)
+        {
+            error = "Propriedades MED inválidas: " + v.message;
+            return false;
+        }
+        doc.m_demProperties = data.demProperties;
+    }
     doc.m_modified = false;
     out = std::move(doc);
     return true;
@@ -492,6 +502,19 @@ bool CadDocument::removeSketch(const std::string& id, std::string& error)
     m_sketches.erase(it);
     m_modified = true;
     return true;
+}
+
+cad::dem::PropertyValidation CadDocument::setDemProperties(const cad::dem::DemProperties& properties)
+{
+    const cad::dem::PropertyValidation v = cad::dem::validate(properties);
+    if (!v.ok)
+        return v;
+    if (m_demProperties != properties)
+    {
+        m_demProperties = properties;
+        m_modified = true;
+    }
+    return v;
 }
 
 void CadDocument::setName(const std::string& name)

@@ -14,8 +14,12 @@
 // identificável com segurança invalida a operação (a alteração que a causou é recusada).
 // Toda alteração recalcula as operações em ordem de dependência numa cópia; o documento só muda
 // se tudo for válido.
+//
+// Propriedades MED (E5.7.4a): cada documento guarda opcionalmente as propriedades físicas do
+// modelo MED (SI, ver dem/DemProperties.h). Elas não participam da geometria nem do recálculo.
 #pragma once
 
+#include "dem/DemProperties.h"
 #include "modeling/EdgeNaming.h"
 #include "modeling/Features.h"
 #include "modeling/TopoNaming.h"
@@ -278,6 +282,8 @@ public:
         std::vector<cad::sketch::Sketch> sketches;
         int nextSketchNumber = 1;
         int nextOperationNumber = 0; // 0 = calcular a partir dos ids
+        // Propriedades MED (E5.7.4a); ausentes = não definidas (documentos antigos).
+        std::optional<cad::dem::DemProperties> demProperties;
     };
     // Constrói e recalcula a partir de dados persistidos. Em falha retorna false e não altera
     // 'out'. Os identificadores são preservados. Com 'allowInvalid' (E5.7, abertura com erros),
@@ -405,6 +411,13 @@ public:
     limitFaceBefore(const std::string& operationId, const std::string& bodyId,
                     const cad::modeling::FaceSignature& face) const;
 
+    // --- Propriedades físicas do modelo MED (E5.7.4a) ----------------------------------------
+    // Vazio = não definidas (documento novo ou anterior à E5.7.4a).
+    const std::optional<cad::dem::DemProperties>& demProperties() const { return m_demProperties; }
+    // Valida (cad::dem::validate) e grava no documento; em falha nada muda. Marca o documento como
+    // modificado só se os valores mudarem. A geometria não é recalculada.
+    cad::dem::PropertyValidation setDemProperties(const cad::dem::DemProperties& properties);
+
     bool isModified() const { return m_modified; }
     void setModified(bool modified) { m_modified = modified; }
 
@@ -491,6 +504,7 @@ private:
     RebuildLog m_log;
     int m_nextSketchNumber = 1;
     int m_nextOperationNumber = 1;
+    std::optional<cad::dem::DemProperties> m_demProperties;
 };
 
 // Identificador estável: letras, dígitos, '-' e '_' (1 a 64 caracteres).

@@ -91,7 +91,18 @@
 //     "limitFace": { "bodyId": "op-1", "face": { normal, offset, centroid, area, name } }
 //     (obrigatório em "upToFace").
 //
-// Arquivos das versões 1 a 8 continuam sendo lidos sem alteração; a gravação usa sempre a
+// Esquema versão 10 (E5.7.4a): propriedades físicas do modelo MED, opcionais, em "document"
+// (ausentes = não definidas; gravadas só quando definidas):
+//     "demProperties": {
+//       "unitSystem": "SI",
+//       "material": { "density": 1240, "poissonRatio": 0.36, "youngModulus": 3.5e9,
+//                     "fractureEnergy": 2400 },
+//       "model": { "failureFactor": 10, "corrcaf": 1 } }
+// Unidades SI: kg/m³, -, Pa, N/m, -, -. "corrcaf" é gravado para documentação e deve ser
+// exatamente 1 (outro valor torna o arquivo inválido). Valores fora das regras de
+// cad::dem::validate também. A geometria continua em mm ("unit").
+//
+// Arquivos das versões 1 a 9 continuam sendo lidos sem alteração; a gravação usa sempre a
 // versão atual. Documento cujas operações falham na reconstrução pode ser aberto com as operações
 // marcadas como inválidas (painel Diagnóstico) — ver fromJson.
 #pragma once
@@ -112,7 +123,7 @@ struct FileResult
 class DocumentFile
 {
 public:
-    static constexpr int kSchemaVersion = 9;
+    static constexpr int kSchemaVersion = 10;
     static constexpr qint64 kMaxFileSize = 4 * 1024 * 1024;
     static constexpr const char* kFormat = "cadmec";
     static constexpr const char* kExtension = "cadmec";

@@ -64,11 +64,17 @@ add_test(NAME e5722 COMMAND test_e5722)
 add_executable(test_e5723 test_e5723.cpp TestCheck.h)
 target_link_libraries(test_e5723 PRIVATE cad_discretization TKBO)
 add_test(NAME e5723 COMMAND test_e5723)
+# E5.7.4a: propriedades físicas do modelo MED (estruturas SI, validação, unidades, persistência .cadmec,
+# compatibilidade e preservação da discretização/exportação APDL).
+add_executable(test_e574a test_e574a.cpp TestCheck.h)
+target_link_libraries(test_e574a PRIVATE cad_dem cad_document cad_document_io cad_discretization TKBO)
+target_compile_definitions(test_e574a PRIVATE CADMEC_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/dados")
+add_test(NAME e574a COMMAND test_e574a ${CMAKE_CURRENT_BINARY_DIR}/saida_e574a)
 # QtCore (JSON do .cadmec) no PATH em tempo de execução.
-set_tests_properties(e57 e571 PROPERTIES
+set_tests_properties(e57 e571 e574a PROPERTIES
     ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${QT6_INSTALL_PREFIX}/${QT6_INSTALL_BINS}")
 
-set_tests_properties(geometria step_roundtrip selecao_info documento esboco extrusao stl booleanas arcos_cantos2d acabamentos3d e56 e57 e571 e572 e5722 e5723 PROPERTIES LABELS "core")
+set_tests_properties(geometria step_roundtrip selecao_info documento esboco extrusao stl booleanas arcos_cantos2d acabamentos3d e56 e57 e571 e572 e5722 e5723 e574a PROPERTIES LABELS "core")
 
 # Formato .cadmec (QtCore, sem interface gráfica).
 qt_add_executable(test_arquivo_cadmec test_arquivo_cadmec.cpp)
@@ -165,6 +171,11 @@ qt_add_executable(test_e57231_ui test_e57231_ui.cpp ViewerTestUtils.h)
 set_target_properties(test_e57231_ui PROPERTIES AUTOMOC ON WIN32_EXECUTABLE OFF)
 target_link_libraries(test_e57231_ui PRIVATE cad_app cad_viewer cad_discretization cad_document_io cad_io cad_modeling Qt6::Test)
 
+qt_add_executable(test_e574a_ui test_e574a_ui.cpp ViewerTestUtils.h)
+set_target_properties(test_e574a_ui PROPERTIES AUTOMOC ON WIN32_EXECUTABLE OFF)
+target_link_libraries(test_e574a_ui PRIVATE cad_app cad_viewer cad_dem cad_document_io cad_io cad_modeling Qt6::Test)
+target_compile_definitions(test_e574a_ui PRIVATE CADMEC_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/dados")
+
 qt_add_executable(test_e561_ui test_e561_ui.cpp ViewerTestUtils.h)
 set_target_properties(test_e561_ui PROPERTIES AUTOMOC ON WIN32_EXECUTABLE OFF)
 target_link_libraries(test_e561_ui PRIVATE cad_app cad_viewer cad_document_io cad_io cad_modeling Qt6::Test)
@@ -191,23 +202,26 @@ add_test(NAME e57231_ui COMMAND test_e57231_ui)
 add_test(NAME e57231_ui_escala125 COMMAND test_e57231_ui)
 add_test(NAME e57231_ui_escala150 COMMAND test_e57231_ui)
 add_test(NAME e561_ui_escala COMMAND test_e561_ui)
+add_test(NAME e574a_ui COMMAND test_e574a_ui)
+add_test(NAME e574a_ui_escala125 COMMAND test_e574a_ui)
+add_test(NAME e574a_ui_escala150 COMMAND test_e574a_ui)
 
 set(_cad_gl_env "QT_QPA_PLATFORM=windows;QT_PLUGIN_PATH=${QT6_INSTALL_PREFIX}/${QT6_INSTALL_PLUGINS}")
-set_tests_properties(viewer app_viewer interacao esboco_ui documento_vazio extrusao_ui booleanas_ui e55_ui e56_ui e561_ui e57_ui e571_ui e572_ui e5722_ui e5723_ui e57231_ui PROPERTIES
+set_tests_properties(viewer app_viewer interacao esboco_ui documento_vazio extrusao_ui booleanas_ui e55_ui e56_ui e561_ui e57_ui e571_ui e572_ui e5722_ui e5723_ui e57231_ui e574a_ui PROPERTIES
     LABELS "gui;opengl"
     TIMEOUT 300
     ENVIRONMENT "${_cad_gl_env}"
     ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${QT6_INSTALL_PREFIX}/${QT6_INSTALL_BINS}"
 )
-set_tests_properties(viewer_escala interacao_escala esboco_ui_escala e561_ui_escala e57231_ui_escala125 PROPERTIES
+set_tests_properties(viewer_escala interacao_escala esboco_ui_escala e561_ui_escala e57231_ui_escala125 e574a_ui_escala125 PROPERTIES
     LABELS "gui;opengl"
     TIMEOUT 300
     ENVIRONMENT "${_cad_gl_env};QT_SCALE_FACTOR=1.25"
     ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${QT6_INSTALL_PREFIX}/${QT6_INSTALL_BINS}"
 )
 
-# E5.7.2.3.1: janela de discretização com escala de exibição de 150 %.
-set_tests_properties(e57231_ui_escala150 PROPERTIES
+# E5.7.2.3.1 e E5.7.4a: janelas de discretização e de propriedades MED com escala de exibição de 150 %.
+set_tests_properties(e57231_ui_escala150 e574a_ui_escala150 PROPERTIES
     LABELS "gui;opengl"
     TIMEOUT 300
     ENVIRONMENT "${_cad_gl_env};QT_SCALE_FACTOR=1.5"
