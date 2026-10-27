@@ -4,13 +4,20 @@
 #include <QComboBox>
 #include <QDoubleSpinBox>
 #include <QFormLayout>
+#include <QGuiApplication>
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QProgressBar>
 #include <QPushButton>
+#include <QScreen>
 #include <QScrollArea>
+#include <QScrollBar>
+#include <QResizeEvent>
+#include <QShowEvent>
+#include <QSplitter>
 #include <QVBoxLayout>
+#include <QWindow>
 
 #include <algorithm>
 #include <cmath>
@@ -128,11 +135,18 @@ DiscretizationDialog::DiscretizationDialog(const std::vector<Body>& bodies, cons
     resultArea->setWidget(m_result);
     resultArea->setWidgetResizable(true);
     resultArea->setFrameShape(QFrame::StyledPanel);
-    resultArea->setMinimumHeight(280);
+    resultArea->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    resultArea->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    // E5.7.2.3.1: altura mínima pequena; as linhas excedentes são consultadas pela rolagem, sem
+    // aumentar a janela.
+    resultArea->setMinimumHeight(fontMetrics().lineSpacing() * 4);
+    resultArea->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+    m_resultArea = resultArea;
 
     m_message = new QLabel;
     m_message->setObjectName("mensagemDiscretizacao");
     m_message->setWordWrap(true);
+    m_message->setVisible(false); // ocupa espaço somente quando há mensagem
 
     auto* note = new QLabel(tr("Limitação: os cubos aproximam superfícies curvas e inclinadas por degraus. A diferença "
                                "entre os volumes mede essa aproximação geométrica; não indica, necessariamente, erro "
@@ -195,19 +209,53 @@ DiscretizationDialog::DiscretizationDialog(const std::vector<Body>& bodies, cons
     buttons->addWidget(m_cancel);
     buttons->addWidget(m_close);
 
+    // E5.7.2.3.1: três regiões. Superior (configurações, sempre visível, sem rolagem); central
+    // (resultados com rolagem vertical e, abaixo dela, as opções de exibição e da exportação APDL,
+    // com rolagem própria quando a tela é pequena), separadas por um divisor ajustável; inferior
+    // (mensagem e botões, fora de qualquer rolagem). A altura da janela não depende do volume de
+    // resultados: o tamanho inicial é ajustado à área útil do monitor em showEvent().
+    auto* options = new QWidget;
+    options->setObjectName("conteudoOpcoes");
+    auto* optionsLayout = new QVBoxLayout(options);
+    optionsLayout->setContentsMargins(0, 0, 0, 0);
+    optionsLayout->addWidget(system);
+    optionsLayout->addWidget(note);
+    optionsLayout->addWidget(displayBox);
+    optionsLayout->addWidget(apdlBox);
+    optionsLayout->addStretch();
+    auto* optionsArea = new QScrollArea;
+    optionsArea->setObjectName("areaOpcoes");
+    optionsArea->setWidget(options);
+    optionsArea->setWidgetResizable(true);
+    optionsArea->setFrameShape(QFrame::NoFrame);
+    optionsArea->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    optionsArea->setMinimumHeight(fontMetrics().lineSpacing() * 4);
+    // Sem rolagem horizontal: a área nunca fica mais estreita que o conteúdo (caixas de seleção e
+    // campos inteiros), somada a barra de rolagem vertical.
+    optionsArea->setMinimumWidth(options->minimumSizeHint().width()
+                                 + optionsArea->verticalScrollBar()->sizeHint().width());
+    m_optionsArea = optionsArea;
+
+    auto* splitter = new QSplitter(Qt::Vertical);
+    splitter->setObjectName("divisorResultados");
+    splitter->setChildrenCollapsible(false);
+    splitter->addWidget(resultArea);
+    splitter->addWidget(optionsArea);
+    splitter->setStretchFactor(0, 1);
+    splitter->setStretchFactor(1, 0);
+    m_splitter = splitter;
+    // A altura das opções é a escolhida pelo usuário ao arrastar o divisor (ou a do conteúdo);
+    // mudanças no tamanho da janela vão para os resultados (applySplit()).
+    connect(splitter, &QSplitter::splitterMoved, this, [this] { m_optionsHeight = m_optionsArea->height(); });
+
     auto* layout = new QVBoxLayout(this);
     layout->addLayout(form);
-    layout->addWidget(system);
     layout->addWidget(m_estimate);
     layout->addWidget(m_progress);
-    layout->addWidget(resultArea, 1);
-    layout->addWidget(note);
-    layout->addWidget(displayBox);
-    layout->addWidget(apdlBox);
+    layout->addWidget(splitter, 1);
     layout->addWidget(m_message);
     layout->addLayout(buttons);
-    setMinimumWidth(620);
-    resize(700, 860);
+    setSizeGripEnabled(true);
 
     auto changed = [this] {
         setMessage(QString(), false);
@@ -218,6 +266,85 @@ DiscretizationDialog::DiscretizationDialog(const std::vector<Body>& bodies, cons
     connect(m_lco, &QDoubleSpinBox::valueChanged, this, changed);
     connect(m_criterion, &QComboBox::currentIndexChanged, this, changed);
     updateState();
+}
+
+QSize DiscretizationDialog::preferredSize() const
+{
+    // Largura para os controles sem cortes; altura de projeto (a de antes da E5.7.2.3.1), que
+    // fitGeometry() limita à área útil do monitor.
+    const QSize hint = sizeHint();
+    return {std::max({hint.width(), minimumSizeHint().width(), 720}), std::max(hint.height(), 860)};
+}
+
+QRect DiscretizationDialog::fitGeometry(const QSize& preferred, const QSize& minimum, const QRect& available,
+                                        const QMargins& frame)
+{
+    // Moldura (barra de título e bordas) incluída: a janela inteira cabe em ~90 % da altura útil e
+    // ~95 % da largura útil, nunca menor que o mínimo do layout, e fica centralizada na área útil.
+    const int frameW = frame.left() + frame.right();
+    const int frameH = frame.top() + frame.bottom();
+    const int maxW = int(available.width() * 0.95) - frameW;
+    const int maxH = int(available.height() * 0.90) - frameH;
+    const int w = std::max(minimum.width(), std::min(preferred.width(), maxW));
+    const int h = std::max(minimum.height(), std::min(preferred.height(), maxH));
+    int x = available.left() + (available.width() - (w + frameW)) / 2 + frame.left();
+    int y = available.top() + (available.height() - (h + frameH)) / 2 + frame.top();
+    // Se o mínimo do layout exceder a área útil, a barra de título continua dentro dela.
+    x = std::max(x, available.left() + frame.left());
+    y = std::max(y, available.top() + frame.top());
+    return {x, y, w, h};
+}
+
+void DiscretizationDialog::showEvent(QShowEvent* event)
+{
+    if (!m_placed && !event->spontaneous())
+    {
+        m_placed = true;
+        // Monitor atual: o da janela principal (se houver) ou o do próprio diálogo.
+        QScreen* scr = parentWidget() ? parentWidget()->window()->screen() : screen();
+        if (!scr)
+            scr = QGuiApplication::primaryScreen();
+        if (scr)
+        {
+            QMargins frame;
+            if (QWindow* handle = windowHandle())
+                frame = handle->frameMargins();
+            if (frame.isNull()) // moldura ainda desconhecida: estimativa da barra de título
+                frame = QMargins(8, fontMetrics().height() * 2 + 8, 8, 8);
+            setGeometry(fitGeometry(preferredSize(), minimumSizeHint().expandedTo(minimumSize()),
+                                    scr->availableGeometry(), frame));
+            // Divisor: as opções recebem a altura do conteúdo, limitada à metade do divisor em telas
+            // pequenas (o excedente rola), e os resultados o restante.
+            if (QLayout* l = layout())
+                l->activate();
+            const int half = (m_splitter->height() - m_splitter->handleWidth()) / 2;
+            m_optionsHeight = std::min(m_optionsArea->widget()->sizeHint().height() + 2,
+                                       std::max(m_optionsArea->minimumHeight(), half));
+            applySplit();
+        }
+    }
+    QDialog::showEvent(event);
+}
+
+void DiscretizationDialog::resizeEvent(QResizeEvent* event)
+{
+    QDialog::resizeEvent(event); // o layout já redimensionou o divisor
+    applySplit();
+}
+
+void DiscretizationDialog::applySplit()
+{
+    if (m_optionsHeight <= 0)
+        return;
+    // Ao reduzir a janela, os resultados diminuem primeiro (com rolagem) até a altura mínima; só
+    // então as opções diminuem e passam a rolar. Ao ampliar, os resultados crescem.
+    const int total = m_splitter->height() - m_splitter->handleWidth();
+    const int resultMin = m_resultArea->minimumHeight();
+    const int optionsMin = m_optionsArea->minimumHeight();
+    const int options = std::clamp(m_optionsHeight, optionsMin, std::max(optionsMin, total - resultMin));
+    const QList<int> sizes{std::max(resultMin, total - options), options};
+    if (m_splitter->sizes() != sizes)
+        m_splitter->setSizes(sizes);
 }
 
 QString DiscretizationDialog::bodyId() const
@@ -315,6 +442,7 @@ void DiscretizationDialog::setResult(const QString& html, const QString& bodyId,
 void DiscretizationDialog::setMessage(const QString& text, bool error)
 {
     m_message->setText(text);
+    m_message->setVisible(!text.isEmpty());
     m_message->setStyleSheet(error ? QStringLiteral("color: #b00020;") : QString());
 }
 

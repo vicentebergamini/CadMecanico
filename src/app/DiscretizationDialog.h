@@ -8,6 +8,10 @@
 // exige regenerar), "Cancelar" (interrompe a geração em andamento; sem geração, fecha a janela)
 // e "Fechar". Durante a geração os parâmetros ficam bloqueados e fechar a janela pede o
 // cancelamento. Nada disso altera o sólido.
+//
+// Dimensionamento (E5.7.2.3.1): o tamanho inicial é ajustado à área útil do monitor (no máximo
+// ~90 % da altura), a janela é centralizada e pode ser redimensionada; os resultados têm rolagem
+// vertical e os botões ficam sempre fora das áreas de rolagem.
 #pragma once
 
 #include "discretization/Discretization.h"
@@ -24,6 +28,8 @@ class QDoubleSpinBox;
 class QLabel;
 class QProgressBar;
 class QPushButton;
+class QScrollArea;
+class QSplitter;
 
 namespace cad::app {
 
@@ -64,6 +70,14 @@ public:
     void setResult(const QString& html, const QString& bodyId, const cad::discretization::Parameters& parameters);
     void setMessage(const QString& text, bool error);
 
+    // Tamanho desejado (largura dos controles sem cortes e altura de projeto) antes de limitar à tela.
+    QSize preferredSize() const;
+    // Geometria inicial (área cliente) para a área útil 'available' do monitor, com a moldura
+    // 'frame' da janela: limitada a ~90 % da altura e ~95 % da largura úteis, nunca abaixo de
+    // 'minimum', centralizada e com a barra de título dentro da área útil.
+    static QRect fitGeometry(const QSize& preferred, const QSize& minimum, const QRect& available,
+                             const QMargins& frame);
+
 signals:
     void generateRequested();
     void exportRequested();
@@ -75,8 +89,13 @@ signals:
 public slots:
     void reject() override;
 
+protected:
+    void showEvent(QShowEvent* event) override;
+    void resizeEvent(QResizeEvent* event) override;
+
 private:
     void updateState();
+    void applySplit();
     bool resultMatchesFields() const;
 
     QComboBox* m_body = nullptr;
@@ -98,6 +117,11 @@ private:
     QPushButton* m_exportApdl = nullptr;
     QPushButton* m_cancel = nullptr;
     QPushButton* m_close = nullptr;
+    QScrollArea* m_resultArea = nullptr;
+    QScrollArea* m_optionsArea = nullptr;
+    QSplitter* m_splitter = nullptr;
+    bool m_placed = false;
+    int m_optionsHeight = 0; // altura desejada da área de opções no divisor (0 = antes de exibir)
     bool m_running = false;
     bool m_hasResult = false;
     QString m_resultBody;

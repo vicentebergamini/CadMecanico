@@ -161,6 +161,10 @@ qt_add_executable(test_e5723_ui test_e5723_ui.cpp ViewerTestUtils.h)
 set_target_properties(test_e5723_ui PROPERTIES AUTOMOC ON WIN32_EXECUTABLE OFF)
 target_link_libraries(test_e5723_ui PRIVATE cad_app cad_viewer cad_discretization cad_document_io cad_io cad_modeling Qt6::Test)
 
+qt_add_executable(test_e57231_ui test_e57231_ui.cpp ViewerTestUtils.h)
+set_target_properties(test_e57231_ui PROPERTIES AUTOMOC ON WIN32_EXECUTABLE OFF)
+target_link_libraries(test_e57231_ui PRIVATE cad_app cad_viewer cad_discretization cad_document_io cad_io cad_modeling Qt6::Test)
+
 qt_add_executable(test_e561_ui test_e561_ui.cpp ViewerTestUtils.h)
 set_target_properties(test_e561_ui PROPERTIES AUTOMOC ON WIN32_EXECUTABLE OFF)
 target_link_libraries(test_e561_ui PRIVATE cad_app cad_viewer cad_document_io cad_io cad_modeling Qt6::Test)
@@ -183,18 +187,29 @@ add_test(NAME e571_ui COMMAND test_e571_ui)
 add_test(NAME e572_ui COMMAND test_e572_ui)
 add_test(NAME e5722_ui COMMAND test_e5722_ui)
 add_test(NAME e5723_ui COMMAND test_e5723_ui)
+add_test(NAME e57231_ui COMMAND test_e57231_ui)
+add_test(NAME e57231_ui_escala125 COMMAND test_e57231_ui)
+add_test(NAME e57231_ui_escala150 COMMAND test_e57231_ui)
 add_test(NAME e561_ui_escala COMMAND test_e561_ui)
 
 set(_cad_gl_env "QT_QPA_PLATFORM=windows;QT_PLUGIN_PATH=${QT6_INSTALL_PREFIX}/${QT6_INSTALL_PLUGINS}")
-set_tests_properties(viewer app_viewer interacao esboco_ui documento_vazio extrusao_ui booleanas_ui e55_ui e56_ui e561_ui e57_ui e571_ui e572_ui e5722_ui e5723_ui PROPERTIES
+set_tests_properties(viewer app_viewer interacao esboco_ui documento_vazio extrusao_ui booleanas_ui e55_ui e56_ui e561_ui e57_ui e571_ui e572_ui e5722_ui e5723_ui e57231_ui PROPERTIES
     LABELS "gui;opengl"
     TIMEOUT 300
     ENVIRONMENT "${_cad_gl_env}"
     ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${QT6_INSTALL_PREFIX}/${QT6_INSTALL_BINS}"
 )
-set_tests_properties(viewer_escala interacao_escala esboco_ui_escala e561_ui_escala PROPERTIES
+set_tests_properties(viewer_escala interacao_escala esboco_ui_escala e561_ui_escala e57231_ui_escala125 PROPERTIES
     LABELS "gui;opengl"
     TIMEOUT 300
     ENVIRONMENT "${_cad_gl_env};QT_SCALE_FACTOR=1.25"
+    ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${QT6_INSTALL_PREFIX}/${QT6_INSTALL_BINS}"
+)
+
+# E5.7.2.3.1: janela de discretização com escala de exibição de 150 %.
+set_tests_properties(e57231_ui_escala150 PROPERTIES
+    LABELS "gui;opengl"
+    TIMEOUT 300
+    ENVIRONMENT "${_cad_gl_env};QT_SCALE_FACTOR=1.5"
     ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${QT6_INSTALL_PREFIX}/${QT6_INSTALL_BINS}"
 )
