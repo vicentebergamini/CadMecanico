@@ -47,6 +47,7 @@
 #include <filesystem>
 #include <map>
 #include <string>
+#include <vector>
 
 namespace cad::discretization {
 
@@ -95,6 +96,11 @@ private:
     int m_step = 0;           // no cubo: 0..2 vizinhos +X/+Y/+Z, 3..10 vértices
     std::int64_t m_nextId = 1;
 };
+
+// Comprimentos geométricos das ligações (registro para uso futuro no MED), na ordem da sequência
+// acima (índice = ID do elemento − 1), na unidade pedida. Com a geometria ajustada (projeção dos
+// nós, E5.7.2.3) usam as coordenadas projetadas: a projeção altera comprimentos e orientações.
+std::vector<double> linkLengths(const Discretization& data, LengthUnit unit = LengthUnit::Millimeter);
 
 struct ApdlOptions
 {

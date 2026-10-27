@@ -266,6 +266,17 @@ LinkCounts ApdlLinkSequence::count(const Discretization& data)
     return counts;
 }
 
+std::vector<double> linkLengths(const Discretization& data, LengthUnit unit)
+{
+    std::vector<double> lengths;
+    lengths.reserve(std::size_t(ApdlLinkSequence::count(data).total()));
+    ApdlLinkSequence seq(data);
+    LinkElement e;
+    while (seq.next(e))
+        lengths.push_back((data.node(e.n2, unit).position - data.node(e.n1, unit).position).Modulus());
+    return lengths;
+}
+
 // --- Exportação -------------------------------------------------------------------
 
 std::string ApdlExporter::suggestedFileName(const std::string& partName)
@@ -348,6 +359,12 @@ ApdlExportResult ApdlExporter::write(const Discretization& data, const std::file
         buffer += "! acrescentados depois (materiais, cargas) devem usar unidades coerentes com esta.\n";
         buffer += "! lco = " + NodeAsciiExporter::formatCoordinate(data.grid().lco) + " mm; cubos = "
                   + toString(data.cubeCount()) + "\n";
+        if (data.adjusted())
+        {
+            buffer += "! Geometria ajustada (E5.7.2.3): " + toString(data.projection().movedNodes)
+                      + " nos com coordenadas ajustadas (projecao sobre o contorno CAD);\n";
+            buffer += "! numeracao e conectividade definidas pela grade cartesiana antes da projecao\n";
+        }
         buffer += "! Nos: " + toString(data.totalNodeCount()) + " (1-" + toString(data.vertexNodeCount())
                   + " vertices; " + toString(data.vertexNodeCount() + 1) + "-" + toString(data.totalNodeCount())
                   + " centrais), ordem Z -> Y -> X\n";

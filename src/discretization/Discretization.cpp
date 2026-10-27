@@ -6,6 +6,15 @@
 
 namespace cad::discretization {
 
+namespace {
+
+gp_XYZ convert(const gp_XYZ& mm, LengthUnit unit)
+{
+    return unit == LengthUnit::Meter ? gp_XYZ(mm.X() / 1000.0, mm.Y() / 1000.0, mm.Z() / 1000.0) : mm;
+}
+
+} // namespace
+
 const char* unitSymbol(LengthUnit unit)
 {
     return unit == LengthUnit::Meter ? "m" : "mm";
@@ -23,6 +32,7 @@ const char* criterionLabel(InclusionCriterion criterion)
     case InclusionCriterion::FullyInside: return "Cubo totalmente contido no sólido";
     case InclusionCriterion::CenterInside: return "Centro do cubo localizado no material";
     case InclusionCriterion::PositiveIntersection: return "Cubo com interseção volumétrica positiva com o sólido";
+    case InclusionCriterion::BoundaryProjection: return "Projeção dos nós sobre o contorno (ajuste geométrico)";
     }
     return "";
 }
@@ -34,6 +44,7 @@ const char* criterionKey(InclusionCriterion criterion)
     case InclusionCriterion::FullyInside: return "totalmente_contido";
     case InclusionCriterion::CenterInside: return "centro_no_material";
     case InclusionCriterion::PositiveIntersection: return "intersecao_positiva";
+    case InclusionCriterion::BoundaryProjection: return "projecao_contorno";
     }
     return "";
 }
@@ -84,7 +95,7 @@ CubeInfo Discretization::cube(std::int64_t index) const
         return c;
     c.id = index + 1;
     m_grid.cellIjk(m_cubes[std::size_t(index)], c.i, c.j, c.k);
-    c.center = m_grid.center(c.i, c.j, c.k);
+    c.center = centerPosition(c.i, c.j, c.k);
     c.lco = m_grid.lco;
     static constexpr int kOffsets[8][3] = {{0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0},
                                            {0, 0, 1}, {1, 0, 1}, {1, 1, 1}, {0, 1, 1}};
@@ -103,19 +114,54 @@ NodeInfo Discretization::node(std::int64_t id, LengthUnit unit) const
     if (id <= vertexNodeCount())
     {
         m_grid.latticeIjk(m_vertexPoints[std::size_t(id - 1)], n.i, n.j, n.k);
-        n.position = m_grid.vertex(n.i, n.j, n.k, unit);
+        if (!m_moved.empty() && m_moved[std::size_t(id - 1)])
+            n.position = convert(m_vertexPos[std::size_t(id - 1)], unit);
+        else
+            n.position = m_grid.vertex(n.i, n.j, n.k, unit);
         return n;
     }
     n.center = true;
-    m_grid.cellIjk(m_cubes[std::size_t(id - vertexNodeCount() - 1)], n.i, n.j, n.k);
-    n.position = m_grid.center(n.i, n.j, n.k, unit);
+    const std::size_t c = std::size_t(id - vertexNodeCount() - 1);
+    m_grid.cellIjk(m_cubes[c], n.i, n.j, n.k);
+    if (!m_moved.empty() && m_moved[std::size_t(id - 1)])
+        n.position = convert(m_centerPos[c], unit);
+    else
+        n.position = m_grid.center(n.i, n.j, n.k, unit);
     return n;
+}
+
+gp_XYZ Discretization::vertexPosition(int i, int j, int k) const
+{
+    const std::int64_t id = m_moved.empty() ? 0 : vertexId(i, j, k);
+    return id > 0 && m_moved[std::size_t(id - 1)] ? m_vertexPos[std::size_t(id - 1)] : m_grid.vertex(i, j, k);
+}
+
+gp_XYZ Discretization::centerPosition(int i, int j, int k) const
+{
+    const std::int64_t id = m_moved.empty() ? 0 : cubeId(i, j, k);
+    return id > 0 && m_moved[std::size_t(vertexNodeCount() + id - 1)] ? m_centerPos[std::size_t(id - 1)]
+                                                                       : m_grid.center(i, j, k);
+}
+
+bool Discretization::setAdjustedGeometry(std::vector<gp_XYZ> vertices, std::vector<gp_XYZ> centers,
+                                         std::vector<std::uint8_t> moved, const ProjectionReport& report)
+{
+    if (std::int64_t(vertices.size()) != vertexNodeCount() || std::int64_t(centers.size()) != centerNodeCount()
+        || std::int64_t(moved.size()) != totalNodeCount())
+        return false;
+    m_vertexPos = std::move(vertices);
+    m_centerPos = std::move(centers);
+    m_moved = std::move(moved);
+    m_projection = report;
+    m_projection.applied = true;
+    return true;
 }
 
 std::size_t Discretization::memoryBytes() const
 {
     return m_cubes.capacity() * sizeof(std::int64_t) + m_accepted.capacity() / 8
-           + m_latticeId.capacity() * sizeof(std::uint32_t) + m_vertexPoints.capacity() * sizeof(std::int64_t);
+           + m_latticeId.capacity() * sizeof(std::uint32_t) + m_vertexPoints.capacity() * sizeof(std::int64_t)
+           + (m_vertexPos.capacity() + m_centerPos.capacity()) * sizeof(gp_XYZ) + m_moved.capacity();
 }
 
 bool Discretization::build(const VoxelGrid& grid, const Parameters& parameters, const std::vector<std::uint8_t>& accepted,
@@ -125,6 +171,10 @@ bool Discretization::build(const VoxelGrid& grid, const Parameters& parameters, 
     m_parameters = parameters;
     m_cubes.clear();
     m_vertexPoints.clear();
+    m_projection = ProjectionReport();
+    m_vertexPos.clear();
+    m_centerPos.clear();
+    m_moved.clear();
     const std::int64_t cells = grid.cellCount();
     const std::int64_t points = grid.latticeCount();
     if (std::int64_t(accepted.size()) != cells || points >= std::int64_t(std::numeric_limits<std::uint32_t>::max()))

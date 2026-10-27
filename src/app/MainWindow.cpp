@@ -3408,7 +3408,8 @@ QString MainWindow::describeDiscretization(const Discretization& d) const
     const auto& g = d.grid();
     const auto& st = d.stats();
     const double vCad = st.solidVolume;
-    const double vCubes = d.cubeVolume();
+    // Com a projeção dos nós (E5.7.2.3) o volume é o das células deformadas, não Nc × lco³.
+    const double vCubes = d.discretizedVolume();
     const double diff = vCubes - vCad;
     const double percent = vCad > 0.0 ? 100.0 * diff / vCad : 0.0;
     const auto& overlay = m_viewer->discretizationOverlayStats();
@@ -3437,8 +3438,46 @@ QString MainWindow::describeDiscretization(const Discretization& d) const
     html += row(tr("Nós centrais:"), integer(d.centerNodeCount()));
     html += row(tr("Total de nós:"), integer(d.totalNodeCount()));
     html += row(tr("Volume do sólido CAD:"), tr("%1 mm³").arg(decimal(vCad, 3)));
-    html += row(tr("Volume representado pelos cubos:"), tr("%1 mm³").arg(decimal(vCubes, 3)));
-    html += row(tr("Diferença (cubos − CAD):"), tr("%1 mm³ (%2 %)").arg(decimal(diff, 3), decimal(percent, 3)));
+    if (d.adjusted())
+    {
+        const auto& p = d.projection();
+        html += row(tr("Volume das células ajustadas:"), tr("%1 mm³").arg(decimal(vCubes, 3)));
+        html += row(tr("Diferença (células − CAD):"), tr("%1 mm³ (%2 %)").arg(decimal(diff, 3), decimal(percent, 3)));
+        html += row(tr("Volume dos cubos antes do ajuste:"), tr("%1 mm³").arg(decimal(d.cubeVolume(), 3)));
+        html += row(tr("Nós de contorno:"), tr("%1 (faces expostas: %2)")
+                                               .arg(integer(p.boundaryVertices), integer(p.boundaryFaces)));
+        html += row(tr("Nós projetados:"),
+                    tr("%1 integralmente; %2 parcialmente; %3 cancelados; %4 internos suavizados")
+                        .arg(integer(p.projectedNodes), integer(p.partialNodes), integer(p.cancelledNodes),
+                             integer(p.smoothedNodes)));
+        html += row(tr("Destinos sobre arestas / vértices CAD:"),
+                    tr("%1 / %2").arg(integer(p.featureEdgeTargets), integer(p.cornerTargets)));
+        html += row(tr("Células ajustadas:"), integer(p.adjustedCells));
+        const std::int64_t notAdjusted = p.partialNodes + p.cancelledNodes + p.unresolvedVertices + p.inadmissibleVertices;
+        html += row(tr("Não ajustados integralmente:"),
+                    tr("%1 células com deformação reduzida/recusada; %2 nós sem projeção completa "
+                       "(%3 sem destino coerente, %4 com deslocamento acima de lco)")
+                        .arg(integer(p.rejectedCells), integer(notAdjusted), integer(p.unresolvedVertices),
+                             integer(p.inadmissibleVertices)));
+        html += row(tr("Desvio ao contorno CAD (máx. / médio):"),
+                    tr("antes %1 / %2 mm; depois %3 / %4 mm")
+                        .arg(decimal(p.deviationBeforeMax, 4), decimal(p.deviationBeforeMean, 4),
+                             decimal(p.deviationAfterMax, 4), decimal(p.deviationAfterMean, 4)));
+        html += row(tr("Deslocamento máximo:"), tr("%1 mm").arg(decimal(p.maxDisplacement, 4)));
+        html += row(tr("Jacobiano escalado mínimo:"), decimal(p.minScaledJacobian, 3));
+        html += row(tr("Volume das células (mín. / máx.):"),
+                    tr("%1 / %2 mm³").arg(decimal(p.minCellVolume, 5), decimal(p.maxCellVolume, 5)));
+        html += row(tr("Ligações (mín. / máx. / razão):"),
+                    tr("%1 / %2 mm / %3")
+                        .arg(decimal(p.minLink, 4), decimal(p.maxLink, 4),
+                             decimal(p.minLink > 0.0 ? p.maxLink / p.minLink : 0.0, 3)));
+        html += row(tr("Células inválidas:"), integer(p.invalidCells));
+    }
+    else
+    {
+        html += row(tr("Volume representado pelos cubos:"), tr("%1 mm³").arg(decimal(vCubes, 3)));
+        html += row(tr("Diferença (cubos − CAD):"), tr("%1 mm³ (%2 %)").arg(decimal(diff, 3), decimal(percent, 3)));
+    }
     html += row(tr("Tempo de processamento:"), tr("%1 s (classificação %2 s; numeração %3 s)")
                                                    .arg(decimal(st.totalSeconds, 3), decimal(st.classificationSeconds, 3),
                                                         decimal(st.numberingSeconds, 3)));
@@ -3446,6 +3485,10 @@ QString MainWindow::describeDiscretization(const Discretization& d) const
     html += QStringLiteral("</table>");
     html += tr("<p>A diferença de volume é uma medida da aproximação geométrica por cubos (degraus nas superfícies "
                "não alinhadas à grade), não necessariamente um erro de cálculo.</p>");
+    if (d.adjusted())
+        html += tr("<p>Projeção dos nós: numeração e ligações seguem a grade cartesiana anterior à projeção; as "
+                   "coordenadas exportadas (ASCII e APDL) são as ajustadas. A projeção altera comprimentos e "
+                   "orientações das ligações e não garante distribuição uniforme de rigidez.</p>");
     return html;
 }
 

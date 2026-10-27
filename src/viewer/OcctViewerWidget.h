@@ -11,6 +11,7 @@
 #include <AIS_Trihedron.hxx>
 #include <AIS_ViewController.hxx>
 #include <AIS_ViewCube.hxx>
+#include <Graphic3d_ArrayOfSegments.hxx>
 #include <TopoDS_Shape.hxx>
 #include <V3d_View.hxx>
 #include <V3d_Viewer.hxx>
@@ -160,6 +161,9 @@ public:
     occ::handle<AIS_InteractiveObject> vertexNodesPresentation() const { return m_vertexNodes; }
     occ::handle<AIS_InteractiveObject> centerNodesPresentation() const { return m_centerNodes; }
     occ::handle<AIS_InteractiveObject> cubeEdgesPresentation() const { return m_cubeEdges; }
+    // Segmentos dos contornos das células efetivamente enviados ao visualizador (pares de pontos,
+    // mm). Com a projeção dos nós (E5.7.2.3) seguem as posições ajustadas.
+    occ::handle<Graphic3d_ArrayOfSegments> cubeEdgeSegments() const { return m_cubeEdgeSegments; }
     // true se o sólido está exibido (falso quando ocultado pela opção da discretização).
     bool isSolidDisplayed() const;
 
@@ -295,6 +299,7 @@ private:
     occ::handle<AIS_InteractiveObject> m_vertexNodes;
     occ::handle<AIS_InteractiveObject> m_centerNodes;
     occ::handle<AIS_InteractiveObject> m_cubeEdges;
+    occ::handle<Graphic3d_ArrayOfSegments> m_cubeEdgeSegments;
 };
 
 } // namespace cad::viewer

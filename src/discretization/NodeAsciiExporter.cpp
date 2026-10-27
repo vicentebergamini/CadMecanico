@@ -1,5 +1,6 @@
 #include "discretization/NodeAsciiExporter.h"
 
+#include <algorithm>
 #include <charconv>
 #include <chrono>
 #include <cmath>
@@ -178,6 +179,7 @@ NodeFileCheck NodeAsciiExporter::verify(const std::filesystem::path& file, const
     const char* p = text.data() + header.size();
     const char* end = text.data() + text.size();
     gp_XYZ previous;
+    int previousIjk[3] = {0, 0, 0};
     while (p < end)
     {
         const char* eol = static_cast<const char*>(std::memchr(p, '\n', std::size_t(end - p)));
@@ -209,10 +211,15 @@ NodeFileCheck NodeAsciiExporter::verify(const std::filesystem::path& file, const
         const NodeInfo node = data.node(id, unit);
         if (current.X() != node.position.X() || current.Y() != node.position.Y() || current.Z() != node.position.Z())
             return failCheck(c, "coordenadas do nó " + std::to_string(id) + " diferem da discretização");
-        // Ordem Z → Y → X dentro de cada bloco (vértices; centros).
-        if (id != 1 && id != vertices + 1 && !zyxLess(previous, current))
+        // Ordem Z → Y → X dentro de cada bloco (vértices; centros). Com a geometria ajustada
+        // (projeção dos nós, E5.7.2.3) a ordem é a dos índices da grade antes da projeção.
+        const int ijk[3] = {node.k, node.j, node.i};
+        const bool ordered = data.adjusted() ? std::lexicographical_compare(previousIjk, previousIjk + 3, ijk, ijk + 3)
+                                             : zyxLess(previous, current);
+        if (id != 1 && id != vertices + 1 && !ordered)
             return failCheck(c, "ordenação Z → Y → X violada no nó " + std::to_string(id));
         previous = current;
+        std::copy(ijk, ijk + 3, previousIjk);
         ++c.lines;
         p = eol + 1;
     }

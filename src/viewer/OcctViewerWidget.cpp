@@ -1410,6 +1410,7 @@ void OcctViewerWidget::removeDiscretizationObjects()
     m_vertexNodes.Nullify();
     m_centerNodes.Nullify();
     m_cubeEdges.Nullify();
+    m_cubeEdgeSegments.Nullify();
 }
 
 bool OcctViewerWidget::isSolidDisplayed() const
@@ -1558,10 +1559,13 @@ void OcctViewerWidget::setDiscretization(std::shared_ptr<const cad::discretizati
     forEachEdge(surfaceOnly, [&](int axis, int i, int j, int k) {
         if (n++ % stride != 0)
             return;
-        segments->AddVertex(gp_Pnt(grid.vertex(i, j, k)));
-        segments->AddVertex(gp_Pnt(grid.vertex(i + (axis == 0), j + (axis == 1), k + (axis == 2))));
+        // Posições ajustadas quando houve projeção dos nós (E5.7.2.3): os contornos acompanham a
+        // deformação das células; sem ajuste, iguais à grade.
+        segments->AddVertex(gp_Pnt(d.vertexPosition(i, j, k)));
+        segments->AddVertex(gp_Pnt(d.vertexPosition(i + (axis == 0), j + (axis == 1), k + (axis == 2))));
     });
     m_cubeEdges = new SegmentSet(segments, kCubeEdgeColor);
+    m_cubeEdgeSegments = segments;
     m_discretizationStats.segments = shownEdges;
     m_discretizationStats.surfaceEdgesOnly = surfaceOnly;
     m_discretizationStats.reducedEdges = stride > 1;

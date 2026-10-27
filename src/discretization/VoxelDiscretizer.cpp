@@ -1,5 +1,6 @@
 #include "discretization/VoxelDiscretizer.h"
 
+#include "discretization/BoundaryProjector.h"
 #include "discretization/CubeClassifier.h"
 
 #include <BRepGProp.hxx>
@@ -149,7 +150,10 @@ private:
         {
         case InclusionCriterion::FullyInside: accept = false; break;
         case InclusionCriterion::PositiveIntersection: accept = true; break;
-        case InclusionCriterion::CenterInside: accept = state(m_grid.center(i, j, k)) == PointState::In; break;
+        case InclusionCriterion::CenterInside:
+        case InclusionCriterion::BoundaryProjection: // ponto de partida da projeção (E5.7.2.3)
+            accept = state(m_grid.center(i, j, k)) == PointState::In;
+            break;
         }
         if (accept)
             m_accepted[std::size_t(m_grid.cellIndex(i, j, k))] = 1;
@@ -302,8 +306,22 @@ DiscretizeResult VoxelDiscretizer::run(const TopoDS_Shape& shape, const Paramete
             r.message = "Discretização cancelada pelo usuário";
             return r;
         }
-        const auto t2 = Clock::now();
+        auto t2 = Clock::now();
         stats.numberingSeconds = seconds(t1, t2);
+        if (parameters.criterion == InclusionCriterion::BoundaryProjection && !data->empty())
+        {
+            // Ajuste geométrico: projeção dos nós de contorno sobre a geometria CAD original.
+            auto keepProjecting = [&progress] { return !progress || progress(kClassificationShare + 0.07); };
+            BoundaryProjector projector(shape, parameters.lco);
+            std::string message;
+            if (!projector.run(*data, message, keepProjecting))
+            {
+                r.cancelled = message == "Discretização cancelada pelo usuário";
+                r.message = message;
+                return r;
+            }
+            t2 = Clock::now();
+        }
         stats.totalSeconds = seconds(t0, t2);
     }
     catch (const Standard_Failure& e)

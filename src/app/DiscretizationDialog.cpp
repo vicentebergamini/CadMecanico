@@ -50,8 +50,16 @@ DiscretizationDialog::DiscretizationDialog(const std::vector<Body>& bodies, cons
     m_criterion = new QComboBox;
     m_criterion->setObjectName("campoCriterio");
     for (InclusionCriterion c : {InclusionCriterion::FullyInside, InclusionCriterion::CenterInside,
-                                 InclusionCriterion::PositiveIntersection})
+                                 InclusionCriterion::PositiveIntersection, InclusionCriterion::BoundaryProjection})
         m_criterion->addItem(QString::fromUtf8(cad::discretization::criterionLabel(c)), int(c));
+    // E5.7.2.3: a quarta opção parte dos cubos com centro no material e projeta os nós de contorno
+    // sobre as faces, arestas e vértices do sólido CAD original (células hexaédricas deformadas).
+    m_criterion->setItemData(3,
+                             tr("Parte dos cubos com centro no material e projeta os nós de contorno sobre a "
+                                "superfície CAD original (faces, arestas vivas e vértices). As células tornam-se "
+                                "hexaedros deformados, verificados quanto a inversão, volume e distorção; a "
+                                "numeração e a conectividade continuam as da grade cartesiana."),
+                             Qt::ToolTipRole);
     m_criterion->setCurrentIndex(m_criterion->findData(int(initial.criterion)));
 
     m_unit = new QComboBox;
@@ -128,7 +136,8 @@ DiscretizationDialog::DiscretizationDialog(const std::vector<Body>& bodies, cons
 
     auto* note = new QLabel(tr("Limitação: os cubos aproximam superfícies curvas e inclinadas por degraus. A diferença "
                                "entre os volumes mede essa aproximação geométrica; não indica, necessariamente, erro "
-                               "de cálculo."));
+                               "de cálculo. A projeção dos nós sobre o contorno reduz os degraus, mas altera "
+                               "comprimentos e orientações das ligações."));
     note->setObjectName("notaAproximacao");
     note->setWordWrap(true);
 

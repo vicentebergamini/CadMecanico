@@ -20,6 +20,13 @@
 //   V1 (x, y, z)            V2 (x+lco, y, z)        V3 (x+lco, y+lco, z)    V4 (x, y+lco, z)
 //   V5 (x, y, z+lco)        V6 (x+lco, y, z+lco)    V7 (x+lco, y+lco, z+lco) V8 (x, y+lco, z+lco)
 //   V9 centro (x+lco/2, y+lco/2, z+lco/2)
+//
+// Geometria ajustada (E5.7.2.3, critério "projeção dos nós sobre o contorno"): a numeração e a
+// conectividade continuam definidas pelos índices inteiros da grade cartesiana (antes da projeção);
+// somente as coordenadas físicas de alguns nós mudam. Os nós deslocados têm a posição guardada
+// explicitamente (mm); os demais continuam calculados pela grade (valores decimais exatos). A célula
+// deformada é o hexaedro trilinear dos seus oito vértices e o nó central é a imagem do centro
+// paramétrico (média dos oito vértices), verificado como interior à célula antes da aceitação.
 #pragma once
 
 #include "discretization/VoxelGrid.h"
@@ -37,7 +44,8 @@ enum class InclusionCriterion
 {
     FullyInside,         // 1. cubo totalmente contido no sólido
     CenterInside,        // 2. centro do cubo localizado no material
-    PositiveIntersection // 3. interseção volumétrica positiva com o sólido
+    PositiveIntersection, // 3. interseção volumétrica positiva com o sólido
+    BoundaryProjection    // 4. projeção dos nós sobre o contorno (ajuste geométrico, E5.7.2.3)
 };
 
 const char* criterionLabel(InclusionCriterion criterion);
@@ -83,6 +91,43 @@ struct DiscretizationStats
     double boundarySeconds = 0.0;       // tempo gasto nos testes de distância
 };
 
+// Resultado do ajuste geométrico (critério 4, E5.7.2.3). Comprimentos em mm, volumes em mm³.
+struct ProjectionReport
+{
+    bool applied = false;
+    // Seleção dos nós de contorno.
+    std::int64_t boundaryFaces = 0;        // faces de cubos expostas (cubo aceito | vizinho vazio)
+    std::int64_t facesWithTarget = 0;      // faces expostas associadas a uma face CAD
+    std::int64_t boundaryVertices = 0;     // vértices das faces expostas
+    std::int64_t targetedVertices = 0;     // vértices com destino (face, aresta ou vértice CAD)
+    std::int64_t featureEdgeTargets = 0;   // destinos sobre arestas vivas (interseção de faces)
+    std::int64_t cornerTargets = 0;        // destinos sobre vértices CAD
+    std::int64_t unresolvedVertices = 0;   // sem destino topológico coerente (não deslocados)
+    std::int64_t inadmissibleVertices = 0; // deslocamento acima do admissível (não deslocados)
+    // Resultado.
+    std::int64_t projectedNodes = 0;    // nós de contorno projetados integralmente (deslocamento > 0)
+    std::int64_t partialNodes = 0;      // projeção reduzida para manter as células válidas
+    std::int64_t cancelledNodes = 0;    // projeção cancelada (permanecem na posição cartesiana)
+    std::int64_t smoothedNodes = 0;     // nós internos reposicionados suavemente
+    std::int64_t movedNodes = 0;        // nós (vértices e centros) com coordenadas alteradas
+    std::int64_t adjustedCells = 0;     // células deformadas (algum vértice deslocado)
+    std::int64_t rejectedCells = 0;     // células cuja deformação foi recusada ou reduzida
+    std::int64_t invalidCells = 0;      // células inválidas no resultado final (deve ser 0)
+    std::int64_t voidCrossingLinks = 0; // ligações que atravessariam vazios (corrigidas)
+    std::int64_t coincidentNodes = 0;   // pares de nós coincidentes (corrigidos)
+    int iterations = 0;                 // iterações de redução do deslocamento
+    double maxDisplacement = 0.0;
+    // Distância dos nós de contorno à geometria CAD de destino (face, aresta ou vértice).
+    double deviationBeforeMax = 0.0, deviationBeforeMean = 0.0;
+    double deviationAfterMax = 0.0, deviationAfterMean = 0.0;
+    // Qualidade geométrica.
+    double minScaledJacobian = 1.0; // mínimo do jacobiano escalado nos cantos e no centro
+    double minCellVolume = 0.0, maxCellVolume = 0.0;
+    double discretizedVolume = 0.0;      // soma dos volumes das células deformadas (integração exata)
+    double minLink = 0.0, maxLink = 0.0; // comprimentos das ligações (todas as do APDL)
+    double seconds = 0.0;
+};
+
 class Discretization
 {
 public:
@@ -99,6 +144,21 @@ public:
     std::int64_t centerNodeCount() const { return cubeCount(); }
     std::int64_t totalNodeCount() const { return vertexNodeCount() + centerNodeCount(); }
     double cubeVolume() const { return double(cubeCount()) * m_grid.lco * m_grid.lco * m_grid.lco; }
+    // Volume representado pelas células: cubeVolume() na grade cartesiana; soma dos volumes das
+    // células deformadas quando a projeção foi aplicada.
+    double discretizedVolume() const { return adjusted() ? m_projection.discretizedVolume : cubeVolume(); }
+
+    // Geometria ajustada (E5.7.2.3).
+    bool adjusted() const { return m_projection.applied; }
+    const ProjectionReport& projection() const { return m_projection; }
+    // Posição (mm) do vértice no ponto (i, j, k) da rede e do centro da célula (i, j, k), já com o
+    // ajuste geométrico (iguais à grade quando não há ajuste).
+    gp_XYZ vertexPosition(int i, int j, int k) const;
+    gp_XYZ centerPosition(int i, int j, int k) const;
+    // Instala as posições ajustadas (mm), por ID de nó: 'vertices' (Nv) e 'centers' (Nc); 'moved'
+    // (Nv + Nc) indica os nós cuja posição difere da grade. Tamanhos inconsistentes: false.
+    bool setAdjustedGeometry(std::vector<gp_XYZ> vertices, std::vector<gp_XYZ> centers,
+                             std::vector<std::uint8_t> moved, const ProjectionReport& report);
 
     // Índices lineares das células aceitas (ordem dos IDs) e pontos da rede usados (ordem dos IDs).
     const std::vector<std::int64_t>& cubeCells() const { return m_cubes; }
@@ -130,6 +190,11 @@ private:
     std::vector<bool> m_accepted;
     std::vector<std::uint32_t> m_latticeId; // ID do vértice por ponto da rede (0 = não usado)
     std::vector<std::int64_t> m_vertexPoints;
+    // Geometria ajustada (vazios sem ajuste).
+    ProjectionReport m_projection;
+    std::vector<gp_XYZ> m_vertexPos;
+    std::vector<gp_XYZ> m_centerPos;
+    std::vector<std::uint8_t> m_moved;
 };
 
 } // namespace cad::discretization
