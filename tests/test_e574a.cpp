@@ -1,11 +1,13 @@
-// E5.7.4a sem interface — propriedades físicas do modelo MED:
+// E5.7.4a e E5.7.4a.1 sem interface — propriedades físicas do modelo MED:
 //  - criação das estruturas (SI) e valores padrão de entrada de DEM_HIAGO_PRINCIPAL.m;
-//  - validação (regras do MATLAB e da formulação: ν em (−1; 0,5), ρ, E, GRF e RFC positivos) e
-//    rejeição de NaN, infinito e texto não numérico;
+//  - validação (regras do MATLAB e da formulação: ν em (−1; 0,5), ρ, E, GRF e d_eq positivos,
+//    RFC e EPR representáveis) e rejeição de NaN, infinito e texto não numérico;
+//  - grandezas derivadas RFC = 1/√d_eq, POA = 1 − ν², EPR = √(GRF/(d_eq·E·POA)) e equivalência com
+//    EPR = RFC·√(GRF/(YNG·POA)) do MATLAB; referência aproximada de LCR e kr de DEM_DYNA.txt;
 //  - CORRCAF = 1 constante (estrutura, documento e arquivo);
 //  - conversões mm → m de comprimentos, áreas e volumes;
-//  - armazenamento e recuperação no .cadmec (esquema 10), independência entre projetos e abertura
-//    de projetos antigos (esquemas 1 a 9);
+//  - armazenamento e recuperação no .cadmec (esquema 11), independência entre projetos e abertura
+//    de projetos antigos (esquemas 1 a 9; esquema 10 com aviso e propriedades MED não definidas);
 //  - discretização e exportação APDL idênticas com e sem propriedades MED no projeto.
 #include "TestCheck.h"
 
@@ -17,6 +19,7 @@
 #include "document/DocumentFile.h"
 
 #include <QFile>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 
@@ -44,8 +47,13 @@ DemProperties sample()
     p.material.poissonRatio = 0.25;
     p.material.youngModulus = 4.35e6;
     p.material.fractureEnergy = 133.4;
-    p.model.failureFactor = 3.89;
+    p.model.equivalentDefect = 0.0066;
     return p;
+}
+
+bool approx(double value, double expected, double relative)
+{
+    return std::fabs(value - expected) <= relative * std::fabs(expected);
 }
 
 QJsonObject rootOf(const QByteArray& json)
@@ -59,6 +67,19 @@ QByteArray withDem(const QByteArray& json, const std::function<void(QJsonObject&
     QJsonObject doc = root["document"].toObject();
     QJsonObject dem = doc["demProperties"].toObject();
     edit(dem);
+    doc["demProperties"] = dem;
+    root["document"] = doc;
+    return QJsonDocument(root).toJson();
+}
+
+// Arquivo de esquema 10 (E5.7.4a) com propriedades MED no formato antigo (RFC).
+QByteArray schema10(const QByteArray& json, double rfc)
+{
+    QJsonObject root = rootOf(json);
+    root["schemaVersion"] = 10;
+    QJsonObject doc = root["document"].toObject();
+    QJsonObject dem = doc["demProperties"].toObject();
+    dem["model"] = QJsonObject{{"failureFactor", rfc}, {"corrcaf", 1.0}};
     doc["demProperties"] = dem;
     root["document"] = doc;
     return QJsonDocument(root).toJson();
@@ -78,7 +99,7 @@ void creation()
     const DemProperties empty;
     CAD_CHECK(empty.material.density == 0.0 && empty.material.poissonRatio == 0.0);
     CAD_CHECK(empty.material.youngModulus == 0.0 && empty.material.fractureEnergy == 0.0);
-    CAD_CHECK(empty.model.failureFactor == 0.0);
+    CAD_CHECK(empty.model.equivalentDefect == 0.0);
     CAD_CHECK(!validate(empty).ok); // estrutura vazia não é um conjunto válido de propriedades
 
     const DemProperties d = matlabDefaults(); // lerValor(..., padrão) de DEM_HIAGO_PRINCIPAL.m
@@ -86,7 +107,7 @@ void creation()
     CAD_CHECK(d.material.poissonRatio == 0.36);
     CAD_CHECK(d.material.youngModulus == 3.5e9);
     CAD_CHECK(d.material.fractureEnergy == 2400.0);
-    CAD_CHECK(d.model.failureFactor == 10.0);
+    CAD_CHECK(d.model.equivalentDefect == 0.01); // corresponde ao padrão RFC = 10
     CAD_CHECK(d.model.corrcaf() == 1.0);
     CAD_CHECK(validate(d).ok);
     CAD_CHECK(d == matlabDefaults() && d != sample());
@@ -116,7 +137,7 @@ void validation()
         CAD_CHECK(rejects([bad](DemProperties& p) { p.material.poissonRatio = bad; }, kFieldPoissonRatio));
         CAD_CHECK(rejects([bad](DemProperties& p) { p.material.youngModulus = bad; }, kFieldYoungModulus));
         CAD_CHECK(rejects([bad](DemProperties& p) { p.material.fractureEnergy = bad; }, kFieldFractureEnergy));
-        CAD_CHECK(rejects([bad](DemProperties& p) { p.model.failureFactor = bad; }, kFieldFailureFactor));
+        CAD_CHECK(rejects([bad](DemProperties& p) { p.model.equivalentDefect = bad; }, kFieldEquivalentDefect));
     }
     // Densidade e módulo de elasticidade positivos.
     CAD_CHECK(rejects([](DemProperties& p) { p.material.density = 0.0; }, kFieldDensity));
@@ -131,14 +152,45 @@ void validation()
     CAD_CHECK(accepts([](DemProperties& p) { p.material.poissonRatio = -0.999; }));
     CAD_CHECK(accepts([](DemProperties& p) { p.material.poissonRatio = 0.0; }));
     CAD_CHECK(accepts([](DemProperties& p) { p.material.poissonRatio = 0.4999; }));
-    // GRF e RFC positivos (formulação: √(GRF/...) e 1/RFC²); nenhum limite superior.
+    // GRF e d_eq positivos (formulação: √(GRF/(d_eq·...)) e 1/√d_eq); nenhum limite superior.
     CAD_CHECK(rejects([](DemProperties& p) { p.material.fractureEnergy = 0.0; }, kFieldFractureEnergy));
     CAD_CHECK(rejects([](DemProperties& p) { p.material.fractureEnergy = -2400.0; }, kFieldFractureEnergy));
     CAD_CHECK(accepts([](DemProperties& p) { p.material.fractureEnergy = 1e12; }));
-    CAD_CHECK(rejects([](DemProperties& p) { p.model.failureFactor = 0.0; }, kFieldFailureFactor));
-    CAD_CHECK(rejects([](DemProperties& p) { p.model.failureFactor = -10.0; }, kFieldFailureFactor));
-    CAD_CHECK(accepts([](DemProperties& p) { p.model.failureFactor = 1e-6; }));
-    CAD_CHECK(accepts([](DemProperties& p) { p.model.failureFactor = 1e6; }));
+    CAD_CHECK(rejects([](DemProperties& p) { p.model.equivalentDefect = 0.0; }, kFieldEquivalentDefect));
+    CAD_CHECK(rejects([](DemProperties& p) { p.model.equivalentDefect = -0.01; }, kFieldEquivalentDefect));
+    CAD_CHECK(accepts([](DemProperties& p) { p.model.equivalentDefect = 1e-9; }));
+    CAD_CHECK(accepts([](DemProperties& p) { p.model.equivalentDefect = 1e6; }));
+    // RFC e EPR precisam ser representáveis: d_eq·E·POA nulo por anulação numérica é recusado.
+    CAD_CHECK(rejects(
+        [](DemProperties& p) {
+            p.material.youngModulus = 1e-300;
+            p.model.equivalentDefect = 1e-30;
+        },
+        kFieldEquivalentDefect));
+    CAD_CHECK(rejects([](DemProperties& p) { p.model.equivalentDefect = std::numeric_limits<double>::denorm_min(); },
+                      kFieldEquivalentDefect));
+
+    // validateMaterial: mesmas regras de validate() para ρ, ν, E e GRF, independentes de d_eq.
+    CAD_CHECK(validateMaterial(sample().material).ok);
+    CAD_CHECK(validateMaterial(matlabDefaults().material).ok);
+    for (double bad : {kNaN, kInf, 0.0, -1.0})
+    {
+        for (int field = 0; field < 4; ++field)
+        {
+            DemProperties p = sample();
+            double* values[] = {&p.material.density, &p.material.poissonRatio, &p.material.youngModulus,
+                                &p.material.fractureEnergy};
+            *values[field] = field == 1 && (bad == 0.0 || bad == -1.0) ? (bad == 0.0 ? 0.5 : -1.0) : bad;
+            const PropertyValidation m = validateMaterial(p.material);
+            const PropertyValidation full = validate(p);
+            CAD_CHECK(!m.ok && !full.ok && m.field == full.field && m.message == full.message);
+        }
+    }
+    {
+        DemProperties p = sample();
+        p.model.equivalentDefect = -1.0; // d_eq não participa de validateMaterial
+        CAD_CHECK(validateMaterial(p.material).ok && !validate(p).ok);
+    }
 
     // Texto → número.
     double v = 0.0;
@@ -160,13 +212,87 @@ void validation()
     CAD_CHECK(v == 7.0); // valor de saída inalterado nas recusas
 }
 
+// E5.7.4a.1: grandezas derivadas RFC, POA e EPR.
+void derivedQuantities()
+{
+    // Valores padrão do MATLAB: d_eq = 0,01 m -> RFC = 10 m^(-1/2), POA = 0,8704, EPR ≈ 8,876e-3.
+    const DemProperties m = matlabDefaults();
+    const DerivedParameters d = derive(m);
+    CAD_CHECK(approx(d.rfc, 10.0, 1e-15));
+    CAD_CHECK(approx(d.poa, 0.8704, 1e-15));
+    CAD_CHECK(approx(d.epr, 8.876e-3, 1e-4)); // valor de referência com 4 algarismos
+    // Solução analítica: GRF/(d_eq·E·POA) = 2400/(0,01·3,5e9·0,8704) = 2400/30464000.
+    CAD_CHECK(approx(d.epr, std::sqrt(2400.0 / 30464000.0), 1e-14));
+    CAD_CHECK(ModelParameters::corrcaf() == 1.0);
+
+    // Fórmulas e equivalência com o MATLAB em várias combinações (inclui extremos).
+    for (double nu : {-0.999, -0.3, 0.0, 0.25, 0.36, 0.4999})
+        for (double deq : {1e-9, 1e-4, 0.0066, 0.01, 1.0, 1e3})
+            for (double grf : {1e-3, 133.4, 2400.0, 1e6})
+                for (double young : {4.35e6, 3.5e9, 2.1e11})
+                {
+                    DemProperties p = sample();
+                    p.material.poissonRatio = nu;
+                    p.material.fractureEnergy = grf;
+                    p.material.youngModulus = young;
+                    p.model.equivalentDefect = deq;
+                    CAD_CHECK(validate(p).ok);
+                    const DerivedParameters r = derive(p);
+                    const double poa = 1.0 - nu * nu;
+                    CAD_CHECK(approx(r.rfc, 1.0 / std::sqrt(deq), 1e-15));
+                    CAD_CHECK(r.poa == poa && r.poa > 0.0);
+                    CAD_CHECK(approx(r.epr, std::sqrt(grf / (deq * young * poa)), 1e-15));
+                    // DEM_HIAGO_PRINCIPAL.m, linha 128: EPR = RFC·√(GRF/(YNG·POA)).
+                    CAD_CHECK(approx(r.epr, r.rfc * std::sqrt(grf / (young * r.poa)), 1e-14));
+                    CAD_CHECK(std::isfinite(r.rfc) && std::isfinite(r.epr) && r.epr > 0.0);
+                }
+
+    // Casos-limite e proporcionalidades.
+    DemProperties p = matlabDefaults();
+    p.material.poissonRatio = 0.0;
+    CAD_CHECK(derive(p).poa == 1.0); // ν = 0
+    p.material.poissonRatio = -0.36;
+    CAD_CHECK(derive(p).poa == derive(matlabDefaults()).poa); // POA par em ν
+    p = matlabDefaults();
+    p.model.equivalentDefect = 0.04; // d_eq × 4 -> RFC e EPR pela metade
+    CAD_CHECK(approx(derive(p).rfc, 5.0, 1e-15));
+    CAD_CHECK(approx(derive(p).epr, d.epr / 2.0, 1e-14));
+    p = matlabDefaults();
+    p.material.fractureEnergy = 4.0 * 2400.0; // GRF × 4 -> EPR × 2
+    CAD_CHECK(approx(derive(p).epr, 2.0 * d.epr, 1e-14));
+    CAD_CHECK(derive(p).rfc == d.rfc); // RFC só depende de d_eq
+    p = matlabDefaults();
+    p.material.youngModulus = 4.0 * 3.5e9; // E × 4 -> EPR / 2
+    CAD_CHECK(approx(derive(p).epr, d.epr / 2.0, 1e-14));
+    p = matlabDefaults();
+    p.material.density = 7850.0; // ρ não entra nas grandezas derivadas
+    CAD_CHECK(derive(p).rfc == d.rfc && derive(p).poa == d.poa && derive(p).epr == d.epr);
+
+    // Referência aproximada: DEM_DYNA.txt (gerado por DEM_HIAGO_PRINCIPAL.m com os valores padrão,
+    // LCO = 0,001 m). CAF, alfa e LCR existem só neste teste (DEM_HIAGO_PRINCIPAL.m, linhas 123–127).
+    // Lei 1 (barra de parede, LI = LCO): d11(1) = -6.34825e-06, 0, 6.34825e-06, 4.16314e-05, ...
+    // kr = EEU/EEP = 4.16314e-05/6.34825e-06; o arquivo grava 6 algarismos (%g), por isso a
+    // comparação é aproximada (tolerância relativa 1e-4).
+    const double caf = 0.1385 * ModelParameters::corrcaf();
+    const double nu = m.material.poissonRatio;
+    const double delta = 9.0 * nu / (4.0 - 8.0 * nu);
+    const double alfa = (9.0 + 8.0 * delta) / (18.0 + 24.0 * delta);
+    const double lcr = 2.0 * caf * d.poa / (alfa * d.rfc * d.rfc);
+    CAD_CHECK(approx(lcr, 2.0 * caf * d.poa * m.model.equivalentDefect / alfa, 1e-14)); // LCR ∝ d_eq [m]
+    const double lco = 0.001;
+    const double krReference = 4.16314e-05 / 6.34825e-06;
+    CAD_CHECK(approx(lcr, 6.558e-3, 1e-4));
+    CAD_CHECK(approx(lcr / lco, krReference, 1e-4));
+    std::printf("  referencia DEM_DYNA.txt: LCR = %.6g m, kr = %.6g (arquivo: %.6g)\n", lcr, lcr / lco, krReference);
+}
+
 // 4. CORRCAF = 1.
 void corrcaf()
 {
     static_assert(ModelParameters::kCorrcaf == 1.0, "CORRCAF deve ser 1");
     static_assert(ModelParameters::corrcaf() == 1.0, "CORRCAF deve ser 1");
-    // Não há campo CORRCAF: a estrutura só guarda RFC.
-    static_assert(sizeof(ModelParameters) == sizeof(double), "ModelParameters guarda apenas RFC");
+    // Não há campo CORRCAF: a estrutura só guarda d_eq (RFC, POA e EPR são calculados).
+    static_assert(sizeof(ModelParameters) == sizeof(double), "ModelParameters guarda apenas d_eq");
 
     CadDocument doc("CORRCAF");
     CAD_CHECK(doc.setDemProperties(sample()).ok);
@@ -269,20 +395,34 @@ void persistence(const fs::path& dir)
     CAD_CHECK(DocumentFile::save(b, QString::fromStdWString(fb.wstring())).ok);
 
     const QJsonObject root = rootOf(QByteArray::fromStdString(readText(fa)));
-    CAD_CHECK(root["schemaVersion"].toInt() == 10);
+    CAD_CHECK(root["schemaVersion"].toInt() == 11);
     const QJsonObject doc = root["document"].toObject();
     CAD_CHECK(doc["unit"].toString() == "mm"); // geometria continua em mm
     const QJsonObject dem = doc["demProperties"].toObject();
     CAD_CHECK(dem["unitSystem"].toString() == "SI");
     CAD_CHECK(dem["material"].toObject()["density"].toDouble() == 11.9);
     CAD_CHECK(dem["material"].toObject()["youngModulus"].toDouble() == 4.35e6);
-    CAD_CHECK(dem["model"].toObject()["failureFactor"].toDouble() == 3.89);
+    // Só d_eq é gravado no modelo; RFC, POA e EPR não são persistidos.
+    const QJsonObject model = dem["model"].toObject();
+    CAD_CHECK(model["equivalentDefect"].toDouble() == 0.0066);
+    CAD_CHECK(model.size() == 2 && model.contains("corrcaf"));
+    CAD_CHECK(dem["material"].toObject().size() == 4);
+    for (const char* derived : {"failureFactor", "rfc", "RFC", "poa", "POA", "epr", "EPR"})
+    {
+        CAD_CHECK(!model.contains(derived) && !dem.contains(derived));
+        CAD_CHECK(!dem["material"].toObject().contains(derived));
+    }
 
     CadDocument la, lb;
-    CAD_CHECK(DocumentFile::load(QString::fromStdWString(fa.wstring()), la).ok);
+    const FileResult ra = DocumentFile::load(QString::fromStdWString(fa.wstring()), la);
+    CAD_CHECK(ra.ok && ra.message.isEmpty() && ra.warning.isEmpty());
     CAD_CHECK(DocumentFile::load(QString::fromStdWString(fb.wstring()), lb).ok);
     CAD_CHECK(la.demProperties() && *la.demProperties() == sample());
     CAD_CHECK(lb.demProperties() && *lb.demProperties() == matlabDefaults());
+    // Grandezas derivadas recalculadas após a leitura (iguais às do documento gravado).
+    CAD_CHECK(derive(*lb.demProperties()).rfc == derive(matlabDefaults()).rfc);
+    CAD_CHECK(derive(*lb.demProperties()).epr == derive(matlabDefaults()).epr);
+    CAD_CHECK(approx(derive(*la.demProperties()).rfc, 1.0 / std::sqrt(0.0066), 1e-15));
     CAD_CHECK(!la.isModified() && !lb.isModified());
     CAD_CHECK(la.parameters() == a.parameters()); // geometria preservada
 
@@ -336,7 +476,129 @@ void compatibility()
         QJsonObject doc = root["document"].toObject();
         doc.remove("demProperties");
         root["document"] = doc;
-        CAD_CHECK(DocumentFile::fromJson(QJsonDocument(root).toJson(), out).ok && !out.demProperties());
+        const FileResult r = DocumentFile::fromJson(QJsonDocument(root).toJson(), out);
+        CAD_CHECK(r.ok && !out.demProperties() && r.warning.isEmpty());
+    }
+
+    // Esquema 10 (E5.7.4a, RFC): abre preservando a geometria, propriedades MED não definidas (sem
+    // conversão de RFC nem valores padrão) e aviso pedindo a redefinição.
+    for (double rfc : {10.0, 3.89})
+    {
+        CadDocument out("ativo");
+        const FileResult r = DocumentFile::fromJson(schema10(json, rfc), out);
+        if (!r.ok)
+            std::printf("  esquema 10: %s\n", qPrintable(r.message));
+        CAD_CHECK(r.ok && r.message.isEmpty());
+        CAD_CHECK(!out.demProperties());
+        CAD_CHECK(r.warning.contains("redefina") && r.warning.contains("d_eq"));
+        CAD_CHECK(out.name() == with.name() && out.parameters() == with.parameters());
+        CAD_CHECK(out.operations().size() == with.operations().size());
+        CAD_CHECK(!out.isModified());
+        // Regravado no esquema 11 sem propriedades MED.
+        const QJsonObject saved = rootOf(DocumentFile::toJson(out));
+        CAD_CHECK(saved["schemaVersion"].toInt() == 11);
+        CAD_CHECK(!saved["document"].toObject().contains("demProperties"));
+    }
+    // Esquema 10 com bloco malformado (campos ausentes, tipos incorretos, valores inválidos, chaves
+    // inesperadas): recusado, e o documento aberto não muda.
+    using LegacyEdit = std::function<void(QJsonObject&)>;
+    auto legacyIn = [](const char* group, const char* key, const QJsonValue& value) -> LegacyEdit {
+        return [=](QJsonObject& dem) {
+            QJsonObject g = dem[group].toObject();
+            g[key] = value;
+            dem[group] = g;
+        };
+    };
+    auto legacyRemove = [](const char* group, const char* key) -> LegacyEdit {
+        return [=](QJsonObject& dem) {
+            QJsonObject g = dem[group].toObject();
+            g.remove(key);
+            dem[group] = g;
+        };
+    };
+    const LegacyEdit malformed[] = {
+        legacyIn("model", "failureFactor", 0.0),
+        legacyIn("model", "failureFactor", -10.0),
+        legacyIn("model", "failureFactor", "10"),
+        legacyIn("model", "failureFactor", QJsonValue()),
+        legacyIn("model", "corrcaf", 2.0),
+        legacyIn("model", "corrcaf", "1"),
+        legacyIn("model", "equivalentDefect", 0.01), // formato do esquema 11 misturado (chave extra)
+        legacyRemove("model", "failureFactor"),
+        legacyRemove("model", "corrcaf"),
+        [](QJsonObject& dem) { // formato do esquema 11 num arquivo de esquema 10
+            dem["model"] = QJsonObject{{"equivalentDefect", 0.01}, {"corrcaf", 1.0}};
+        },
+        legacyIn("material", "density", -1240.0),
+        legacyIn("material", "density", "1240"),
+        legacyIn("material", "poissonRatio", 0.5),
+        legacyIn("material", "youngModulus", 0.0),
+        legacyIn("material", "fractureEnergy", 0.0),
+        legacyIn("material", "extra", 1.0),
+        legacyRemove("material", "youngModulus"),
+        [](QJsonObject& dem) { dem["unitSystem"] = "mm"; },
+        [](QJsonObject& dem) { dem.remove("unitSystem"); },
+        [](QJsonObject& dem) { dem.remove("material"); },
+        [](QJsonObject& dem) { dem["model"] = QJsonArray{10.0, 1.0}; },
+        [](QJsonObject& dem) { dem["extra"] = 1; },
+    };
+    int legacyIndex = 0;
+    for (const LegacyEdit& edit : malformed)
+    {
+        CadDocument out("ativo");
+        const FileResult r = DocumentFile::fromJson(withDem(schema10(json, 10.0), edit), out);
+        if (r.ok)
+            std::printf("  esquema 10 malformado %d aceito\n", legacyIndex);
+        CAD_CHECK(!r.ok && !r.message.isEmpty() && r.warning.isEmpty());
+        CAD_CHECK(out.name() == "ativo" && !out.demProperties() && out.operations().empty());
+        ++legacyIndex;
+    }
+    for (const QJsonValue& notObject : {QJsonValue("SI"), QJsonValue(1.0), QJsonValue(QJsonArray{}), QJsonValue()})
+    {
+        QJsonObject root = rootOf(schema10(json, 10.0));
+        QJsonObject doc = root["document"].toObject();
+        doc["demProperties"] = notObject;
+        root["document"] = doc;
+        CadDocument out("ativo");
+        CAD_CHECK(!DocumentFile::fromJson(QJsonDocument(root).toJson(), out).ok);
+        CAD_CHECK(out.name() == "ativo" && out.operations().empty());
+    }
+    // Documento ativo com conteúdo e propriedades também é preservado numa leitura recusada.
+    {
+        CadDocument active = CadDocument::withTestPart("Ativo");
+        CAD_CHECK(active.setDemProperties(matlabDefaults()).ok);
+        active.setModified(false);
+        const auto operations = active.operations().size();
+        CAD_CHECK(!DocumentFile::fromJson(withDem(schema10(json, 10.0), legacyIn("model", "corrcaf", 2.0)), active).ok);
+        CAD_CHECK(active.name() == "Ativo" && active.operations().size() == operations);
+        CAD_CHECK(active.demProperties() && *active.demProperties() == matlabDefaults() && !active.isModified());
+    }
+    // Esquema 10 válido com valores-limite (ν perto dos extremos, RFC muito pequeno ou grande): aceito.
+    for (const LegacyEdit& edit : {legacyIn("material", "poissonRatio", -0.999), legacyIn("material", "poissonRatio", 0.4999),
+                                   legacyIn("model", "failureFactor", 1e-6), legacyIn("model", "failureFactor", 1e6)})
+    {
+        CadDocument out;
+        const FileResult r = DocumentFile::fromJson(withDem(schema10(json, 10.0), edit), out);
+        CAD_CHECK(r.ok && !r.warning.isEmpty() && !out.demProperties());
+    }
+    {
+        // Esquema 10 sem propriedades MED: abre sem aviso.
+        QJsonObject root = rootOf(json);
+        root["schemaVersion"] = 10;
+        QJsonObject doc = root["document"].toObject();
+        doc.remove("demProperties");
+        root["document"] = doc;
+        CadDocument out;
+        const FileResult r = DocumentFile::fromJson(QJsonDocument(root).toJson(), out);
+        CAD_CHECK(r.ok && r.warning.isEmpty() && !out.demProperties());
+    }
+    {
+        // Esquema 11 com o formato antigo (failureFactor): recusado, documento ativo intacto.
+        QJsonObject root = rootOf(schema10(json, 10.0));
+        root["schemaVersion"] = 11;
+        CadDocument out("ativo");
+        CAD_CHECK(!DocumentFile::fromJson(QJsonDocument(root).toJson(), out).ok);
+        CAD_CHECK(out.name() == "ativo" && !out.demProperties());
     }
 
     // Estrutura, tipos e valores inválidos: arquivo recusado, documento ativo intacto.
@@ -364,11 +626,15 @@ void compatibility()
         setIn("material", "youngModulus", 0.0),
         setIn("material", "fractureEnergy", 0.0),
         setIn("material", "fractureEnergy", QJsonValue()),
-        setIn("model", "failureFactor", 0.0),
-        setIn("model", "failureFactor", "nan"),
+        setIn("model", "equivalentDefect", 0.0),
+        setIn("model", "equivalentDefect", -0.01),
+        setIn("model", "equivalentDefect", "nan"),
+        setIn("model", "equivalentDefect", "0.01"),
+        setIn("model", "failureFactor", 10.0), // RFC não é mais entrada (chave extra)
+        setIn("model", "epr", 8.876e-3),       // grandezas derivadas não são persistidas
         setIn("material", "extra", 1.0),
         removeIn("material", "fractureEnergy"),
-        removeIn("model", "failureFactor"),
+        removeIn("model", "equivalentDefect"),
         [](QJsonObject& dem) { dem["unitSystem"] = "mm"; },
         [](QJsonObject& dem) { dem.remove("unitSystem"); },
         [](QJsonObject& dem) { dem.remove("model"); },
@@ -444,6 +710,7 @@ int main(int argc, char** argv)
 
     creation();
     validation();
+    derivedQuantities();
     corrcaf();
     unitConversions();
     persistence(dir);

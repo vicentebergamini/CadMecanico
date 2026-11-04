@@ -248,6 +248,9 @@ protected:
     virtual void runDiscretizationDialog(const QString& preselectedBody);
     // Diálogo "Propriedades Físicas — Modelo MED" (E5.7.4a); vazio = cancelado.
     virtual std::optional<cad::dem::DemProperties> askDemProperties(const std::optional<cad::dem::DemProperties>& current);
+    // Sobrescrever o arquivo de esquema 10 de origem sem as propriedades MED antigas (E5.7.4a.1):
+    // botões "Cancelar" (padrão) e "Continuar e salvar"; true = continuar.
+    virtual bool confirmDiscardLegacyDem(const QString& filePath);
 
 private:
     void createActions();
@@ -304,6 +307,10 @@ private:
 
     cad::document::CadDocument m_document;
     QString m_documentPath;
+    // Arquivo de esquema 10 de onde veio o documento, cujas propriedades MED antigas (RFC) foram
+    // descartadas na abertura (E5.7.4a.1); vazio se nenhum. Sobrescrevê-lo sem redefinir as
+    // propriedades exige confirmação.
+    QString m_legacyDemPath;
     QString m_lastExportDir;
     QString m_lastDocumentDir;
     QString m_readyMessage;

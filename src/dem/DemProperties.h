@@ -1,17 +1,21 @@
-// Propriedades físicas do material e parâmetros do modelo MED (E5.7.4a), em unidades SI.
+// Propriedades físicas do material e parâmetros do modelo MED (E5.7.4a, E5.7.4a.1), em unidades SI.
 //
 // Referência: DEM_HIAGO_PRINCIPAL.m (entradas lidas por lerValor) e lawnumbers.m (lei bilinear).
-// Cada campo corresponde a UMA variável do MATLAB, com o mesmo significado:
-//   density        ROH      ρ    [kg/m³]
-//   poissonRatio   PSN      ν    [-]
-//   youngModulus   YNG      E    [Pa = N/m²]
-//   fractureEnergy GRF           energia específica de fratura por área [N/m = J/m²] (ver abaixo)
-//   failureFactor  RFC           fator de falha [adimensional, conforme a especificação E5.7.4a]
-//   corrcaf()      CORRCAF       fator de compatibilização de malha, fixo em 1
-// O MATLAB usa essas entradas apenas em (DEM_HIAGO_PRINCIPAL.m, linhas 123–131):
-//   CAF = 0.1385·CORRCAF; POA = 1−PSN²; delta = 9·PSN/(4−8·PSN); alfa = (9+8·delta)/(18+24·delta);
-//   LCR = 2·CAF·POA/(alfa·RFC²); EPR = RFC·√(GRF/(YNG·POA)); ENR = YNG·LCO²·alfa; ...
-// e ROH na massa nodal (malha_por_mascara.m). Essas equações NÃO são implementadas nesta etapa.
+// Campos editáveis e variáveis correspondentes do MATLAB:
+//   density          ROH      ρ     [kg/m³]
+//   poissonRatio     PSN      ν     [-]
+//   youngModulus     YNG      E     [Pa = N/m²]
+//   fractureEnergy   GRF            energia específica de fratura por área [N/m = J/m²] (ver abaixo)
+//   equivalentDefect d_eq           defeito intrínseco equivalente [m] (E5.7.4a.1; substitui RFC)
+//   corrcaf()        CORRCAF        fator de compatibilização de malha, fixo em 1
+// Grandezas derivadas (E5.7.4a.1), calculadas por derive() e nunca gravadas:
+//   RFC = 1/√d_eq                      [m^(-1/2)]
+//   POA = 1 − ν²                       [-]
+//   EPR = √(GRF/(d_eq·E·POA))          [-]  (N/m ÷ (m·N/m²) = 1: deformação)
+// Com RFC = 1/√d_eq, EPR coincide com a expressão do MATLAB EPR = RFC·√(GRF/(YNG·POA))
+// (DEM_HIAGO_PRINCIPAL.m, linha 128), e LCR = 2·CAF·POA/(alfa·RFC²) = 2·CAF·POA·d_eq/alfa tem
+// dimensão de comprimento [m]. EPR é a deformação de pico de referência usada em lawnumbers.m
+// (EEP = EPR·Gf_bond). CAF, alfa, LCR, ENR e as leis NÃO são implementados nesta etapa.
 //
 // Energia de fratura: o MATLAB tem uma única entrada (GRF). Ela não tem unidade declarada no
 // script; o significado "energia específica de fratura por área" [N/m] vem da documentação
@@ -49,11 +53,11 @@ struct ModelParameters
     // CORRCAF não é um campo: é uma constante do modelo e não pode ser alterada.
     static constexpr double kCorrcaf = 1.0;
 
-    double failureFactor = 0.0; // RFC [-]
+    double equivalentDefect = 0.0; // d_eq [m]
 
     static constexpr double corrcaf() { return kCorrcaf; }
 
-    bool operator==(const ModelParameters& o) const { return failureFactor == o.failureFactor; }
+    bool operator==(const ModelParameters& o) const { return equivalentDefect == o.equivalentDefect; }
     bool operator!=(const ModelParameters& o) const { return !(*this == o); }
 };
 
@@ -68,8 +72,19 @@ struct DemProperties
 };
 
 // Valores padrão das entradas de DEM_HIAGO_PRINCIPAL.m (segundo argumento de lerValor): ROH = 1240,
-// PSN = 0.36, YNG = 3.5e9, GRF = 2400, RFC = 10. São valores de entrada do script, não resultados.
+// PSN = 0.36, YNG = 3.5e9, GRF = 2400; d_eq = 0.01 m, que corresponde ao padrão RFC = 10
+// (RFC = 1/√d_eq). São valores de entrada do script, não resultados.
 DemProperties matlabDefaults();
+
+// Grandezas derivadas do modelo MED (E5.7.4a.1). Só têm significado para propriedades válidas.
+struct DerivedParameters
+{
+    double rfc = 0.0; // RFC = 1/√d_eq            [m^(-1/2)]
+    double poa = 0.0; // POA = 1 − ν²             [-]
+    double epr = 0.0; // EPR = √(GRF/(d_eq·E·POA)) [-]
+};
+
+DerivedParameters derive(const DemProperties& properties);
 
 struct PropertyValidation
 {
@@ -83,17 +98,24 @@ inline constexpr const char* kFieldDensity = "density";
 inline constexpr const char* kFieldPoissonRatio = "poissonRatio";
 inline constexpr const char* kFieldYoungModulus = "youngModulus";
 inline constexpr const char* kFieldFractureEnergy = "fractureEnergy";
-inline constexpr const char* kFieldFailureFactor = "failureFactor";
+inline constexpr const char* kFieldEquivalentDefect = "equivalentDefect";
 inline constexpr const char* kFieldCorrcaf = "corrcaf";
+
+// Regras do material (ρ, ν, E, GRF), as mesmas de validate(): valores finitos, ρ > 0, ν em
+// (−1; 0,5), E > 0 e GRF > 0. Usada também na leitura de arquivos de esquema 10, cujas propriedades
+// MED são verificadas e descartadas sem conversão (ver DocumentFile.h).
+PropertyValidation validateMaterial(const MaterialProperties& material);
 
 // Verifica, na ordem dos campos:
 //   - todos os valores finitos (NaN e infinito recusados);
 //   - ρ > 0 e E > 0;
 //   - ν no intervalo aberto (−1; 0,5), a mesma verificação de DEM_HIAGO_PRINCIPAL.m (linha 60);
-//   - GRF > 0: EPR = RFC·√(GRF/(YNG·POA)) não é real com GRF < 0, e GRF = 0 anula a deformação de
+//     garante POA = 1 − ν² > 0;
+//   - GRF > 0: EPR = √(GRF/(d_eq·E·POA)) não é real com GRF < 0, e GRF = 0 anula a deformação de
 //     pico EEP (curvas de carga com todas as abscissas nulas);
-//   - RFC > 0: LCR = 2·CAF·POA/(alfa·RFC²) não existe com RFC = 0, e RFC < 0 tornaria EPR (e a
-//     deformação de pico) negativo, invertendo a ordem das abscissas das curvas.
+//   - d_eq > 0: RFC = 1/√d_eq e EPR não existem com d_eq ≤ 0;
+//   - RFC e EPR finitos: d_eq (ou o produto d_eq·E·POA) pequeno demais estoura a aritmética de
+//     ponto flutuante.
 // O MATLAB não impõe outros limites, e nenhum outro é imposto aqui.
 PropertyValidation validate(const DemProperties& properties);
 

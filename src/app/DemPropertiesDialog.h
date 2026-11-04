@@ -1,5 +1,7 @@
 // Diálogo "Propriedades Físicas — Modelo MED" (E5.7.4a): propriedades do material e parâmetros
-// do modelo MED do projeto, em unidades SI (ver dem/DemProperties.h). Só fecha com Aplicar se
+// do modelo MED do projeto, em unidades SI (ver dem/DemProperties.h). E5.7.4a.1: d_eq [m] é a
+// entrada do modelo; RFC, POA e EPR são exibidos somente leitura, recalculados a cada edição
+// (cad::dem::derive), e "—" enquanto as entradas não forem válidas. Só fecha com Aplicar se
 // todos os valores forem números finitos e válidos (cad::dem::validate); Cancelar descarta a
 // edição. O diálogo não altera o documento: quem o abre aplica o resultado.
 #pragma once
@@ -48,13 +50,17 @@ private:
     QLineEdit* makeField(const char* objectName);
     QLineEdit* fieldFor(const std::string& key) const;
     void showMessage(const QString& text, QLineEdit* field);
+    void updateDerived();
 
     QLineEdit* m_density = nullptr;
     QLineEdit* m_poisson = nullptr;
     QLineEdit* m_young = nullptr;
     QLineEdit* m_fractureEnergy = nullptr;
-    QLineEdit* m_failureFactor = nullptr;
+    QLineEdit* m_equivalentDefect = nullptr;
     QLineEdit* m_corrcaf = nullptr;
+    QLineEdit* m_rfc = nullptr;
+    QLineEdit* m_poa = nullptr;
+    QLineEdit* m_epr = nullptr;
     QScrollArea* m_area = nullptr;
     QLabel* m_message = nullptr;
     QDialogButtonBox* m_buttons = nullptr;

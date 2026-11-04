@@ -35,6 +35,7 @@
 #include <QMenuBar>
 #include <QAbstractButton>
 #include <QMessageBox>
+#include <QPushButton>
 #include <QStandardPaths>
 #include <QStatusBar>
 #include <QStyle>
@@ -218,6 +219,26 @@ QMessageBox::StandardButton askQuestion(QWidget* parent, const QString& title, c
         if (QAbstractButton* b = box.button(button))
             b->setText(MainWindow::tr(label));
     return QMessageBox::StandardButton(box.exec());
+}
+
+// Mesmo arquivo? No Windows os caminhos não diferenciam maiúsculas de minúsculas; com os dois
+// arquivos existentes compara os caminhos canônicos (resolve '.', '..' e ligações simbólicas).
+// Limitação: diretórios configurados como sensíveis a maiúsculas/minúsculas no Windows
+// (fsutil file setCaseSensitiveInfo, WSL) não são tratados — neles dois arquivos distintos que
+// diferem só na grafia seriam considerados o mesmo. A identificação por volume e índice do arquivo
+// (API do Windows) não é usada nesta etapa.
+bool sameFile(const QString& a, const QString& b)
+{
+#ifdef Q_OS_WIN
+    constexpr Qt::CaseSensitivity cs = Qt::CaseInsensitive;
+#else
+    constexpr Qt::CaseSensitivity cs = Qt::CaseSensitive;
+#endif
+    const QFileInfo fa(a), fb(b);
+    const QString ca = fa.canonicalFilePath(), cb = fb.canonicalFilePath();
+    if (!ca.isEmpty() && !cb.isEmpty())
+        return ca.compare(cb, cs) == 0;
+    return QDir::cleanPath(fa.absoluteFilePath()).compare(QDir::cleanPath(fb.absoluteFilePath()), cs) == 0;
 }
 
 } // namespace
@@ -1493,6 +1514,7 @@ void MainWindow::newDocument()
         return;
     m_document = CadDocument(tr("Sem título").toStdString()); // vazio: sem operações nem esboços
     m_documentPath.clear();
+    m_legacyDemPath.clear();
     refreshDocumentViews(true);
     m_viewer->viewIsometric();
     statusBar()->showMessage(tr("Novo documento"), 5000);
@@ -1506,6 +1528,7 @@ void MainWindow::newExampleDocument()
         return;
     m_document = CadDocument::withTestPart(tr("Peça de teste").toStdString());
     m_documentPath.clear();
+    m_legacyDemPath.clear();
     refreshDocumentViews(true);
     m_viewer->viewIsometric();
     statusBar()->showMessage(m_readyMessage);
@@ -1546,8 +1569,13 @@ bool MainWindow::openDocumentFrom(const QString& filePath)
     m_document = std::move(loaded);
     m_documentPath = QFileInfo(filePath).absoluteFilePath();
     m_lastDocumentDir = QFileInfo(filePath).absolutePath();
+    // Esquema 10 com propriedades MED descartadas: lembrado para confirmar antes de sobrescrevê-lo.
+    m_legacyDemPath = result.warning.isEmpty() ? QString() : m_documentPath;
     refreshDocumentViews(true);
     m_viewer->viewIsometric(); // documento aberto: vista isométrica enquadrando sólido e esboços
+    // Aviso que não é erro de operação (E5.7.4a.1: propriedades MED do esquema 10 descartadas).
+    if (!result.warning.isEmpty())
+        reportInfo(tr("Propriedades MED não carregadas"), result.warning);
     if (!result.message.isEmpty())
     {
         // Aberto com erros: o painel Diagnóstico mostra causa e correção de cada operação.
@@ -1560,7 +1588,10 @@ bool MainWindow::openDocumentFrom(const QString& filePath)
                        .arg(result.message));
         return true;
     }
-    statusBar()->showMessage(tr("Documento aberto: %1").arg(nativePath), 5000);
+    statusBar()->showMessage(result.warning.isEmpty()
+                                 ? tr("Documento aberto: %1").arg(nativePath)
+                                 : tr("Documento aberto: %1 — redefina as propriedades MED").arg(nativePath),
+                             result.warning.isEmpty() ? 5000 : 10000);
     return true;
 }
 
@@ -1587,8 +1618,11 @@ bool MainWindow::saveDocumentAs()
 
 bool MainWindow::saveDocumentTo(const QString& filePath)
 {
-    if (QFileInfo::exists(filePath) && QFileInfo(filePath).absoluteFilePath() != m_documentPath
-        && !confirmOverwrite(QDir::toNativeSeparators(filePath)))
+    // O próprio documento aberto, mesmo com outra grafia ('.', '..', maiúsculas/minúsculas no
+    // Windows), não pede confirmação de substituição — como em Salvar. Documento ainda não salvo
+    // (caminho vazio) sempre pede.
+    const bool ownFile = !m_documentPath.isEmpty() && sameFile(filePath, m_documentPath);
+    if (QFileInfo::exists(filePath) && !ownFile && !confirmOverwrite(QDir::toNativeSeparators(filePath)))
     {
         statusBar()->showMessage(tr("Salvamento cancelado: arquivo existente mantido"), 5000);
         return false;
@@ -1599,6 +1633,18 @@ bool MainWindow::saveDocumentTo(const QString& filePath)
 bool MainWindow::writeDocument(const QString& filePath)
 {
     const QString nativePath = QDir::toNativeSeparators(filePath);
+    // E5.7.4a.1: documento aberto de um arquivo de esquema 10 cujas propriedades MED (RFC) foram
+    // descartadas e ainda não redefinidas. Sobrescrever esse arquivo perde o RFC: pedir confirmação.
+    // Outro destino preserva o arquivo antigo: só informar.
+    const bool legacyPending = !m_legacyDemPath.isEmpty() && !m_document.demProperties();
+    const bool overwritesLegacy = legacyPending && sameFile(filePath, m_legacyDemPath);
+    const bool copiesLegacy = legacyPending && !overwritesLegacy && sameFile(m_documentPath, m_legacyDemPath);
+    if (overwritesLegacy && !confirmDiscardLegacyDem(nativePath))
+    {
+        statusBar()->showMessage(tr("Salvamento cancelado: arquivo antigo mantido com as propriedades MED originais"),
+                                 5000);
+        return false;
+    }
     const auto result = DocumentFile::save(m_document, filePath);
     if (!result.ok)
     {
@@ -1609,8 +1655,15 @@ bool MainWindow::writeDocument(const QString& filePath)
     m_document.setModified(false);
     m_documentPath = QFileInfo(filePath).absoluteFilePath();
     m_lastDocumentDir = QFileInfo(filePath).absolutePath();
+    if (overwritesLegacy || m_document.demProperties())
+        m_legacyDemPath.clear(); // o arquivo antigo foi substituído, ou não há mais nada a perder
     refreshDocumentViews(false);
     statusBar()->showMessage(tr("Documento salvo: %1").arg(nativePath), 5000);
+    if (copiesLegacy)
+        reportInfo(tr("Cópia salva sem propriedades MED"),
+                   tr("A nova cópia foi salva no esquema 11 sem as propriedades MED antigas (RFC), que não foram "
+                      "redefinidas:\n%1\n\nO arquivo original foi preservado sem alteração:\n%2")
+                       .arg(nativePath, QDir::toNativeSeparators(m_legacyDemPath)));
     return true;
 }
 
@@ -2865,6 +2918,23 @@ bool MainWindow::confirmOverwrite(const QString& filePath)
                        tr("O arquivo já existe:\n%1\n\nDeseja substituí-lo?").arg(filePath),
                        QMessageBox::Yes | QMessageBox::No, QMessageBox::No)
            == QMessageBox::Yes;
+}
+
+bool MainWindow::confirmDiscardLegacyDem(const QString& filePath)
+{
+    QMessageBox box(QMessageBox::Warning, tr("Propriedades MED antigas"),
+                    tr("O arquivo será sobrescrito no esquema 11:\n%1\n\nAs propriedades MED antigas deste arquivo "
+                       "(fator de falha RFC) não serão preservadas, e ele ficará sem propriedades MED. Para mantê-las, "
+                       "cancele e use Salvar como com outro nome, ou redefina as propriedades (d_eq) antes de salvar.")
+                        .arg(filePath),
+                    QMessageBox::NoButton, this);
+    box.setObjectName("confirmacaoPropriedadesMEDAntigas");
+    QPushButton* proceed = box.addButton(tr("Continuar e salvar"), QMessageBox::AcceptRole);
+    QPushButton* cancel = box.addButton(tr("Cancelar"), QMessageBox::RejectRole);
+    box.setDefaultButton(cancel);
+    box.setEscapeButton(cancel);
+    box.exec();
+    return box.clickedButton() == proceed;
 }
 
 void MainWindow::reportInfo(const QString& title, const QString& text)

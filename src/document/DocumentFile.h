@@ -92,17 +92,33 @@
 //     (obrigatório em "upToFace").
 //
 // Esquema versão 10 (E5.7.4a): propriedades físicas do modelo MED, opcionais, em "document"
-// (ausentes = não definidas; gravadas só quando definidas):
+// (ausentes = não definidas; gravadas só quando definidas). Formato substituído no esquema 11:
 //     "demProperties": {
 //       "unitSystem": "SI",
 //       "material": { "density": 1240, "poissonRatio": 0.36, "youngModulus": 3.5e9,
 //                     "fractureEnergy": 2400 },
 //       "model": { "failureFactor": 10, "corrcaf": 1 } }
-// Unidades SI: kg/m³, -, Pa, N/m, -, -. "corrcaf" é gravado para documentação e deve ser
-// exatamente 1 (outro valor torna o arquivo inválido). Valores fora das regras de
-// cad::dem::validate também. A geometria continua em mm ("unit").
 //
-// Arquivos das versões 1 a 9 continuam sendo lidos sem alteração; a gravação usa sempre a
+// Esquema versão 11 (E5.7.4a.1): o fator de falha RFC deixa de ser entrada; a entrada passa a ser
+// o defeito intrínseco equivalente d_eq [m] ("equivalentDefect"):
+//     "demProperties": {
+//       "unitSystem": "SI",
+//       "material": { "density": 1240, "poissonRatio": 0.36, "youngModulus": 3.5e9,
+//                     "fractureEnergy": 2400 },
+//       "model": { "equivalentDefect": 0.01, "corrcaf": 1 } }
+// Unidades SI: kg/m³, -, Pa, N/m, m, -. "corrcaf" é gravado para documentação e deve ser
+// exatamente 1 (outro valor torna o arquivo inválido). Valores fora das regras de
+// cad::dem::validate também. RFC, POA e EPR são calculados (cad::dem::derive) e nunca gravados;
+// "failureFactor" no esquema 11 torna o arquivo inválido. A geometria continua em mm ("unit").
+//
+// Esquema 10 com "demProperties": o bloco precisa estar exatamente no formato antigo acima
+// (unitSystem "SI", material dentro das regras de cad::dem::validateMaterial, failureFactor > 0,
+// corrcaf = 1, sem chaves extras); caso contrário o arquivo é recusado. Válido, o arquivo abre
+// (geometria e demais dados preservados), mas as propriedades MED antigas são descartadas sem
+// conversão (RFC não é convertido em d_eq nem substituído por valores padrão): ficam não definidas
+// e FileResult::warning pede que sejam redefinidas.
+//
+// Arquivos das versões 1 a 10 continuam sendo lidos; a gravação usa sempre a
 // versão atual. Documento cujas operações falham na reconstrução pode ser aberto com as operações
 // marcadas como inválidas (painel Diagnóstico) — ver fromJson.
 #pragma once
@@ -118,12 +134,15 @@ struct FileResult
 {
     bool ok = false;
     QString message;
+    // Aviso de abertura bem-sucedida que não é erro de operação (E5.7.4a.1: propriedades MED do
+    // esquema 10 descartadas). Vazio se nenhum.
+    QString warning;
 };
 
 class DocumentFile
 {
 public:
-    static constexpr int kSchemaVersion = 10;
+    static constexpr int kSchemaVersion = 11;
     static constexpr qint64 kMaxFileSize = 4 * 1024 * 1024;
     static constexpr const char* kFormat = "cadmec";
     static constexpr const char* kExtension = "cadmec";

@@ -40,6 +40,15 @@ QLabel* unitLabel(const QString& text, const char* objectName)
     return label;
 }
 
+// Campo somente leitura (CORRCAF e grandezas derivadas).
+void makeReadOnly(QLineEdit* field, const QString& toolTip)
+{
+    field->setReadOnly(true);
+    field->setEnabled(false);
+    field->setPlaceholderText(QString());
+    field->setToolTip(toolTip);
+}
+
 QLabel* noteLabel(const QString& text, const char* objectName)
 {
     auto* label = new QLabel(text);
@@ -61,12 +70,16 @@ DemPropertiesDialog::DemPropertiesDialog(const std::optional<DemProperties>& cur
     m_poisson = makeField("campoPoisson");
     m_young = makeField("campoModuloElasticidade");
     m_fractureEnergy = makeField("campoEnergiaFratura");
-    m_failureFactor = makeField("campoRFC");
+    m_equivalentDefect = makeField("campoDeq");
     m_corrcaf = makeField("campoCORRCAF");
     m_corrcaf->setText(formatNumber(ModelParameters::corrcaf()));
-    m_corrcaf->setReadOnly(true);
-    m_corrcaf->setEnabled(false);
-    m_corrcaf->setToolTip(tr("Valor obrigatório do modelo; não editável"));
+    makeReadOnly(m_corrcaf, tr("Valor obrigatório do modelo; não editável"));
+    m_rfc = makeField("campoRFC");
+    makeReadOnly(m_rfc, tr("Calculado: RFC = 1/√d_eq"));
+    m_poa = makeField("campoPOA");
+    makeReadOnly(m_poa, tr("Calculado: POA = 1 − ν²"));
+    m_epr = makeField("campoEPR");
+    makeReadOnly(m_epr, tr("Calculado: EPR = √(GRF/(d_eq·E·POA))"));
 
     // Material: rótulo | campo | unidade.
     auto* materialBox = new QGroupBox(tr("Propriedades do material"));
@@ -96,19 +109,40 @@ DemPropertiesDialog::DemPropertiesDialog(const std::optional<DemProperties>& cur
     modelBox->setObjectName("grupoModeloMED");
     auto* model = new QGridLayout(modelBox);
     row = 0;
-    model->addWidget(new QLabel(tr("Fator de falha (RFC):")), row, 0);
-    model->addWidget(m_failureFactor, row, 1);
-    model->addWidget(unitLabel(tr("adimensional"), "unidadeRFC"), row++, 2);
+    model->addWidget(new QLabel(tr("Defeito intrínseco equivalente (d_eq):")), row, 0);
+    model->addWidget(m_equivalentDefect, row, 1);
+    model->addWidget(unitLabel(tr("m"), "unidadeDeq"), row++, 2);
     model->addWidget(new QLabel(tr("Fator de compatibilização de malha (CORRCAF):")), row, 0);
     model->addWidget(m_corrcaf, row, 1);
     model->addWidget(unitLabel(tr("adimensional (fixo)"), "unidadeCORRCAF"), row++, 2);
     model->setColumnStretch(1, 1);
+
+    // Grandezas derivadas (somente leitura, recalculadas a cada edição; não são gravadas).
+    auto* derivedBox = new QGroupBox(tr("Grandezas calculadas"));
+    derivedBox->setObjectName("grupoGrandezasCalculadas");
+    auto* derived = new QGridLayout(derivedBox);
+    row = 0;
+    derived->addWidget(new QLabel(tr("Fator de falha (RFC = 1/√d_eq):")), row, 0);
+    derived->addWidget(m_rfc, row, 1);
+    derived->addWidget(unitLabel(tr("m^(-1/2)"), "unidadeRFC"), row++, 2);
+    derived->addWidget(new QLabel(tr("POA = 1 − ν²:")), row, 0);
+    derived->addWidget(m_poa, row, 1);
+    derived->addWidget(unitLabel(tr("adimensional"), "unidadePOA"), row++, 2);
+    derived->addWidget(new QLabel(tr("Deformação de pico de referência (EPR):")), row, 0);
+    derived->addWidget(m_epr, row, 1);
+    derived->addWidget(unitLabel(tr("adimensional"), "unidadeEPR"), row++, 2);
+    derived->addWidget(noteLabel(tr("EPR = √(GRF/(d_eq·E·POA)), equivalente a RFC·√(GRF/(E·POA)) do modelo MATLAB. "
+                                    "Os campos mostram \"—\" enquanto as entradas não forem válidas."),
+                                 "notaGrandezasCalculadas"),
+                       row++, 0, 1, 3);
+    derived->setColumnStretch(1, 1);
 
     auto* content = new QWidget;
     content->setObjectName("conteudoPropriedadesMED");
     auto* contentLayout = new QVBoxLayout(content);
     contentLayout->addWidget(materialBox);
     contentLayout->addWidget(modelBox);
+    contentLayout->addWidget(derivedBox);
     contentLayout->addWidget(noteLabel(tr("Modelo físico em unidades SI (m, kg, s, N). A geometria CAD permanece em "
                                           "milímetros; a conversão para metros (1 mm = 0,001 m) é feita apenas no "
                                           "modelo físico."),
@@ -139,7 +173,7 @@ DemPropertiesDialog::DemPropertiesDialog(const std::optional<DemProperties>& cur
     defaults->setText(tr("Valores padrão do MATLAB"));
     defaults->setObjectName("botaoPadraoMATLAB");
     defaults->setToolTip(tr("Preenche os campos com os valores padrão de entrada de DEM_HIAGO_PRINCIPAL.m "
-                            "(ρ = 1240, ν = 0,36, E = 3,5e9, GRF = 2400, RFC = 10); nada é aplicado até "
+                            "(ρ = 1240, ν = 0,36, E = 3,5e9, GRF = 2400) e d_eq = 0,01 m (RFC = 10); nada é aplicado até "
                             "clicar em Aplicar"));
     connect(m_buttons, &QDialogButtonBox::accepted, this, &DemPropertiesDialog::accept);
     connect(m_buttons, &QDialogButtonBox::rejected, this, &DemPropertiesDialog::reject);
@@ -149,6 +183,10 @@ DemPropertiesDialog::DemPropertiesDialog(const std::optional<DemProperties>& cur
     layout->addWidget(m_area, 1);
     layout->addWidget(m_message);
     layout->addWidget(m_buttons);
+
+    // ρ não entra nas fórmulas, mas os campos calculados só são exibidos com todas as entradas válidas.
+    for (QLineEdit* input : {m_density, m_poisson, m_young, m_fractureEnergy, m_equivalentDefect})
+        connect(input, &QLineEdit::textChanged, this, &DemPropertiesDialog::updateDerived);
 
     setProperties(current);
 }
@@ -168,7 +206,20 @@ void DemPropertiesDialog::setProperties(const std::optional<DemProperties>& p)
     m_poisson->setText(p ? formatNumber(p->material.poissonRatio) : QString());
     m_young->setText(p ? formatNumber(p->material.youngModulus) : QString());
     m_fractureEnergy->setText(p ? formatNumber(p->material.fractureEnergy) : QString());
-    m_failureFactor->setText(p ? formatNumber(p->model.failureFactor) : QString());
+    m_equivalentDefect->setText(p ? formatNumber(p->model.equivalentDefect) : QString());
+    updateDerived();
+}
+
+void DemPropertiesDialog::updateDerived()
+{
+    // Só com todas as entradas numéricas e válidas; caso contrário "—".
+    const auto p = properties();
+    const bool valid = p && cad::dem::validate(*p).ok;
+    const cad::dem::DerivedParameters d = valid ? cad::dem::derive(*p) : cad::dem::DerivedParameters{};
+    const QString none = QStringLiteral("—");
+    m_rfc->setText(valid ? formatNumber(d.rfc) : none);
+    m_poa->setText(valid ? formatNumber(d.poa) : none);
+    m_epr->setText(valid ? formatNumber(d.epr) : none);
 }
 
 void DemPropertiesDialog::fillMatlabDefaults()
@@ -185,7 +236,7 @@ std::optional<DemProperties> DemPropertiesDialog::properties() const
         {m_poisson, &p.material.poissonRatio},
         {m_young, &p.material.youngModulus},
         {m_fractureEnergy, &p.material.fractureEnergy},
-        {m_failureFactor, &p.model.failureFactor},
+        {m_equivalentDefect, &p.model.equivalentDefect},
     };
     for (const auto& [field, value] : fields)
         if (!cad::dem::parseNumber(field->text().toStdString(), *value))
@@ -203,7 +254,7 @@ QLineEdit* DemPropertiesDialog::fieldFor(const std::string& key) const
         return m_young;
     if (key == cad::dem::kFieldFractureEnergy)
         return m_fractureEnergy;
-    return m_failureFactor;
+    return m_equivalentDefect;
 }
 
 QString DemPropertiesDialog::validationMessage() const
@@ -228,7 +279,7 @@ void DemPropertiesDialog::accept()
         {m_poisson, tr("Coeficiente de Poisson ν")},
         {m_young, tr("Módulo de elasticidade E")},
         {m_fractureEnergy, tr("Energia específica de fratura GRF")},
-        {m_failureFactor, tr("Fator de falha RFC")},
+        {m_equivalentDefect, tr("Defeito intrínseco equivalente d_eq")},
     };
     for (const auto& [field, label] : fields)
     {

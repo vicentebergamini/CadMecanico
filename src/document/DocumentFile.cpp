@@ -632,7 +632,7 @@ QJsonObject demPropertiesToJson(const cad::dem::DemProperties& p)
                                  {cad::dem::kFieldPoissonRatio, p.material.poissonRatio},
                                  {cad::dem::kFieldYoungModulus, p.material.youngModulus},
                                  {cad::dem::kFieldFractureEnergy, p.material.fractureEnergy}}},
-        {"model", QJsonObject{{cad::dem::kFieldFailureFactor, p.model.failureFactor},
+        {"model", QJsonObject{{cad::dem::kFieldEquivalentDefect, p.model.equivalentDefect},
                               {cad::dem::kFieldCorrcaf, cad::dem::ModelParameters::corrcaf()}}},
     };
 }
@@ -653,7 +653,7 @@ bool readNumbers(const QJsonValue& value, const QStringList& keys, QList<double>
     return true;
 }
 
-// Propriedades MED (esquema 10). As regras de valor (cad::dem::validate) são aplicadas em
+// Propriedades MED (esquema 11). As regras de valor (cad::dem::validate) são aplicadas em
 // CadDocument::fromData; aqui só a estrutura, os tipos e CORRCAF = 1.
 bool readDemProperties(const QJsonValue& value, cad::dem::DemProperties& out, QString& message)
 {
@@ -672,9 +672,9 @@ bool readDemProperties(const QJsonValue& value, cad::dem::DemProperties& out, QS
                                  "fractureEnergy numéricos");
         return false;
     }
-    if (!readNumbers(o.value("model"), {kFieldFailureFactor, kFieldCorrcaf}, model))
+    if (!readNumbers(o.value("model"), {kFieldEquivalentDefect, kFieldCorrcaf}, model))
     {
-        message = QStringLiteral("propriedades MED: \"model\" exige failureFactor e corrcaf numéricos");
+        message = QStringLiteral("propriedades MED: \"model\" exige equivalentDefect e corrcaf numéricos");
         return false;
     }
     if (model[1] != ModelParameters::corrcaf())
@@ -686,7 +686,58 @@ bool readDemProperties(const QJsonValue& value, cad::dem::DemProperties& out, QS
     out.material.poissonRatio = material[1];
     out.material.youngModulus = material[2];
     out.material.fractureEnergy = material[3];
-    out.model.failureFactor = model[0];
+    out.model.equivalentDefect = model[0];
+    return true;
+}
+
+// Propriedades MED do esquema 10 (E5.7.4a, com RFC): só verificadas, nunca carregadas nem convertidas
+// (E5.7.4a.1). Exige o formato antigo exato — unitSystem "SI", material com as 4 chaves numéricas
+// dentro das regras de cad::dem::validateMaterial, model com failureFactor > 0 e corrcaf = 1, sem
+// chaves extras —, para que um bloco corrompido não seja aceito só por ser descartado.
+bool checkLegacyDemProperties(const QJsonValue& value, QString& message)
+{
+    using namespace cad::dem;
+    const QJsonObject o = value.toObject();
+    if (!value.isObject() || o.size() != 3 || o.value("unitSystem").toString() != QLatin1String(units::kUnitSystem))
+    {
+        message = QStringLiteral("propriedades MED (esquema 10): estrutura inválida (esperado unitSystem \"SI\", "
+                                 "material e model)");
+        return false;
+    }
+    QList<double> material, model;
+    if (!readNumbers(o.value("material"), {kFieldDensity, kFieldPoissonRatio, kFieldYoungModulus, kFieldFractureEnergy},
+                     material))
+    {
+        message = QStringLiteral("propriedades MED (esquema 10): \"material\" exige density, poissonRatio, "
+                                 "youngModulus e fractureEnergy numéricos");
+        return false;
+    }
+    if (!readNumbers(o.value("model"), {QStringLiteral("failureFactor"), kFieldCorrcaf}, model))
+    {
+        message = QStringLiteral("propriedades MED (esquema 10): \"model\" exige failureFactor e corrcaf numéricos");
+        return false;
+    }
+    MaterialProperties m;
+    m.density = material[0];
+    m.poissonRatio = material[1];
+    m.youngModulus = material[2];
+    m.fractureEnergy = material[3];
+    if (const PropertyValidation v = validateMaterial(m); !v.ok)
+    {
+        message = QStringLiteral("propriedades MED (esquema 10): %1").arg(QString::fromStdString(v.message));
+        return false;
+    }
+    if (!(model[0] > 0.0))
+    {
+        message = QStringLiteral("propriedades MED (esquema 10): o fator de falha RFC deve ser positivo "
+                                 "(encontrado %1)").arg(model[0]);
+        return false;
+    }
+    if (model[1] != ModelParameters::corrcaf())
+    {
+        message = QStringLiteral("propriedades MED (esquema 10): CORRCAF deve ser igual a 1 (encontrado %1)").arg(model[1]);
+        return false;
+    }
     return true;
 }
 
@@ -1114,8 +1165,20 @@ FileResult DocumentFile::fromJson(const QByteArray& json, CadDocument& out, bool
         }
     }
 
-    // Propriedades MED (esquema 10, opcionais).
-    if (doc.contains("demProperties"))
+    // Propriedades MED (opcionais). Esquema 10: formato antigo (RFC), verificado e descartado sem
+    // conversão (E5.7.4a.1); bloco malformado torna o arquivo inválido. Esquema 11: d_eq.
+    QString warning;
+    if (doc.contains("demProperties") && schema == 10)
+    {
+        QString message;
+        if (!checkLegacyDemProperties(doc.value("demProperties"), message))
+            return error(QStringLiteral("Dados inválidos: %1").arg(message));
+        warning = QStringLiteral("As propriedades físicas MED deste arquivo (esquema 10) usam o fator de falha RFC, "
+                                 "que deixou de ser entrada do modelo. Elas não foram carregadas nem convertidas: "
+                                 "redefina-as em Análise MED > Propriedades do Modelo, informando o defeito "
+                                 "intrínseco equivalente d_eq [m].");
+    }
+    else if (doc.contains("demProperties"))
     {
         if (schema < 10)
             return error(QStringLiteral("Campo \"demProperties\" não pertence ao esquema %1").arg(schema));
@@ -1136,8 +1199,9 @@ FileResult DocumentFile::fromJson(const QByteArray& json, CadDocument& out, bool
     if (invalid > 0 || !out.sketchIssues().empty())
         return FileResult{true, QStringLiteral("Documento aberto com %1 operação(ões) inválida(s) e %2 esboço(s) sem suporte; veja o painel Diagnóstico.")
                                     .arg(invalid)
-                                    .arg(out.sketchIssues().size())};
-    return FileResult{true, QString()};
+                                    .arg(out.sketchIssues().size()),
+                          warning};
+    return FileResult{true, QString(), warning};
 }
 
 FileResult DocumentFile::save(const CadDocument& document, const QString& path)
