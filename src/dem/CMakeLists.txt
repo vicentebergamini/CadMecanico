@@ -5,5 +5,6 @@ add_library(cad_dem STATIC
     DemProperties.h DemProperties.cpp
     LatticeConstants.h LatticeConstants.cpp
     BilinearLaw.h BilinearLaw.cpp
+    LawDiagnostics.h
 )
 target_include_directories(cad_dem PUBLIC ${PROJECT_SOURCE_DIR}/src)
