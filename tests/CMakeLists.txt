@@ -80,11 +80,19 @@ add_test(NAME e574b COMMAND test_e574b)
 add_executable(test_e574b3 test_e574b3.cpp TestCheck.h)
 target_link_libraries(test_e574b3 PRIVATE cad_discretization cad_dem)
 add_test(NAME e574b3 COMMAND test_e574b3)
+# E5.7.4b.5: tabela de leis de lawnumbers.m (numeração, deduplicação literal, tp = 3, classes de
+# Weibull) comparada com o MATLAB (dados/matlab_e574b5_ref.txt) e com DEM_DYNA.txt. Sem Qt.
+add_executable(test_e574b5 test_e574b5.cpp TestCheck.h)
+target_link_libraries(test_e574b5 PRIVATE cad_dem cad_discretization)
+target_compile_definitions(test_e574b5 PRIVATE
+    CAD_E574B5_REFERENCE="${CMAKE_CURRENT_SOURCE_DIR}/dados/matlab_e574b5_ref.txt"
+    CAD_MATLAB_REFERENCE_DIR="${PROJECT_SOURCE_DIR}/../Referencias_MED_MATLAB")
+add_test(NAME e574b5 COMMAND test_e574b5)
 # QtCore (JSON do .cadmec) no PATH em tempo de execução.
 set_tests_properties(e57 e571 e574a PROPERTIES
     ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${QT6_INSTALL_PREFIX}/${QT6_INSTALL_BINS}")
 
-set_tests_properties(geometria step_roundtrip selecao_info documento esboco extrusao stl booleanas arcos_cantos2d acabamentos3d e56 e57 e571 e572 e5722 e5723 e574a e574b e574b3 PROPERTIES LABELS "core")
+set_tests_properties(geometria step_roundtrip selecao_info documento esboco extrusao stl booleanas arcos_cantos2d acabamentos3d e56 e57 e571 e572 e5722 e5723 e574a e574b e574b3 e574b5 PROPERTIES LABELS "core")
 
 # Formato .cadmec (QtCore, sem interface gráfica).
 qt_add_executable(test_arquivo_cadmec test_arquivo_cadmec.cpp)
