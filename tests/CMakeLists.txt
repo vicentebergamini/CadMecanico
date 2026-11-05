@@ -70,11 +70,16 @@ add_executable(test_e574a test_e574a.cpp TestCheck.h)
 target_link_libraries(test_e574a PRIVATE cad_dem cad_document cad_document_io cad_discretization TKBO)
 target_compile_definitions(test_e574a PRIVATE CADMEC_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/dados")
 add_test(NAME e574a COMMAND test_e574a ${CMAKE_CURRENT_BINARY_DIR}/saida_e574a)
+# E5.7.4b.2: núcleo constitutivo DEM-DYNA (constantes da rede, lei bilinear ideal e curva regularizada do
+# MATLAB/APDL), somente cad_dem, sem Qt.
+add_executable(test_e574b test_e574b.cpp TestCheck.h)
+target_link_libraries(test_e574b PRIVATE cad_dem)
+add_test(NAME e574b COMMAND test_e574b)
 # QtCore (JSON do .cadmec) no PATH em tempo de execução.
 set_tests_properties(e57 e571 e574a PROPERTIES
     ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${QT6_INSTALL_PREFIX}/${QT6_INSTALL_BINS}")
 
-set_tests_properties(geometria step_roundtrip selecao_info documento esboco extrusao stl booleanas arcos_cantos2d acabamentos3d e56 e57 e571 e572 e5722 e5723 e574a PROPERTIES LABELS "core")
+set_tests_properties(geometria step_roundtrip selecao_info documento esboco extrusao stl booleanas arcos_cantos2d acabamentos3d e56 e57 e571 e572 e5722 e5723 e574a e574b PROPERTIES LABELS "core")
 
 # Formato .cadmec (QtCore, sem interface gráfica).
 qt_add_executable(test_arquivo_cadmec test_arquivo_cadmec.cpp)
