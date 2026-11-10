@@ -103,11 +103,19 @@ target_link_libraries(test_e574b7 PRIVATE cad_discretization cad_dem)
 target_compile_definitions(test_e574b7 PRIVATE
     CAD_MATLAB_REFERENCE_DIR="${PROJECT_SOURCE_DIR}/../Referencias_MED_MATLAB")
 add_test(NAME e574b7 COMMAND test_e574b7)
+# E5.7.4b.8b: composição em memória do arquivo APDL/LS-DYNA DEM-DYNA (sem escrita em disco),
+# comparada byte a byte com DEM_DYNA.txt e com lawnumbers.m (caixa_g1). Sem Qt.
+add_executable(test_e574b8 test_e574b8.cpp TestCheck.h)
+target_link_libraries(test_e574b8 PRIVATE cad_discretization cad_dem)
+target_compile_definitions(test_e574b8 PRIVATE
+    CAD_E574B5_REFERENCE="${CMAKE_CURRENT_SOURCE_DIR}/dados/matlab_e574b5_ref.txt"
+    CAD_MATLAB_REFERENCE_DIR="${PROJECT_SOURCE_DIR}/../Referencias_MED_MATLAB")
+add_test(NAME e574b8 COMMAND test_e574b8)
 # QtCore (JSON do .cadmec) no PATH em tempo de execução.
 set_tests_properties(e57 e571 e574a PROPERTIES
     ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${QT6_INSTALL_PREFIX}/${QT6_INSTALL_BINS}")
 
-set_tests_properties(geometria step_roundtrip selecao_info documento esboco extrusao stl booleanas arcos_cantos2d acabamentos3d e56 e57 e571 e572 e5722 e5723 e574a e574b e574b3 e574b5 e574b6 e574b7 PROPERTIES LABELS "core")
+set_tests_properties(geometria step_roundtrip selecao_info documento esboco extrusao stl booleanas arcos_cantos2d acabamentos3d e56 e57 e571 e572 e5722 e5723 e574a e574b e574b3 e574b5 e574b6 e574b7 e574b8 PROPERTIES LABELS "core")
 
 # Formato .cadmec (QtCore, sem interface gráfica).
 qt_add_executable(test_arquivo_cadmec test_arquivo_cadmec.cpp)
