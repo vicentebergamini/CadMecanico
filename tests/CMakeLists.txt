@@ -96,11 +96,18 @@ target_compile_definitions(test_e574b6 PRIVATE
     CAD_E574B6_REFERENCE="${CMAKE_CURRENT_SOURCE_DIR}/dados/matlab_e574b6_ref.txt"
     CAD_MATLAB_REFERENCE_DIR="${PROJECT_SOURCE_DIR}/../Referencias_MED_MATLAB")
 add_test(NAME e574b6 COMMAND test_e574b6)
+# E5.7.4b.7: validação das leis constitutivas e das associações elemento–material antes da
+# exportação APDL/DYNA (bloqueio, diagnósticos, tp = 3, barras excluídas). Sem Qt.
+add_executable(test_e574b7 test_e574b7.cpp TestCheck.h)
+target_link_libraries(test_e574b7 PRIVATE cad_discretization cad_dem)
+target_compile_definitions(test_e574b7 PRIVATE
+    CAD_MATLAB_REFERENCE_DIR="${PROJECT_SOURCE_DIR}/../Referencias_MED_MATLAB")
+add_test(NAME e574b7 COMMAND test_e574b7)
 # QtCore (JSON do .cadmec) no PATH em tempo de execução.
 set_tests_properties(e57 e571 e574a PROPERTIES
     ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${QT6_INSTALL_PREFIX}/${QT6_INSTALL_BINS}")
 
-set_tests_properties(geometria step_roundtrip selecao_info documento esboco extrusao stl booleanas arcos_cantos2d acabamentos3d e56 e57 e571 e572 e5722 e5723 e574a e574b e574b3 e574b5 e574b6 PROPERTIES LABELS "core")
+set_tests_properties(geometria step_roundtrip selecao_info documento esboco extrusao stl booleanas arcos_cantos2d acabamentos3d e56 e57 e571 e572 e5722 e5723 e574a e574b e574b3 e574b5 e574b6 e574b7 PROPERTIES LABELS "core")
 
 # Formato .cadmec (QtCore, sem interface gráfica).
 qt_add_executable(test_arquivo_cadmec test_arquivo_cadmec.cpp)
