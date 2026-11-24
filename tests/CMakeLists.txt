@@ -111,11 +111,38 @@ target_compile_definitions(test_e574b8 PRIVATE
     CAD_E574B5_REFERENCE="${CMAKE_CURRENT_SOURCE_DIR}/dados/matlab_e574b5_ref.txt"
     CAD_MATLAB_REFERENCE_DIR="${PROJECT_SOURCE_DIR}/../Referencias_MED_MATLAB")
 add_test(NAME e574b8 COMMAND test_e574b8)
+# E5.7.4b.8c.3: testes de falha, cancelamento, concorrência e recuperação do SafeFileWriter (Win32),
+# somente em diretórios temporários exclusivos. test_e574b8c compila SafeFileWriter.cpp com o gancho
+# de injeção de falhas (CAD_SAFE_WRITER_FAULT_INJECTION) e NÃO liga cad_discretization (a biblioteca
+# de produção é compilada sem o gancho); test_e574b8c_producao executa os cenários sem injeção contra a
+# própria cad_discretization. Sem Qt.
+add_executable(test_e574b8c test_e574b8c.cpp TestCheck.h
+    ${PROJECT_SOURCE_DIR}/src/discretization/SafeFileWriter.h
+    ${PROJECT_SOURCE_DIR}/src/discretization/SafeFileWriter.cpp)
+target_include_directories(test_e574b8c PRIVATE ${PROJECT_SOURCE_DIR}/src)
+target_compile_definitions(test_e574b8c PRIVATE
+    CAD_SAFE_WRITER_FAULT_INJECTION
+    CAD_MATLAB_REFERENCE_DIR="${PROJECT_SOURCE_DIR}/../Referencias_MED_MATLAB")
+add_test(NAME e574b8c COMMAND test_e574b8c)
+add_executable(test_e574b8c_producao test_e574b8c.cpp TestCheck.h)
+target_link_libraries(test_e574b8c_producao PRIVATE cad_discretization)
+target_compile_definitions(test_e574b8c_producao PRIVATE
+    CAD_MATLAB_REFERENCE_DIR="${PROJECT_SOURCE_DIR}/../Referencias_MED_MATLAB")
+add_test(NAME e574b8c_producao COMMAND test_e574b8c_producao)
+set_tests_properties(e574b8c e574b8c_producao PROPERTIES TIMEOUT 300)
+# E5.7.4b.8c.4: exportação DEM-DYNA (composeDemDyna + writeFileSafely) com a cad_discretization de
+# produção, em diretório temporário exclusivo; DEM_DYNA.txt de referência somente lido. Sem Qt.
+add_executable(test_e574b8c4 test_e574b8c4.cpp TestCheck.h)
+target_link_libraries(test_e574b8c4 PRIVATE cad_discretization cad_dem)
+target_compile_definitions(test_e574b8c4 PRIVATE
+    CAD_MATLAB_REFERENCE_DIR="${PROJECT_SOURCE_DIR}/../Referencias_MED_MATLAB")
+add_test(NAME e574b8c4 COMMAND test_e574b8c4)
+set_tests_properties(e574b8c4 PROPERTIES TIMEOUT 300)
 # QtCore (JSON do .cadmec) no PATH em tempo de execução.
 set_tests_properties(e57 e571 e574a PROPERTIES
     ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${QT6_INSTALL_PREFIX}/${QT6_INSTALL_BINS}")
 
-set_tests_properties(geometria step_roundtrip selecao_info documento esboco extrusao stl booleanas arcos_cantos2d acabamentos3d e56 e57 e571 e572 e5722 e5723 e574a e574b e574b3 e574b5 e574b6 e574b7 e574b8 PROPERTIES LABELS "core")
+set_tests_properties(geometria step_roundtrip selecao_info documento esboco extrusao stl booleanas arcos_cantos2d acabamentos3d e56 e57 e571 e572 e5722 e5723 e574a e574b e574b3 e574b5 e574b6 e574b7 e574b8 e574b8c e574b8c_producao e574b8c4 PROPERTIES LABELS "core")
 
 # Formato .cadmec (QtCore, sem interface gráfica).
 qt_add_executable(test_arquivo_cadmec test_arquivo_cadmec.cpp)
